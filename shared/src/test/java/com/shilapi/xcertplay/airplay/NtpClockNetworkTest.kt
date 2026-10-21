@@ -150,7 +150,7 @@ class NtpClockNetworkTest {
         val sending = AtomicBoolean(false)
         val cancelledReceive = CountDownLatch(1)
         val repeatedCancellation = CountDownLatch(1)
-        override fun listen(local: NetworkEndpoint, backlog: Int): TcpListener = error("TCP forbidden")
+        override fun listen(local: NetworkEndpoint, backlog: Int, reuseAddress: Boolean): TcpListener = error("TCP forbidden")
         override fun connect(remote: NetworkEndpoint, deadlineMillis: Long): TcpStream = error("TCP forbidden")
         override fun bindUdp(local: NetworkEndpoint): UdpEndpoint {
             check(local.linkId == linkId && local.port == 0)

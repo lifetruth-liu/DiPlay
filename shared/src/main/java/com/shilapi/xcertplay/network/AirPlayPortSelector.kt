@@ -4,6 +4,7 @@ import java.net.BindException
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
+import com.shilapi.xcertplay.network.backend.*
 
 /**
  * Binds the AirPlay control listener, falling back when the preferred port is already taken.
@@ -15,6 +16,36 @@ import java.net.ServerSocket
 object AirPlayPortSelector {
     /** Ports tried, in order, after the preferred port; an ephemeral port is the last resort. */
     val FALLBACK_PORTS: IntRange = 7001..7010
+
+    /** Backend variant: every advertised family must bind the same actual port. */
+    fun bindAll(
+        network: SessionNetwork,
+        addresses: List<NetworkEndpoint>,
+        preferredPort: Int,
+        fallbackPorts: Iterable<Int> = FALLBACK_PORTS,
+        onFallback: (Int, Int) -> Unit = { _, _ -> },
+    ): List<TcpListener> {
+        require(addresses.isNotEmpty())
+        require(addresses.all { it.linkId == network.linkId })
+        val candidates = listOf(preferredPort) + fallbackPorts.filter { it != preferredPort } + List(4) { 0 }
+        for (candidate in candidates) {
+            val listeners = mutableListOf<TcpListener>()
+            try {
+                for (address in addresses.distinct()) {
+                    val port = listeners.firstOrNull()?.localEndpoint?.port ?: candidate
+                    listeners.add(network.listen(NetworkEndpoint(address.address, port, network.linkId)))
+                }
+                val port = listeners.first().localEndpoint.port
+                if (preferredPort != 0 && port != preferredPort) onFallback(preferredPort, port)
+                return listeners
+            } catch (error: Throwable) {
+                listeners.forEach { runCatching { it.close() }.exceptionOrNull()?.let(error::addSuppressed) }
+                if (error is BackendFailure && error.kind == BackendFailure.Kind.ADDRESS_CONFLICT) continue
+                throw error
+            }
+        }
+        throw BackendFailure(BackendFailure.Kind.ADDRESS_CONFLICT)
+    }
 
     /** Specific per-family listeners avoid relying on a platform's IPV6_V6ONLY default. */
     fun bindAll(

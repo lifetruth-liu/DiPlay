@@ -9,6 +9,7 @@ import java.net.DatagramSocket
 import java.net.Inet6Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.Socket
 import java.net.SocketAddress
 import java.net.SocketTimeoutException
 import java.nio.ByteBuffer
@@ -62,13 +63,13 @@ class SystemSessionNetwork(
         resource
     }
 
-    override fun listen(local: NetworkEndpoint, backlog: Int): TcpListener {
+    override fun listen(local: NetworkEndpoint, backlog: Int, reuseAddress: Boolean): TcpListener {
         require(backlog > 0)
         val address = socketAddress(local)
         val listener = own(Listener(ServerSocketChannel.open()))
         return try {
             listener.io {
-                listener.channel.socket().reuseAddress = true
+                listener.channel.socket().reuseAddress = reuseAddress
                 listener.channel.socket().bind(address, backlog)
                 listener.bound = endpoint(listener.channel.socket().localSocketAddress)
             }
@@ -92,6 +93,9 @@ class SystemSessionNetwork(
         } catch (error: Exception) { stream.close(); throw error }
     }
 
+    /** Explicit compatibility boundary for an existing system socket, never a backend fallback. */
+    fun adopt(socket: Socket): TcpStream = own(AdoptedStream(socket))
+
     override fun bindUdp(local: NetworkEndpoint): UdpEndpoint {
         val address = socketAddress(local)
         val udp = own(Datagram(DatagramSocket(null)))
@@ -110,7 +114,7 @@ class SystemSessionNetwork(
             closed = true
             resources.toList().also { resources.clear() }
         }
-        snapshot.forEach { it.close() }
+        closeAll(snapshot)
     }
 
     private abstract inner class Resource(val transport: java.io.Closeable) : java.io.Closeable {
@@ -136,6 +140,8 @@ class SystemSessionNetwork(
                 throw BackendFailure(kind, error)
             } catch (error: CancelledKeyException) {
                 throw BackendFailure(if (stopped.get()) BackendFailure.Kind.CANCELLED else BackendFailure.Kind.INTERNAL, error)
+            } catch (error: ClosedSelectorException) {
+                throw BackendFailure(if (stopped.get()) BackendFailure.Kind.CANCELLED else BackendFailure.Kind.INTERNAL, error)
             }
         }
 
@@ -157,15 +163,27 @@ class SystemSessionNetwork(
                         selector.selectedKeys().clear()
                     }
                 } finally {
-                    synchronized(waitLock) { waiters.remove(selector) }
+                    // Keep it registered with the owner until synchronous deregistration ends.
+                    synchronized(waitLock) {
+                        try { selector.close() } finally { waiters.remove(selector) }
+                    }
                 }
             }
         }
 
         override fun close() {
             if (!stopped.compareAndSet(false, true)) return
-            synchronized(waitLock) { waiters.forEach { it.wakeup() } }
-            try { transport.close() } finally { synchronized(lock) { resources.remove(this) } }
+            // Closing a registered NIO channel can defer its FD release until deregistration.
+            // Close the waiters synchronously so detach returns with the real port released,
+            // independently of when cancelled reader/accept threads are scheduled again.
+            try {
+                synchronized(waitLock) {
+                    val pending = waiters.toList()
+                    pending.forEach { it.wakeup() }
+                    closeAll(listOf(transport) + pending)
+                }
+            }
+            finally { synchronized(lock) { resources.remove(this) } }
         }
     }
 
@@ -209,6 +227,10 @@ class SystemSessionNetwork(
             remoteEndpoint = endpoint(channel.socket().remoteSocketAddress)
         }
 
+        override fun configure(options: TcpOptions) = io {
+            channel.socket().setSoLinger(options.resetOnClose, 0)
+        }
+
         override fun configureLiveness(diagnostic: (String) -> Unit) = io {
             TcpLiveness.configure(channel.socket(), diagnostic)
         }
@@ -239,6 +261,47 @@ class SystemSessionNetwork(
         override fun shutdownOutput() = writeOperation.run(0) { io { channel.socket().shutdownOutput() } }
     }
 
+    private inner class AdoptedStream(val socket: Socket) : Resource(socket), TcpStream {
+        override val localEndpoint get() = NetworkEndpoint(socket.localAddress?.address ?: ByteArray(4), socket.localPort.coerceAtLeast(0), linkId)
+        override val remoteEndpoint get() = NetworkEndpoint(socket.inetAddress?.address ?: ByteArray(4), socket.port.coerceAtLeast(0), linkId)
+        private val readOperation = EndpointOperation(clock)
+        private val writeOperation = EndpointOperation(clock)
+        override fun configure(options: TcpOptions) = io {
+            socket.tcpNoDelay = true
+            socket.keepAlive = true
+            socket.setSoLinger(options.resetOnClose, 0)
+        }
+        override fun configureLiveness(diagnostic: (String) -> Unit) = io { TcpLiveness.configure(socket, diagnostic) }
+        override fun read(bytes: ByteArray, offset: Int, length: Int, deadlineMillis: Long): Int = readOperation.run(deadlineMillis) {
+            range(bytes, offset, length)
+            io {
+                val remaining = Deadline.remainingMillis(deadlineMillis, clock)
+                if (length == 0) return@io 0
+                socket.soTimeout = minOf(remaining, Int.MAX_VALUE.toLong()).toInt()
+                try { socket.getInputStream().read(bytes, offset, length) }
+                catch (error: SocketTimeoutException) { throw BackendFailure(BackendFailure.Kind.TIMEOUT, error) }
+            }
+        }
+        override fun write(bytes: ByteArray, offset: Int, length: Int, deadlineMillis: Long) = writeOperation.run(deadlineMillis) {
+            range(bytes, offset, length)
+            io {
+                val remaining = Deadline.remainingMillis(deadlineMillis, clock)
+                val state = AtomicInteger(0)
+                val timeout = if (remaining == 0L) null else sendDeadlines.schedule({
+                    if (state.compareAndSet(0, 2)) close()
+                }, remaining, TimeUnit.MILLISECONDS)
+                try {
+                    socket.getOutputStream().write(bytes, offset, length)
+                    if (!state.compareAndSet(0, 1)) throw BackendFailure(BackendFailure.Kind.TIMEOUT)
+                } catch (error: IOException) {
+                    if (state.get() == 2) throw BackendFailure(BackendFailure.Kind.TIMEOUT, error)
+                    throw error
+                } finally { state.compareAndSet(0, 1); timeout?.cancel(false) }
+            }
+        }
+        override fun shutdownOutput() = writeOperation.run(0) { io { socket.shutdownOutput() } }
+    }
+
     private inner class Datagram(val socket: DatagramSocket) : Resource(socket), UdpEndpoint {
         lateinit var bound: NetworkEndpoint
         override val localEndpoint: NetworkEndpoint get() = bound
@@ -246,6 +309,12 @@ class SystemSessionNetwork(
         private val sendOperation = EndpointOperation(clock)
         // Maximum IP datagram, reused per endpoint so truncation always reports the wire length.
         private val receiveBuffer = ByteArray(65535)
+
+        override fun receiveBufferSize(requestedBytes: Int): Int = io {
+            require(requestedBytes >= 0)
+            if (requestedBytes > 0) socket.receiveBufferSize = requestedBytes
+            socket.receiveBufferSize
+        }
 
         override fun send(bytes: ByteArray, destination: NetworkEndpoint, deadlineMillis: Long) = sendOperation.run(deadlineMillis) {
             require(bytes.size <= 65527) { "UDP payload exceeds IPv6 maximum" }
@@ -288,6 +357,16 @@ class SystemSessionNetwork(
                 ReceivedDatagram(endpoint(packet.socketAddress), original, copied)
             }
         }
+    }
+
+    private fun closeAll(endpoints: Iterable<java.io.Closeable>) {
+        var failure: Throwable? = null
+        for (endpoint in endpoints) {
+            try { endpoint.close() } catch (error: Throwable) {
+                if (failure == null) failure = error else failure.addSuppressed(error)
+            }
+        }
+        failure?.let { throw it }
     }
 
     private fun range(bytes: ByteArray, offset: Int, length: Int) {

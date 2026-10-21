@@ -192,12 +192,14 @@ class CarPlayBonjourDualStackTest {
                 InetAddress.getByName("::1"), config.copy(port = 0), identity, PairingStore(), null,
                 object : AirPlaySessionListener {}, object : AirPlayMediaHandler {},
                 listOf(InetAddress.getByName("127.0.0.1"))))
-            val primary = ReflectionHelpers.getField<List<ServerSocket>>(service.host, "servers").first()
-            val extra = ReflectionHelpers.getField<List<ServerSocket>>(service.host, "servers").drop(1).single()
-            assertEquals(primary.localPort, extra.localPort)
+            val primary = ReflectionHelpers.getField<List<com.shilapi.xcertplay.network.backend.TcpListener>>(service.host, "servers").first()
+            val extra = ReflectionHelpers.getField<List<com.shilapi.xcertplay.network.backend.TcpListener>>(service.host, "servers").drop(1).single()
+            assertEquals(primary.localEndpoint.port, extra.localEndpoint.port)
             service.detach()
-            assertTrue(primary.isClosed)
-            assertTrue(extra.isClosed)
+            for (listener in listOf(primary, extra)) {
+                ServerSocket(listener.localEndpoint.port, 50,
+                    InetAddress.getByAddress(listener.localEndpoint.address)).use { assertTrue(it.isBound) }
+            }
             assertFalse(service.isAttached())
             service.detach()
         } finally { controller.destroy() }

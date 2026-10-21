@@ -1,11 +1,10 @@
 package com.shilapi.xcertplay.airplay
 
 import java.io.Closeable
+import com.shilapi.xcertplay.network.backend.*
+import com.shilapi.xcertplay.network.backend.system.EndpointOwner
 import java.io.OutputStream
 import java.net.InetAddress
-import java.net.InetSocketAddress
-import java.net.ServerSocket
-import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -19,28 +18,30 @@ import java.util.concurrent.atomic.AtomicBoolean
 class VideoSettingsChannel(
     private val readKey: ByteArray,
     private val writeKey: ByteArray,
+    network: SessionNetwork? = null,
     private val log: (String) -> Unit,
 ) : Closeable {
+    private val transport = EndpointOwner(network, "airplay-video-settings")
+    private val sessionNetwork get() = transport.network
     private val closed = AtomicBoolean(false)
-    private var server: ServerSocket? = null
-    private var socket: Socket? = null
+    private var server: TcpListener? = null
+    private var socket: TcpStream? = null
     private var readCounter = 0L
     private var writeCounter = 0L
 
     fun listen(bindAddress: InetAddress): Int {
-        val bound = ServerSocket().apply {
-            reuseAddress = true
-            bind(InetSocketAddress(bindAddress, 0))
-        }
+        val bound = transport.listen(sessionNetwork.endpoint(bindAddress, 0), reuseAddress = true)
         server = bound
         Thread({ accept(bound) }, "diplay-video-settings").apply { isDaemon = true }.start()
-        return bound.localPort
+        return bound.localEndpoint.port
     }
 
-    private fun accept(bound: ServerSocket) {
+    private fun accept(bound: TcpListener) {
         try {
-            val accepted = bound.accept()
+            val accepted = transport.accept(bound)
+            if (closed.get()) { accepted.close(); return }
             socket = accepted
+            if (closed.get()) { accepted.close(); return }
             log("video settings channel connected")
             run(accepted)
         } catch (error: Exception) {
@@ -50,9 +51,9 @@ class VideoSettingsChannel(
         }
     }
 
-    private fun run(sock: Socket) {
-        val input = sock.getInputStream()
-        val output = sock.getOutputStream()
+    private fun run(sock: TcpStream) {
+        val input = sock.inputStream()
+        val output = sock.outputStream()
         val buffer = ByteArray(16 * 1024)
         var ciphertext = ByteArray(0)
         var plaintext = ByteArray(0)
@@ -103,6 +104,7 @@ class VideoSettingsChannel(
         if (!closed.compareAndSet(false, true)) return
         runCatching { socket?.close() }
         runCatching { server?.close() }
+        transport.close()
     }
 
     private fun u32(b: ByteArray, o: Int) =

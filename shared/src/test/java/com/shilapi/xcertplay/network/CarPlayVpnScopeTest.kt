@@ -15,6 +15,7 @@ import com.shilapi.xcertplay.airplay.PairingStore
 import com.shilapi.xcertplay.transport.NcmUsbBridge
 import java.net.InetAddress
 import java.net.ServerSocket
+import java.net.Socket
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -73,15 +74,19 @@ class CarPlayVpnScopeTest {
     @Test fun rejectedVpnAttachPreservesAnUnrelatedHostAndDoesNotBlockReplacement() {
         withService { service ->
             val previous = attachHost()
-            val oldServer = ReflectionHelpers.getField<List<ServerSocket>>(host, "servers").first()
+            val oldPort = host.boundPort(previous)!!
             VpnScopeBoundary.allowFailure = PackageManager.NameNotFoundException("scope rejected")
             assertEquals(CarPlayVpnService.AttachResult.Failed("scope rejected"), attachWired(service))
             assertEquals(listOf("allow:${service.packageName}"), VpnScopeBoundary.calls)
             assertReleased(service)
-            assertFalse(oldServer.isClosed)
+            Socket(InetAddress.getLoopbackAddress(), oldPort).use { probe ->
+                probe.soTimeout = 3000
+                probe.getOutputStream().write("GET /info HTTP/1.1\r\n\r\n".toByteArray())
+                assertEquals("HTTP/1.1 200 OK", probe.getInputStream().bufferedReader().readLine())
+            }
             assertNotNull(host.boundPort(previous))
             val replacement = attachHost()
-            assertTrue(oldServer.isClosed)
+            ServerSocket(oldPort, 50, InetAddress.getLoopbackAddress()).use { assertTrue(it.isBound) }
             service.detach(owner)
             assertNotNull(host.boundPort(replacement))
         }

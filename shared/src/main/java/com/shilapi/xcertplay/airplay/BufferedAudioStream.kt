@@ -2,10 +2,10 @@ package com.shilapi.xcertplay.airplay
 
 import android.util.Log
 import java.io.Closeable
+import com.shilapi.xcertplay.network.backend.*
+import com.shilapi.xcertplay.network.backend.system.EndpointOwner
 import java.io.DataInputStream
 import java.math.BigInteger
-import java.net.ServerSocket
-import java.net.Socket
 import java.net.InetAddress
 import java.util.ArrayDeque
 import java.util.concurrent.atomic.AtomicBoolean
@@ -29,6 +29,7 @@ internal class BufferedAudioStream(
     private val nanoTime: () -> Long = System::nanoTime,
     private val pause: (Long) -> Unit = { Thread.sleep(it) },
     private val expectedPeer: InetAddress = InetAddress.getLoopbackAddress(),
+    network: SessionNetwork? = null,
 ) : Closeable {
     internal class Frame(val sequence: Int, val timestamp: Long, val rtp: ByteArray)
 
@@ -38,9 +39,11 @@ internal class BufferedAudioStream(
     private var cleanupStarted = false // guarded by lock; permits reentrant close without recursion
     @Volatile internal var outputCleanupComplete = false
         private set
-    private val server = ServerSocket(0)
-    private val boundPort = server.localPort
-    @Volatile private var client: Socket? = null
+    private val transport = EndpointOwner(network, "airplay-buffered", expectedPeer)
+    private val server = try { transport.listen(transport.network.wildcard(ipv6 = expectedPeer.address.size == 16)) }
+        catch (error: Throwable) { transport.close(); throw error }
+    private val boundPort = server.localEndpoint.port
+    @Volatile private var client: TcpStream? = null
     private val lock = Object()
     private val queue = ArrayDeque<Frame>()
     // Retain the small renderer preload until its estimated audible position passes it. A pause
@@ -74,14 +77,14 @@ internal class BufferedAudioStream(
     }
 
     private fun receive() {
-        var accepted: Socket? = null
+        var accepted: TcpStream? = null
         try {
             val socket = acceptPeer() ?: return
             accepted = socket
             // One stream has one TCP sender. Release the listening socket after ownership is set.
             server.close()
             log("Buffered audio: connected")
-            val input = DataInputStream(socket.getInputStream().buffered())
+            val input = DataInputStream(socket.inputStream().buffered())
             var failures = 0
             var receivedBytes = 0L
             var windowStart = nanoTime()
@@ -141,15 +144,15 @@ internal class BufferedAudioStream(
         }
     }
 
-    private fun acceptPeer(): Socket? {
+    private fun acceptPeer(): TcpStream? {
         while (!closed.get()) {
-            val socket = server.accept()
+            val socket = transport.accept(server)
             val accepted = synchronized(lock) {
                 if (closed.get()) {
                     runCatching { socket.close() }
                     return null
                 }
-                if (socket.inetAddress != expectedPeer) {
+                if (!socket.remoteEndpoint.address.contentEquals(expectedPeer.address) || socket.remoteEndpoint.linkId != transport.network.linkId) {
                     runCatching { socket.close() }
                     log("Buffered audio: rejected sender outside the control session")
                     false
@@ -307,6 +310,7 @@ internal class BufferedAudioStream(
     override fun close() {
         closed.set(true)
         runCatching { server.close() }
+        transport.close()
         synchronized(lock) {
             // A second external closer must wait for the first one's sink cleanup, rather
             // than return just because closed was set while a delivery callback was active.

@@ -3,6 +3,7 @@ package com.shilapi.xcertplay.network
 import com.shilapi.xcertplay.airplay.*
 import java.net.InetAddress
 import java.net.ServerSocket
+import com.shilapi.xcertplay.network.backend.*
 import java.net.Socket
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
@@ -45,12 +46,12 @@ class AirPlaySessionHostTest {
 
     @Test fun delayedFailureOfOldListenerCannotCloseOrNotifyReplacement() {
         val failures = LinkedBlockingQueue<() -> Unit>()
-        val bound = LinkedBlockingQueue<ServerSocket>()
+        val bound = LinkedBlockingQueue<TcpListener>()
         var oldNotified = false
         var newNotified = false
         AirPlaySessionHost(
-            bindListeners = { addresses, port ->
-                listOf(AirPlayPortSelector.bind(addresses.single(), port).also { bound.add(it) })
+            bindListeners = { network, addresses, port ->
+                AirPlayPortSelector.bindAll(network, addresses, port).also { bound.add(it.single()) }
             }, dispatchFailure = { failures.add(it) },
         ).use { host ->
             val old = attach(host) { oldNotified = true }

@@ -21,7 +21,7 @@ object Deadline {
 interface SessionNetwork : Closeable {
     val linkId: String
     val clock: MonotonicClock
-    fun listen(local: NetworkEndpoint, backlog: Int = 50): TcpListener
+    fun listen(local: NetworkEndpoint, backlog: Int = 50, reuseAddress: Boolean = false): TcpListener
     fun connect(remote: NetworkEndpoint, deadlineMillis: Long = 0): TcpStream
     fun bindUdp(local: NetworkEndpoint): UdpEndpoint
 }

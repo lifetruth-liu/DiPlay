@@ -13,4 +13,6 @@ interface UdpEndpoint : Closeable {
      */
     fun send(bytes: ByteArray, destination: NetworkEndpoint, deadlineMillis: Long = 0)
     fun receive(bytes: ByteArray, deadlineMillis: Long = 0): ReceivedDatagram
+    /** Returns the actual capacity, or zero when the backend has no configurable OS buffer. */
+    fun receiveBufferSize(requestedBytes: Int = 0): Int = 0
 }

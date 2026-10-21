@@ -6,29 +6,32 @@ import com.shilapi.xcertplay.mfi.MfiAuthenticator
 import java.io.Closeable
 import java.net.Inet6Address
 import java.net.InetAddress
-import java.net.ServerSocket
+import com.shilapi.xcertplay.network.backend.*
+import com.shilapi.xcertplay.network.backend.system.SystemSessionNetwork
+import com.shilapi.xcertplay.network.backend.system.systemIpv6ScopeId
 
 /**
  * Listener/session owner independent of Android services and VPN resources.
  * A lease identifies one attachment; stale teardown never closes a replacement.
- * The current system-socket boundary will be migrated to SessionNetwork separately.
+ * One attachment owns one network; its control sessions borrow it for every protocol channel.
  */
 class AirPlaySessionHost(
-    private val bindListeners: (List<InetAddress>, Int) -> List<ServerSocket> = { addresses, port ->
+    private val bindListeners: (SessionNetwork, List<NetworkEndpoint>, Int) -> List<TcpListener> = { network, addresses, port ->
         val fallback: (Int, Int) -> Unit = { busy, bound ->
             Log.w(TAG, "AirPlay port $busy is in use; listening on $bound instead")
         }
-        if (addresses.size == 1) listOf(AirPlayPortSelector.bind(addresses.single(), port, onFallback = fallback))
-        else AirPlayPortSelector.bindAll(addresses, port, onFallback = fallback)
+        AirPlayPortSelector.bindAll(network, addresses, port, onFallback = fallback)
     },
     private val dispatchFailure: (() -> Unit) -> Unit = { action ->
         Thread(action, "airplay-teardown").apply { isDaemon = true; start() }
     },
+    private val systemNetworkFactory: (Int) -> SessionNetwork = { scope -> SystemSessionNetwork("airplay-host", scope) },
 ) : Closeable {
     class Lease internal constructor()
 
     private data class Attachment(
         val lease: Lease,
+        val network: SessionNetwork,
         val config: AirPlayConfig,
         val identity: AirPlayIdentity,
         val pairings: PairingStore,
@@ -41,13 +44,14 @@ class AirPlaySessionHost(
 
     @Volatile private var attachment: Attachment? = null
     private var closed = false
-    private var servers = emptyList<ServerSocket>()
+    private var servers = emptyList<TcpListener>()
     private val sessions = mutableSetOf<AirPlaySession>()
 
     /**
      * The caller retains its transport and must generation-check [onFailure] before releasing it.
      * No VPN, USB, DNS discovery or transport readiness is required to prepare the listener.
      * [canAttach] is a nonblocking cancellation check, evaluated before replacing any listener.
+     * Ownership of [network] transfers after these checks; every accepted channel borrows it.
      */
     @Synchronized
     fun attach(
@@ -62,21 +66,28 @@ class AirPlaySessionHost(
         listenerIdentity: AirPlayListenerIdentity? = null,
         onFailure: (Throwable) -> Unit = {},
         canAttach: () -> Boolean = { true },
+        network: SessionNetwork? = null,
     ): Lease {
         check(!closed) { "AirPlay host is closed" }
         check(canAttach()) { "AirPlay attachment is cancelled" }
+        val addresses = listOf(bindAddress) + additionalBindAddresses
+        val systemScope = if (network == null) systemIpv6ScopeId(addresses) else 0
         releaseLocked()
-        val bound = bindListeners((listOf(bindAddress) + additionalBindAddresses).distinct(), config.port)
+        val sessionNetwork = network ?: systemNetworkFactory(systemScope)
+        val bound = try {
+            bindListeners(sessionNetwork, addresses.distinct()
+                .map { sessionNetwork.endpoint(it, config.port) }, config.port)
+        } catch (error: Throwable) { sessionNetwork.close(); throw error }
         try {
             require(bound.isNotEmpty()) { "No AirPlay listener" }
             val lease = Lease()
-            val current = Attachment(lease, config.copy(port = bound.first().localPort), identity,
+            val current = Attachment(lease, sessionNetwork, config.copy(port = bound.first().localEndpoint.port), identity,
                 pairings, mfi, listener, media, listenerIdentity, onFailure)
             servers = bound
             attachment = current
             bound.forEach { server ->
                 runCatching { listener.onDebugLog(
-                    "airplay listener ready family=${family(server.inetAddress)} port=${server.localPort}",
+                    "airplay listener ready family=${family(InetAddress.getByAddress(server.localEndpoint.address))} port=${server.localEndpoint.port}",
                 ) }
                 Thread({ acceptLoop(current, server) }, "airplay-accept").apply { isDaemon = true; start() }
             }
@@ -84,6 +95,7 @@ class AirPlaySessionHost(
         } catch (error: Throwable) {
             bound.forEach { server -> runCatching { server.close() }.exceptionOrNull()?.let(error::addSuppressed) }
             releaseLocked()
+            sessionNetwork.close()
             throw error
         }
     }
@@ -105,26 +117,24 @@ class AirPlaySessionHost(
     @Synchronized internal fun detachAll() = releaseLocked()
     @Synchronized override fun close() { closed = true; releaseLocked() }
 
-    private fun acceptLoop(current: Attachment, server: ServerSocket) {
+    private fun acceptLoop(current: Attachment, server: TcpListener) {
         try {
             while (attachment === current) {
                 val socket = server.accept()
                 val acceptedAtNanos = System.nanoTime()
                 var transferred = false
                 try {
-                    socket.tcpNoDelay = true
-                    socket.keepAlive = true
-                    socket.setSoLinger(true, 0)
+                    socket.configure(TcpOptions(resetOnClose = true))
                     val session = synchronized(this) {
                         if (attachment !== current || servers.none { it === server }) return
-                        val internalPeer = isInternalAirPlayPeer(socket.inetAddress, socket.localAddress)
+                        val internalPeer = isInternalAirPlayPeer(InetAddress.getByAddress(socket.remoteEndpoint.address), InetAddress.getByAddress(socket.localEndpoint.address))
                         current.listenerIdentity?.let { owner ->
                             current.listener.onTcpAccepted(AirPlayTcpAccepted(owner, internalPeer, acceptedAtNanos))
                         }
-                        runCatching { current.listener.onDebugLog("airplay TCP accepted family=${family(socket.inetAddress)}") }
+                        runCatching { current.listener.onDebugLog("airplay TCP accepted family=${family(InetAddress.getByAddress(socket.remoteEndpoint.address))}") }
                         // Listener callbacks can synchronously stop/restart the host.
                         if (attachment !== current) return
-                        AirPlaySession(socket, current.config, current.identity, current.pairings,
+                        AirPlaySession(current.network, socket, current.config, current.identity, current.pairings,
                             current.mfi, object : AirPlaySessionListener by current.listener {
                                 override fun onSessionActive(session: AirPlaySession) {
                                     if (attachment === current && (current.listenerIdentity == null || !internalPeer)) {
@@ -156,6 +166,7 @@ class AirPlaySessionHost(
 
     /** Invalidate first, then close a snapshot: callbacks may remove their own sessions. */
     private fun releaseLocked() {
+        val oldNetwork = attachment?.network
         attachment = null
         val oldServers = servers
         servers = emptyList()
@@ -163,6 +174,7 @@ class AirPlaySessionHost(
         val oldSessions = sessions.toList()
         sessions.clear()
         oldSessions.forEach { session -> runCatching { session.close() }.onFailure { Log.w(TAG, "AirPlay session close failed", it) } }
+        runCatching { oldNetwork?.close() }.onFailure { Log.w(TAG, "AirPlay network close failed", it) }
     }
 
     private fun family(address: InetAddress): String = if (address is Inet6Address) "IPv6" else "IPv4"

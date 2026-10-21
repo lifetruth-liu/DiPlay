@@ -88,7 +88,7 @@ class DashboardContentDeliveryTest {
     }
 
     private fun eventReady(phone: AirPlaySession, event: EventSocket = EventSocket()): EventSocket {
-        set(phone, "eventSocket", event)
+        set(phone, "eventSocket", (phone.network as com.shilapi.xcertplay.network.backend.system.SystemSessionNetwork).adopt(event))
         set(phone, "eventCipher", ControlCipher(ByteArray(32), ByteArray(32)))
         return event
     }

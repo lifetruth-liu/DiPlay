@@ -6,11 +6,90 @@ import java.util.concurrent.Callable
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import java.net.ServerSocket
+import java.net.InetAddress
+import java.net.Socket
+import java.io.IOException
+import java.io.DataInputStream
 import org.junit.Assert.*
 import org.junit.Test
 
 /** Real loopback traffic; no Android or native library substitutes. */
 class SessionNetworkContractTest {
+    @Test fun adoptedSystemSocketUsesEndpointFramingAndPreservesOwnership() {
+        ServerSocket(0, 50, InetAddress.getByName("127.0.0.1")).use { server ->
+            Socket(InetAddress.getByName("127.0.0.1"), server.localPort).use { phone ->
+                phone.soTimeout = 2000
+                val accepted = server.accept()
+                SystemSessionNetwork("adopted").use { network ->
+                    val stream = network.adopt(accepted)
+                    stream.configure(TcpOptions(resetOnClose = true))
+                    assertTrue(accepted.tcpNoDelay)
+                    assertTrue(accepted.keepAlive)
+                    assertEquals(0, accepted.soLinger)
+                    assertEquals(server.localPort, stream.localEndpoint.port)
+                    assertEquals(phone.localPort, stream.remoteEndpoint.port)
+                    phone.getOutputStream().write(255)
+                    assertEquals(255, stream.inputStream().read())
+                    assertEquals(0, stream.read(ByteArray(0)))
+                    stream.outputStream().write(byteArrayOf(9, 1, 2, 3, 9), 1, 3)
+                    val reply = ByteArray(3)
+                    DataInputStream(phone.getInputStream()).readFully(reply)
+                    assertArrayEquals(byteArrayOf(1, 2, 3), reply)
+                    phone.shutdownOutput()
+                    assertEquals(-1, stream.inputStream().read())
+                    assertEquals(BackendFailure.Kind.TIMEOUT, assertThrows(BackendFailure::class.java) {
+                        stream.read(ByteArray(1), deadlineMillis = network.clock.nowMillis())
+                    }.kind)
+                }
+                assertTrue(accepted.isClosed)
+            }
+        }
+    }
+
+    @Test fun closeFailureCannotSkipOtherOwnedEndpoints() {
+        val network = SystemSessionNetwork("close-failure")
+        val failure = IOException("close failed")
+        network.adopt(object : Socket() { override fun close() { throw failure } })
+        val other = Socket()
+        network.adopt(other)
+        assertSame(failure, assertThrows(IOException::class.java) { network.close() })
+        assertTrue(other.isClosed)
+        network.close()
+    }
+
+    @Test fun closeReleasesARegisteredListenerBeforeItsAcceptWorkerCanUnwind() {
+        val registered = CountDownLatch(1)
+        val resume = CountDownLatch(1)
+        val reads = AtomicInteger()
+        val executor = Executors.newSingleThreadExecutor()
+        val clock = MonotonicClock {
+            // The second deadline check occurs after the channel has registered its waiter.
+            if (reads.incrementAndGet() == 2) {
+                registered.countDown()
+                check(resume.await(3, TimeUnit.SECONDS))
+            }
+            1L
+        }
+        SystemSessionNetwork("release", clock = clock).use { network ->
+            try {
+                val listener = network.listen(address(network))
+                val port = listener.localEndpoint.port
+                val waiting = executor.submit<BackendFailure.Kind> {
+                    try { listener.accept(1000); error("accept must cancel") }
+                    catch (failure: BackendFailure) { failure.kind }
+                }
+                assertTrue(registered.await(3, TimeUnit.SECONDS))
+                listener.close()
+                // Cancellation must release the OS port before the blocked worker gets CPU again.
+                ServerSocket(port, 50, InetAddress.getByName("127.0.0.1")).use { assertTrue(it.isBound) }
+                resume.countDown()
+                assertEquals(BackendFailure.Kind.CANCELLED, waiting.get(3, TimeUnit.SECONDS))
+            } finally { resume.countDown(); executor.shutdownNow() }
+        }
+    }
+
     private fun address(network: SessionNetwork, port: Int = 0) =
         NetworkEndpoint(byteArrayOf(127, 0, 0, 1), port, network.linkId)
 

@@ -30,6 +30,18 @@
   注入后端由会话所有者关闭；默认系统后端由时钟对象关闭，并从主连接保留 IPv6 scope。
   绑定失败允许重试，关闭为终止态，关闭与绑定互斥。当前主会话仍显式走系统兼容入口，
   尚未完成全会话网络注入。
+- P1.2 协议迁移：公共宿主现在按 attachment 创建并拥有 `SessionNetwork`，
+  控制会话借用网络，全部主控制、事件、保活、媒体、NTP 与麦克风端点显式注入。
+  主连接真实 peer/local 元数据来自端点，不使用回环代理。
+  旧 Socket 构造通过系统适配器 `adopt` 保留兼容；协议业务不直接调用系统收发。
+  监听端口回退同时清理已成功的另一地址族，iAP2/SETUP 使用实际端口。
+  系统 TCP 保活及 abortive close、UDP 音乐缓冲均作为后端操作保留。
+  录音线程只调用端点发送，不运行栈核心。
+  `EndpointOwner` 隔离借用网络的通道资源，关闭后拒绝迟到的 bind/accept 发布；
+  iAP 重连结束后移除旧连接引用。主控制初始化失败同样走统一关闭路径。
+  独立审查修正 IPv4 首选时丢失次要 IPv6 scope：系统入口从完整原始地址集合
+  校验唯一非零 scope，再去重；跨接口地址在替换旧 attachment 前拒绝。
+  注入网络不读取系统接口索引。当前仍仅启用系统后端。
 
 ## 运行证据
 
@@ -61,6 +73,19 @@
 | 请求/回复重叠发送回归 | exit 1，6 项中 1 项失败；独立审查发现同方向重叠违反 UDP 合同 | `%TEMP%/diplay-ntp-overlap-red.log` |
 | 网络所有者先取消时钟端点 | exit 1，8 项中 1 项失败，取消后接收忙循环；修正后 8 项全部通过 | `%TEMP%/diplay-ntp-owner-red.log` / `diplay-ntp-complete-green.log` |
 | 时钟迁移最终完整 CI | exit 0，BUILD SUCCESSFUL，8m17s；shared 1675、common 1578、home 6 项，0 失败、0 跳过 | `%TEMP%/diplay-lwip-timing-final-ci.log` |
+| 虚拟主控制 / 全媒体 SETUP 首次合同 | exit 1，缺少网络/端点构造入口；实现后通过 | `%TEMP%/diplay-protocol-red.log` / `diplay-protocol-first.log` |
+| 宿主 / 系统端点回归 | 16 项中 1 项关闭后重绑失败；显式地址复用选项保留旧配置后定向通过，完整 CI 又暴露 FD 注销竞态，见后续确定性回归 | `%TEMP%/diplay-protocol-integration.log` / `diplay-protocol-integration2.log` |
+| 控制初始化失败回归 | 4 项中 1 项失败，健康检测异常未关闭 stream；移入统一 try/finally 后通过 | `%TEMP%/diplay-protocol-init-red.log` |
+| 首轮媒体回归 | 113 项中 7 项 BufferedAudioSessionTest 失败，旧 fixture 只提供 remoteSocketAddress；兼容入口恢复元数据读取后通过 | `%TEMP%/diplay-protocol-channels.log` / `diplay-protocol-channels2.log` |
+| 关闭 / 麦克风虚拟发送 | 6 项中 2 项失败，关闭后重建端点及麦克风绕过网络；修正后通过 | `%TEMP%/diplay-protocol-microphone-owner-red.log` |
+| 双栈 scope 首次合同 | exit 1，缺少完整地址集合的 scope 选择；实现后通过 | `%TEMP%/diplay-protocol-scope-red.log` |
+| shared 扩展定向回归 | exit 0，25s，包括全协议注入、迟到 bind/accept、scope、网络合同、缓冲音频、仪表和麦克风 | `%TEMP%/diplay-protocol-final-focused.log` |
+| common 定向回归 | exit 0，27s，Bonjour 双栈、仪表内容和普通服务控制器 | `%TEMP%/diplay-protocol-common-focused.log` |
+| 协议迁移第一轮完整 CI | shared 1688 项中 3 项失败：关闭后端口未释放、VPN fixture 两 SDK 仍把端点强转 ServerSocket；发现失败后取消剩余构建 | `%TEMP%/diplay-lwip-protocol-ci.log` |
+| selector 注册后关闭确定性回归 | 11 项中 1 项失败：暂停 accept worker 后 close 返回，但 OS 端口仍占用；同步关闭全部 selector 后通过 | `%TEMP%/diplay-protocol-selector-red.log` / `diplay-protocol-selector-green.log` |
+| 批量关闭异常回归 | 13 项中 1 项失败：首个 close 异常使其余端点未关闭；聚合异常并继续关闭后通过 | `%TEMP%/diplay-protocol-close-errors-red.log` |
+| 最终网络 / 宿主 / VPN / 注入回归 | exit 0，11s；含系统 Socket adopt 的元数据、选项、流适配、FIN、deadline 与所有权 | `%TEMP%/diplay-protocol-final-cancel-green.log` |
+| 协议迁移最终完整 CI | exit 0，BUILD SUCCESSFUL，7m35s；shared 1691、common 1578、home 6 项，0 失败、0 跳过 | `%TEMP%/diplay-lwip-protocol-final-ci.log` |
 
 服务拆分验证树基于 `20d2a2cf`，源代码随后冻结为 `c897763e`。生成的
 `mobile/build/outputs/apk/debug/mobile-debug.apk` SHA-256：
@@ -74,6 +99,14 @@
 `125dd2b52ba87ebabefc8ff2f1861e5a18edbd9f628e2e219d375cefe558ac1b`。
 没有设备时仅验证系统 IPv6 回环和虚拟端点，不把 scope 传递修正视为真机验收。
 
+协议迁移验证树基于 `b73a2c22`。健康检测初始化异常、迟到端点、双栈 scope、
+NIO 同步关闭、批量关闭异常等回归均已修正；独立源码复审未发现遗留实质问题。
+双栈服务测试用实际重绑端口证明 listener 释放，不把并发 accept 抛错作为关闭证据。
+最后一轮完整 CI 对应冻结的生产源码及最终测试断言。
+本批 `mobile-debug.apk` SHA-256：
+`3204b10bfb8eb06bc23f5b330e353603670f7f07981e0f6bb6df6e5b75197f70`。
+这仍是系统后端构建，不是 lwIP 可用性或性能验收。
+
 完整 CI 命令与 AGENTS.md 相同，后续执行增加 `--stacktrace --max-workers=2`，
 避免同时执行多组 Gradle 构建造成调度压力。首次 CI 失败没有通过改变既有测试断言掩盖。
 
@@ -83,9 +116,17 @@
 
 P1.1 仍需补齐 RST、真实 IPv6 scope、初始化/关闭竞态与完整 T01–T08
 两后端共用运行器等覆盖；IPv4/IPv6 数据报各自的最大长度边界也需补测。
-公共宿主与普通服务已接入生产控制器；P1.2 仍需把 AirPlay/媒体的系统 Socket
-边界改为显式注入 SessionNetwork、迁移健康检测并补齐协商与全通道契约。
-P2–P7 的 native 栈、NCM 原型、JNI、全通道迁移、选择设置及发布均未交付。
+公共宿主与普通服务已接入生产控制器；P1.2 把 AirPlay/媒体的系统 Socket
+边界改为显式注入 SessionNetwork 的源码工作已完成，仍需补齐各变体的全通道契约
+与设备基线比较，不能仅凭本批虚拟协商测试通过 G1。
+P2–P7 的 native 栈、NCM 原型、JNI、native 端点联调、选择设置及发布均未交付。
+
+后续宿主工具预检：Windows 的 Python cmake 包内真实二进制为 CMake 3.15.3，
+PATH 上的启动器不能作为可用性证据；缓存 lwIP archive 再次核对 SHA-256 一致。
+现有 Ubuntu-20.04 是 WSL 1，GCC 9.4.0 可运行，但未安装 Linux CMake，
+`/dev/net/tun` 不存在，`unshare -n true` 报 Permission denied。
+因此该环境暂不能提供计划所需的 Linux TAP/veth/netns 验收，不能把确定性帧测试
+或 Windows 回环测试替代这项证据；可继续独立实现宿主 harness 与 Android 构建。
 
 用户确认当前没有设备或报告；`adb devices -l` 也未发现设备。
 G0/G1 的真机条件未通过，后续可推进独立接口和宿主实验，不能跳过阶段门槛或
