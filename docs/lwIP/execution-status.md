@@ -25,6 +25,11 @@
   服务销毁拒绝迟到 attach；控制器关闭取消待完成绑定、拒绝迟到 binder，
   服务意外断开先报告失败再清理控制器。原 VPN 服务中的无线入口已删除。
   原 TCP accept / Bonjour 双栈回归迁至普通服务；协议仍是原系统 Socket。
+- P1.2 时钟通道迁移：`NtpClock` 使用 `SessionNetwork` / `UdpEndpoint`，
+  端口取自端点实际绑定结果，保留原 NTP 计算；请求和回复串行发送，截断包不解析。
+  注入后端由会话所有者关闭；默认系统后端由时钟对象关闭，并从主连接保留 IPv6 scope。
+  绑定失败允许重试，关闭为终止态，关闭与绑定互斥。当前主会话仍显式走系统兼容入口，
+  尚未完成全会话网络注入。
 
 ## 运行证据
 
@@ -50,14 +55,26 @@
 | 销毁 VPN 服务后迟到 binder | exit 1，仍调用 establish；增加销毁检查后通过 | `%TEMP%/diplay-lwip-vpn-destroyed-red.log` |
 | 取消 attach 不应覆盖其他连接 | exit 1，2 项失败；Owner 取消标记及宿主替换前检查修正 | `%TEMP%/diplay-lwip-host-cancel-red.log` |
 | 宿主 / 服务 / 原网络回归最终定向测试 | exit 0，35 项通过，13s | `%TEMP%/diplay-lwip-host-shared-complete.log` |
-| 本批完整 CI | exit 0，BUILD SUCCESSFUL，6m37s；shared 1667、common 1578、home 6 项，0 失败、0 跳过 | `%TEMP%/diplay-lwip-host-ci.log` |
+| 服务拆分完整 CI | exit 0，BUILD SUCCESSFUL，6m37s；shared 1667、common 1578、home 6 项，0 失败、0 跳过 | `%TEMP%/diplay-lwip-host-ci.log` |
+| 时钟端点注入首次合同 | exit 1，缺少注入构造；实现后定向测试通过 | `%TEMP%/diplay-ntp-red.log` / `diplay-ntp-green.log` |
+| 时钟关闭终止态 | exit 1，关闭后仍可创建端点；增加终止态后通过 | `%TEMP%/diplay-ntp-lifecycle-red.log` |
+| 请求/回复重叠发送回归 | exit 1，6 项中 1 项失败；独立审查发现同方向重叠违反 UDP 合同 | `%TEMP%/diplay-ntp-overlap-red.log` |
+| 网络所有者先取消时钟端点 | exit 1，8 项中 1 项失败，取消后接收忙循环；修正后 8 项全部通过 | `%TEMP%/diplay-ntp-owner-red.log` / `diplay-ntp-complete-green.log` |
+| 时钟迁移最终完整 CI | exit 0，BUILD SUCCESSFUL，8m17s；shared 1675、common 1578、home 6 项，0 失败、0 跳过 | `%TEMP%/diplay-lwip-timing-final-ci.log` |
 
-本批验证树基于 `20d2a2cf`，源代码随后冻结为服务拆分提交。生成的
+服务拆分验证树基于 `20d2a2cf`，源代码随后冻结为 `c897763e`。生成的
 `mobile/build/outputs/apk/debug/mobile-debug.apk` SHA-256：
 `6065bd7699b81dbdf33d5b1d45d66e32936ba55f093554832368aa06567db33a`。
 此 APK 仅有构建证据，没有设备安装或媒体性能证据。
 
-完整 CI 命令与 AGENTS.md 相同，最后两次增加 `--stacktrace --max-workers=2`，
+时钟通道验证树基于 `c897763e`。独立审查发现的 scope 丢失及发送重叠已修正，
+增量复审未发现新的实质问题。发现所有者先取消端点的忙循环后，取消了当时尚未
+结束的 CI，先执行红灯回归再修正；最终完整 CI 对应冻结后的全部源码。
+本批 `mobile-debug.apk` SHA-256：
+`125dd2b52ba87ebabefc8ff2f1861e5a18edbd9f628e2e219d375cefe558ac1b`。
+没有设备时仅验证系统 IPv6 回环和虚拟端点，不把 scope 传递修正视为真机验收。
+
+完整 CI 命令与 AGENTS.md 相同，后续执行增加 `--stacktrace --max-workers=2`，
 避免同时执行多组 Gradle 构建造成调度压力。首次 CI 失败没有通过改变既有测试断言掩盖。
 
 ## 尚未完成

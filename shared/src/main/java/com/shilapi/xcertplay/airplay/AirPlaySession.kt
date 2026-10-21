@@ -101,7 +101,7 @@ class AirPlaySession(
     private val touchSendFailureLogged = AtomicBoolean(false)
     // Only the controller's single touch thread calls sendTouch.
     private val touchSlots = AirPlayTouchSlots(AirPlayHid.TOUCH_CONTACTS)
-    private val ntp = NtpClock()
+    private val ntp = NtpClock(systemPeer = socket.inetAddress)
     private var keepAliveSocket: DatagramSocket? = null
     private var keepAliveThread: Thread? = null
     private val eventWriteLock = Any()
