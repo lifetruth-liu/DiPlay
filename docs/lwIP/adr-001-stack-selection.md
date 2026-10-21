@@ -28,7 +28,9 @@ TCP 32、UDP 32、listener 16、输入/输出帧队列各 512 KiB、命令 1024�
 
 ## 未解决条件
 
-尚未完成 CVE/上游修复审计、配置编译、Ethernet fixture、Linux 互通、四 ABI
-加载、sanitizer、NCM 原型和低配 ARM 性能验证。ZIP 校验只用于固定已取得的工件，
-本次未执行 GPG 签名验证。后续依赖引入需保留上游 COPYING，记录本地补丁和漏洞审计。
+初次决策时尚未完成配置编译、Ethernet fixture、内核互通、加载及sanitizer；
+后续交付见[实施记录](execution-status.md)。2026-10-22已验证ZIP detached签名，
+但[上游审计快照](upstream-audit.md)发现启用路径上的修复尚未闭环，不能据此
+通过安全审计。实际NCM、低配ARM性能与设备门槛仍未覆盖。后续回补需保留
+上游COPYING，记录精确补丁和原始/补后完整性信息。
 若原型失败，保留证据并停止扩大生产迁移，不将候选版本设为默认后端。

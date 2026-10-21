@@ -14,7 +14,15 @@ select this backend yet.
 - Checked on: 2026-10-21 using `git ls-remote` and PowerShell `Get-FileHash -Algorithm SHA256`.
 - License: the archive's `lwip-2.2.1/COPYING` contains the three-clause BSD terms;
   retain it unchanged when vendoring source and reproduce it in binary notices.
-- Local patches: none. Signature verification and security-fix audit: not yet performed.
+- Local patches: none. On 2026-10-22 the ZIP detached signature was verified with
+  fingerprint `746BEB8E56372EB695EA02E71D6B61C1B84299F5`, anchored to the maintainer's
+  Savannah account key. GPG returned GOODSIG/VALIDSIG; owner trust remains undefined.
+  The annotated Git tag itself is unsigned. Signature SHA-256:
+  `e934e3c4d0fd4b6ac213db43d163707942184df6df8784c0f084ed5d95532a18`.
+- Security review is **not passed**: enabled TCP/NDP/IPv6 reassembly/PMTU paths
+  have relevant post-release fixes still requiring regression tests and backports.
+  See [audit snapshot](../../../../../docs/lwIP/upstream-audit.md) for the exact
+  upstream review head, configuration applicability and open work.
 
 Build inputs are vendored under `third_party/lwip/`: the complete `src/` tree and
 COPYING, README, FILES, CHANGELOG and UPGRADING (314 unchanged files). Builds do

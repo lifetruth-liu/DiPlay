@@ -447,3 +447,37 @@ APK四ABI/16KiB/许可证检查exit0：`diplay-wire-apk-final.log`；产品APK�
 `54677a220cff6e9fa79ee1c7984212bc38cdea2c01282a7181b1de8adc918359`。
 公开树检查、staged diff检查通过。只读审查未发现实质问题，未运行测试。
 UDP故障归因、双向随机故障、长时负载、实际NCM/ARM以及G0/G1/G2仍未验收。
+
+## P0.2 发布签名与上游修复审计快照
+
+本批基于 `d58c2f15`，只增加审计证据与明确待修复项，没有修改vendor/产品代码。
+从官方下载目录取得310字节ZIP detached signature，SHA-256为
+`e934e3c4d0fd4b6ac213db43d163707942184df6df8784c0f084ed5d95532a18`。
+维护者Savannah账号指向的公钥指纹
+`746BEB8E56372EB695EA02E71D6B61C1B84299F5`与签名一致。隔离GPG home验证既有
+ZIP exit0，GOODSIG/VALIDSIG：`%TEMP%/diplay-lwip-signature-verify.log`。
+owner trust保持undefined；未向用户GPG keyring导入，也未设置owner trust。
+ZIP本体digest再次核对与固定值一致。Git annotated tag正文无签名，不称签名tag。
+初次从NTFS home运行list-packets的权限警告后，正式verify改用WSL文件系统的隔离目录。
+
+官方Git完整克隆至ignored build/lwip-upstream-audit，clone exit0：
+`diplay-upstream-clone.log`；审计HEAD=d08f4773edd0182b7910fc8f046eed82ffcd67c9。
+tag..HEAD当前core/ethernet源范围16项变更保存于
+build/reports/lwip/upstream-core-changes.txt。发现TCP选项长度、IPv6重组清理、
+NDP选项依赖链与PMTU最小值等启用路径修复，尚未建立全部回归或回补；
+安全审计明确未通过。完整条目、来源及后续回补要求见[上游审计](upstream-audit.md)。
+
+实际四ABI stack archive各30个object，无mqtt/snmp/smtp/lowpan/ppp/zepif成员，
+对象清单build/reports/lwip/audit-objects-*.txt。相关CVE/SMTP修复已逐项说明配置适用性，
+不把模块未链接写成原源码已修复，也不认为这是完整漏洞扫描。
+公开CNA/CISA记录和官方commit作为来源；直接网页有403/抓取限制时保留官方Git/JSON
+及实际下载证据，不据第三方文章宣称已修复或不受影响。
+
+本批完整九项Android CI exit0，2s（增量复用）：`diplay-upstream-audit-ci.log`。
+source清单与APK四ABI/16KiB/许可证检查exit0：
+`diplay-upstream-source-verification.log` / `diplay-upstream-audit-apk.log`。
+产品APK未变，SHA-256仍为
+`54677a220cff6e9fa79ee1c7984212bc38cdea2c01282a7181b1de8adc918359`。
+公开树检查通过。设备G0/G1/G2仍未通过；启用路径安全回补也成为明确待完成项。
+
+只读复审核对16项变更、CNA记录及签名trust表述，未发现虚假闭环；审查者未重跑验证。staged diff检查通过。
