@@ -18,6 +18,13 @@
   写入背压与恢复、同方向重叠拒绝、UDP 并发收发。
 - 独立代码审查发现并修正锁等待越过 deadline、空 UDP 发送结果歧义及 Android 7
   channel adaptor 双向阻塞问题；复审没有发现此基础交付的剩余阻塞问题。
+- P1.2 宿主拆分：`AirPlaySessionHost` 接管主控制监听、端口回退、会话集合和
+  双栈 accept；普通 `CarPlaySessionService` 持有宿主，无线不再绑定 VPN 服务。
+  有线 VPN 注入公共宿主，保留 TUN、scope 查找、应用 allowlist 和 NCM bridge。
+  关闭使用独立的控制器 Owner 和宿主 Lease，旧清理不能关闭替换监听。
+  服务销毁拒绝迟到 attach；控制器关闭取消待完成绑定、拒绝迟到 binder，
+  服务意外断开先报告失败再清理控制器。原 VPN 服务中的无线入口已删除。
+  原 TCP accept / Bonjour 双栈回归迁至普通服务；协议仍是原系统 Socket。
 
 ## 运行证据
 
@@ -36,6 +43,19 @@
 | 同名会话隔离回归（旧实现） | exit 1，同名会话身份相同，符合红灯预期 | `%TEMP%/diplay-lwip-identity-red.log` |
 | 修正会话身份后的完整 CI | exit 0，BUILD SUCCESSFUL，7m02s；shared 1655、common 1575、home 6 项，0 失败、0 跳过 | `%TEMP%/diplay-lwip-ci-identity.log` |
 | 公开树凭据检查 | exit 0 | `python scripts/check_public_tree.py` |
+| 新宿主 / 普通服务首次合同 | exit 1，缺少 Host/Service 类型；实现后 exit 0 | `%TEMP%/diplay-lwip-host-red.log` / `diplay-lwip-host-green.log` |
+| 关闭后迟到 host attach | exit 1；修正终止态后通过 | `%TEMP%/diplay-lwip-host-integration2.log` |
+| 控制器服务绑定合同首次运行 | 13 项中 2 项失败：关闭未取消等待、意外断开未清理 | `%TEMP%/diplay-lwip-service-controller-red.log` |
+| 普通服务 / 无线启动 / Bonjour 回归 | exit 0，13 项通过，9s | `%TEMP%/diplay-lwip-service-controller-final.log` |
+| 销毁 VPN 服务后迟到 binder | exit 1，仍调用 establish；增加销毁检查后通过 | `%TEMP%/diplay-lwip-vpn-destroyed-red.log` |
+| 取消 attach 不应覆盖其他连接 | exit 1，2 项失败；Owner 取消标记及宿主替换前检查修正 | `%TEMP%/diplay-lwip-host-cancel-red.log` |
+| 宿主 / 服务 / 原网络回归最终定向测试 | exit 0，35 项通过，13s | `%TEMP%/diplay-lwip-host-shared-complete.log` |
+| 本批完整 CI | exit 0，BUILD SUCCESSFUL，6m37s；shared 1667、common 1578、home 6 项，0 失败、0 跳过 | `%TEMP%/diplay-lwip-host-ci.log` |
+
+本批验证树基于 `20d2a2cf`，源代码随后冻结为服务拆分提交。生成的
+`mobile/build/outputs/apk/debug/mobile-debug.apk` SHA-256：
+`6065bd7699b81dbdf33d5b1d45d66e32936ba55f093554832368aa06567db33a`。
+此 APK 仅有构建证据，没有设备安装或媒体性能证据。
 
 完整 CI 命令与 AGENTS.md 相同，最后两次增加 `--stacktrace --max-workers=2`，
 避免同时执行多组 Gradle 构建造成调度压力。首次 CI 失败没有通过改变既有测试断言掩盖。
@@ -46,9 +66,11 @@
 
 P1.1 仍需补齐 RST、真实 IPv6 scope、初始化/关闭竞态与完整 T01–T08
 两后端共用运行器等覆盖；IPv4/IPv6 数据报各自的最大长度边界也需补测。
-现有生产 Socket 调用尚未迁移，P1.2 公共宿主与服务拆分尚未开始。
+公共宿主与普通服务已接入生产控制器；P1.2 仍需把 AirPlay/媒体的系统 Socket
+边界改为显式注入 SessionNetwork、迁移健康检测并补齐协商与全通道契约。
 P2–P7 的 native 栈、NCM 原型、JNI、全通道迁移、选择设置及发布均未交付。
 
 用户确认当前没有设备或报告；`adb devices -l` 也未发现设备。
 G0/G1 的真机条件未通过，后续可推进独立接口和宿主实验，不能跳过阶段门槛或
-声称实际有线 CarPlay 已能脱离 VPN。原默认路径和生产入口保持原样。
+声称实际有线 CarPlay 已能脱离 VPN。当前仍使用系统网络和原有线 VPN，
+没有用户态启动开关；无线会话宿主已迁至普通服务。

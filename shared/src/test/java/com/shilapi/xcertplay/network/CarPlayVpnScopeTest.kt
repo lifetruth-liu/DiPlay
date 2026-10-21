@@ -15,10 +15,10 @@ import com.shilapi.xcertplay.airplay.PairingStore
 import com.shilapi.xcertplay.transport.NcmUsbBridge
 import java.net.InetAddress
 import java.net.ServerSocket
-import java.util.concurrent.atomic.AtomicBoolean
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -36,6 +36,8 @@ import org.robolectric.util.ReflectionHelpers.ClassParameter
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28, 33], manifest = Config.NONE, shadows = [VpnScopeBuilderShadow::class])
 class CarPlayVpnScopeTest {
+    private val host = AirPlaySessionHost()
+    private val owner = CarPlayVpnService.Owner()
     @Before fun resetVpnBoundary() { VpnScopeBoundary.reset() }
 
     @Test fun allowlistRejectionNeverEstablishesAnUnrestrictedTunnel() {
@@ -68,49 +70,88 @@ class CarPlayVpnScopeTest {
         }
     }
 
-    @Test fun rejectedWiredReplacementClosesWirelessListenerAndAllowsFreshWirelessAttach() {
+    @Test fun rejectedVpnAttachPreservesAnUnrelatedHostAndDoesNotBlockReplacement() {
         withService { service ->
-            assertEquals(CarPlayVpnService.AttachResult.Started, attachWireless(service))
-            assertTrue(service.isAttached())
-            assertTrue(service.boundPort()!! > 0)
-            assertTrue("Wireless must not establish a VPN", VpnScopeBoundary.calls.isEmpty())
-            val oldServer = ReflectionHelpers.getField<ServerSocket>(service, "serverSocket")
-
+            val previous = attachHost()
+            val oldServer = ReflectionHelpers.getField<List<ServerSocket>>(host, "servers").first()
             VpnScopeBoundary.allowFailure = PackageManager.NameNotFoundException("scope rejected")
             assertEquals(CarPlayVpnService.AttachResult.Failed("scope rejected"), attachWired(service))
-            assertTrue("Replacement releases the previous listener", oldServer.isClosed)
             assertEquals(listOf("allow:${service.packageName}"), VpnScopeBoundary.calls)
             assertReleased(service)
+            assertFalse(oldServer.isClosed)
+            assertNotNull(host.boundPort(previous))
+            val replacement = attachHost()
+            assertTrue(oldServer.isClosed)
+            service.detach(owner)
+            assertNotNull(host.boundPort(replacement))
+        }
+    }
 
-            assertEquals(CarPlayVpnService.AttachResult.Started, attachWireless(service))
-            assertTrue(service.isAttached())
-            val newServer = ReflectionHelpers.getField<ServerSocket>(service, "serverSocket")
-            service.detach()
-            service.detach()
-            assertTrue(newServer.isClosed)
+    @Test fun staleControllerAndStaleHostLeaseCannotDetachOrReadReplacement() {
+        withService { service ->
+            val currentOwner = CarPlayVpnService.Owner()
+            val lease = attachHost()
+            ReflectionHelpers.setField(service, "attachmentOwner", currentOwner)
+            ReflectionHelpers.setField(service, "sessionHost", host)
+            ReflectionHelpers.setField(service, "hostLease", lease)
+            assertTrue(service.isAttached(currentOwner))
+            service.detach(owner)
+            assertNull(service.boundPort(owner))
+            assertFalse(service.isAttached(owner))
+            assertTrue(service.isAttached(currentOwner))
+            val replacement = attachHost()
+            service.detach(currentOwner)
+            assertNotNull(host.boundPort(replacement))
             assertReleased(service)
+        }
+    }
+
+    @Test fun destroyedVpnServiceRejectsSavedBinderWithoutEstablishingAnotherTunnel() {
+        val lifecycle = Robolectric.buildService(CarPlayVpnService::class.java).create()
+        val saved = lifecycle.get()
+        lifecycle.destroy()
+        try {
+            val replacement = attachHost()
+            assertTrue(attachWired(saved) is CarPlayVpnService.AttachResult.Failed)
+            assertTrue("Destroyed service must not establish another VPN", VpnScopeBoundary.calls.isEmpty())
+            assertNotNull(host.boundPort(replacement))
+        } finally { host.close() }
+    }
+
+    @Test fun cancelledControllerCannotReplaceAnotherControllerOrEstablishATunnel() {
+        withService { service ->
+            val currentOwner = CarPlayVpnService.Owner()
+            val lease = attachHost()
+            ReflectionHelpers.setField(service, "attachmentOwner", currentOwner)
+            ReflectionHelpers.setField(service, "sessionHost", host)
+            ReflectionHelpers.setField(service, "hostLease", lease)
+            owner.cancel()
+            assertTrue(attachWired(service) is CarPlayVpnService.AttachResult.Failed)
+            assertTrue(VpnScopeBoundary.calls.isEmpty())
+            assertTrue(service.isAttached(currentOwner))
+            assertNotNull(host.boundPort(lease))
         }
     }
 
     private fun withService(check: (CarPlayVpnService) -> Unit) {
         val controller = Robolectric.buildService(CarPlayVpnService::class.java).create()
-        try { check(controller.get()) } finally { controller.destroy() }
+        try { check(controller.get()) } finally { controller.destroy(); host.close() }
     }
 
     private fun attachWired(service: CarPlayVpnService): CarPlayVpnService.AttachResult =
         service.attach(ncm(), "fe80::1234", ByteArray(6), config, identity, PairingStore(), null,
-            object : AirPlaySessionListener {}, object : AirPlayMediaHandler {})
+            object : AirPlaySessionListener {}, object : AirPlayMediaHandler {}, host = host, owner = owner)
 
-    private fun attachWireless(service: CarPlayVpnService): CarPlayVpnService.AttachResult =
-        service.attachWireless(InetAddress.getLoopbackAddress(), config, identity, PairingStore(), null,
+    private fun attachHost(): AirPlaySessionHost.Lease =
+        host.attach(InetAddress.getLoopbackAddress(), config, identity, PairingStore(), null,
             object : AirPlaySessionListener {}, object : AirPlayMediaHandler {})
 
     private fun assertReleased(service: CarPlayVpnService) {
-        assertFalse(service.isAttached())
-        assertFalse(ReflectionHelpers.getField<AtomicBoolean>(service, "active").get())
-        assertNull(service.boundPort())
-        assertNull(ReflectionHelpers.getField<Any?>(service, "attachment"))
-        assertNull(ReflectionHelpers.getField<Any?>(service, "serverSocket"))
+        assertFalse(service.isAttached(owner))
+        assertNull(service.boundPort(owner))
+        assertNull(ReflectionHelpers.getField<Any?>(service, "attachmentOwner"))
+        assertNull(ReflectionHelpers.getField<Any?>(service, "sessionHost"))
+        assertNull(ReflectionHelpers.getField<Any?>(service, "hostLease"))
         assertNull(ReflectionHelpers.getField<Any?>(service, "bridge"))
         assertNull(ReflectionHelpers.getField<Any?>(service, "tun"))
     }

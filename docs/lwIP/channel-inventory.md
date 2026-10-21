@@ -3,6 +3,12 @@
 审计基线：`143f4674`，2026-10-21。下表来自源码调用链，**不是设备抓包结论**。
 路径相对于 `shared/src/main/java/com/shilapi/xcertplay/`。
 
+2026-10-22 宿主迁移：下表主控制监听和会话集合已从 `CarPlayVpnService` 移入
+`network/AirPlaySessionHost.kt`。普通 `CarPlaySessionService` 持有宿主；无线绑定此服务，
+有线 VPN 绑定普通服务和 VPN 服务，后者只保留 TUN/NCM 资源并取得宿主租约。
+通道协议、端口回退和系统 Socket 保持原有实现；尚未注入全部 SessionNetwork 端点。
+VPN Owner 与宿主 Lease 独立，旧控制器销毁不会关闭新监听。
+
 | 通道 / 位置 | 方向、地址和端口 | 通告、所有者及内核依赖 | 验证 |
 | --- | --- | --- | --- |
 | 主控制 `network/CarPlayVpnService.kt` | iPhone → TCP listener；有线 scoped link-local IPv6；首选 config.port，冲突重选 | `CarPlayController.runStack` 用 `boundPort()` 写入 `Iap2WiredCarPlayEndpoint`；service 关闭；ServerSocket、NetworkInterface、TUN scope | T01、C01 |

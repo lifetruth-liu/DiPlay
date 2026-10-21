@@ -1,6 +1,6 @@
 # USB 有线用户态网络后端开发与测试方案
 
-日期：2026-10-21。适用项目：DiPlay。状态：分阶段开发中，仅新增接口基础，尚未完成 lwIP 集成或设备验证；进度和运行证据见 [实施记录](execution-status.md)。
+日期：2026-10-21。适用项目：DiPlay。状态：分阶段开发中，已有接口基础和公共会话宿主，尚未完成 lwIP 集成或设备验证；进度和运行证据见 [实施记录](execution-status.md)。
 
 **目标：**在车机无法创建 Android VPN 时，使用应用内 lwIP 网络栈承载 USB NCM 上的 CarPlay IPv6 通信，无需 root、ADB 授权或系统 TUN；保留原有 VPN 和无线网络路径。
 

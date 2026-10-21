@@ -6275,6 +6275,7 @@ class CarPlayHostActivity : ComponentActivity() {
             airPlayCommandExecutor.shutdown()
             if (terminateProcess) {
                 applicationContext.stopService(Intent(applicationContext, CarPlayVpnService::class.java))
+                applicationContext.stopService(Intent(applicationContext, com.shilapi.xcertplay.network.CarPlaySessionService::class.java))
             }
             Log.i(TAG, "shutdown complete clean=$clean")
             applicationContext.stopService(Intent(applicationContext, DiPlaySessionService::class.java))

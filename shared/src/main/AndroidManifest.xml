@@ -58,6 +58,10 @@
         </service>
 
         <service
+            android:name="com.shilapi.xcertplay.network.CarPlaySessionService"
+            android:exported="false" />
+
+        <service
             android:name="com.shilapi.xcertplay.network.CarPlayVpnService"
             android:permission="android.permission.BIND_VPN_SERVICE"
             android:exported="false" />
