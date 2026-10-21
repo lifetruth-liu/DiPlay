@@ -366,3 +366,44 @@ APK四ABI/16KiB/许可证检查exit0：`diplay-kernel-apk-final.log`，APK仍为
 WSL1原Linux shell入口仍因unshare权限不足未覆盖；本记录只证明Android Linux内核
 TAP/veth功能互通。它没有经过Java/JNI运行器、USB/NCM或真实iPhone，不能替代
 低配ARM预算、G0/G1真机回归或G2门槛。生产端点仍未启用。
+
+## P2.2 慢消费者与原型 echo 停滞修复
+
+本批基于 `c852ea79`。新增独立内核客户端 `--slow`，socket缓冲请求4KiB，
+fork sender连续发送1MiB，首send后reader暂停十秒；确认writer未退出后恢复，
+按绝对流位置逐字节校验并要求sender正常结束。设备脚本新增basic/slow场景，
+核心工具在owner command边界采样拒收长度和零窗口，raw callback无逐包日志。
+
+缺失选项先运行exit2：`%TEMP%/diplay-slow-peer-red.log`。
+实际TAP慢读首轮运行exit1，恢复仅504184字节：`diplay-slow-tap-first.log`。
+诊断重现仅557620字节，max_refused34272 > sndbuf32768，零窗口采样154：
+`diplay-slow-tap-diagnostic.log`。旧echo整块write因超过固定总send-buffer无法恢复。
+修复按剩余sndbuf消费，callback_arg记录已复制偏移；只有write成功才recved，
+部分完成保留原pbuf给lwIP重试，全部完成才释放；EOF仍abort。未扩大任何栈缓冲配置。
+
+新增确定性 `tcp_large_refused`：真实乱序27x1440再补首段，合并40320字节callback，
+只ACK已观察的连续输出，最终内容和校验和完整。最终测试对旧实现运行失败：
+`diplay-slow-native-final-red.log`；修复后Linux ASan/UBSan +pool/heap guards
+19/19 exit0：`diplay-slow-native-final-rebuilt-green.log`；Windows19/19 exit0：
+`diplay-slow-windows-final.log`。调试期间记录过缺少stdint头的编译失败、
+把Nagle下未发送尾部当作已发送的测试假设错误，以及恢复旧文件mtime导致旧object
+未重编译；均修正并保留原日志，最终记录明确确认fresh rebuild。
+
+格式化并跨编译后，API28 x86_64任务AVD连续执行tap basic、veth basic、
+tap slow、veth slow全部exit0：`diplay-slow-android-final.log`。两slow场景
+均十秒背压后恢复完整1MiB，零窗口采样分别153/161，lwIP heap peak36024/36008。
+仅是echo/内核功能预检，不是完整动态内存峰值。环境和完整数据见
+[原型背压预检](prototype-backpressure.md)。Android tc不支持netem，
+`diplay-fault-netem-preflight.log`，丢包/延迟注入未覆盖。
+
+最终新版native库Android仪器测试5项零失败/错误/跳过，exit0，14s：
+`diplay-slow-connected-final.log`。JUnit XML在shared/build/outputs/androidTest-results；
+CheckJNI已开启，logcat副本build/reports/lwip/slow-checkjni-logcat.txt。
+父namespace无测试接口/进程，任务AVD已关闭：`diplay-slow-cleanup.log`。
+完整九项Android CI exit0，3s（增量复用）：`diplay-slow-final-ci.log`；
+APK四ABI/16KiB/许可证检查exit0：`diplay-slow-apk-final.log`。
+APK SHA-256：`54677a220cff6e9fa79ee1c7984212bc38cdea2c01282a7181b1de8adc918359`。
+只读复审核对lwIP refused-data重试所有权和客户端验证，未发现新实质问题；未跑测试。
+G0/G1/G2、生产端点合同、实际NCM/ARM预算仍未验收。
+
+最终CI终态XML：shared1718、common1578、samples/home6，共3302项零失败/错误/跳过；公开树与staged diff检查通过。

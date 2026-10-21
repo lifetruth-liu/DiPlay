@@ -6,11 +6,15 @@ if [ "${1:-}" != --child ]; then
     [ "$(getprop ro.kernel.qemu)" = 1 ] || { echo 'Requires a disposable Android emulator' >&2; exit 1; }
     [ "$(id -u)" = 0 ] || { echo 'Requires emulator adb root' >&2; exit 1; }
     case "${1:-}" in tap|veth) ;; *) echo 'Expected tap or veth' >&2; exit 2 ;; esac
-    exec "$root/lwip_namespace_exec" sh "$0" --child "$1" "$(readlink /proc/self/ns/net)"
+    [ "$#" -le 2 ] || exit 2
+    case "${2:-basic}" in basic|slow) ;; *) echo 'Expected basic or slow scenario' >&2; exit 2 ;; esac
+    exec "$root/lwip_namespace_exec" sh "$0" --child "$1" "$(readlink /proc/self/ns/net)" "${2:-basic}"
 fi
-[ "$#" = 3 ] || exit 2
+[ "$#" = 4 ] || exit 2
 [ "$(readlink /proc/self/ns/net)" != "$3" ] || { echo 'Refusing parent namespace' >&2; exit 1; }
 mode="$2"
+scenario="$4"
+case "$scenario" in basic|slow) ;; *) exit 2 ;; esac
 case "$mode" in tap|veth) ;; *) exit 2 ;; esac
 pid=''
 cleanup() {
@@ -41,8 +45,12 @@ while ! ip link show dev "$peer" >/dev/null 2>&1; do
 done
 ip link set "$peer" address 02:00:00:00:00:02 mtu 1500 up
 ip -6 addr add fe80::2/64 dev "$peer" nodad
-"$root/lwip_kernel_peer" "$peer"
+if [ "$scenario" = slow ]; then
+    "$root/lwip_kernel_peer" "$peer" --slow
+else
+    "$root/lwip_kernel_peer" "$peer"
+fi
 kill "$pid"
 wait "$pid"
 pid=''
-echo "PASS Android Linux kernel IPv6 TCP/UDP via $mode (isolated namespace)"
+echo "PASS Android Linux kernel $scenario via $mode (isolated namespace)"

@@ -2,6 +2,7 @@
 #define _DEFAULT_SOURCE
 #include "diplay_lwip.h"
 #include "echo_services.h"
+#include "lwip/priv/tcp_priv.h"
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -31,9 +32,22 @@ struct port {
     int fd, control, random_fd, raw, paused;
     struct ifreq interface;
     size_t head, count, random_remaining;
+    unsigned max_refused, sndbuf_at_max_refused, zero_window_samples;
     uint32_t random[512];
     struct frame tx[TX_CAPACITY];
 };
+static int inspect_pressure(void *arg) {
+    struct port *port = arg;
+    for (struct tcp_pcb *pcb = tcp_active_pcbs; pcb; pcb = pcb->next) {
+        if (!pcb->snd_wnd)
+            port->zero_window_samples++;
+        if (pcb->refused_data && pcb->refused_data->tot_len > port->max_refused) {
+            port->max_refused = pcb->refused_data->tot_len;
+            port->sndbuf_at_max_refused = tcp_sndbuf(pcb);
+        }
+    }
+    return 0;
+}
 static volatile sig_atomic_t stopping;
 static void stop(int signal_number) {
     (void)signal_number;
@@ -203,6 +217,8 @@ int main(int argc, char **argv) {
         uint32_t timeout;
         if (dp_core_poll(core) != DP_OK || dp_core_next_timeout(core, &timeout) != DP_OK)
             goto cleanup;
+        if (dp_core_execute(core, inspect_pressure, port) != DP_OK)
+            goto cleanup;
         if (!ready && timeout > 100)
             timeout = 100;
         struct pollfd event = {port->fd, (short)(POLLIN | (port->count ? POLLOUT : 0)), 0};
@@ -234,6 +250,8 @@ int main(int argc, char **argv) {
     }
     result = 0;
 cleanup:
+    fprintf(stderr, "max_refused=%u sndbuf_at_max_refused=%u zero_window_samples=%u\n",
+            port->max_refused, port->sndbuf_at_max_refused, port->zero_window_samples);
     if (core) {
         dp_stats stats;
         if (dp_core_get_stats(core, &stats) == DP_OK)

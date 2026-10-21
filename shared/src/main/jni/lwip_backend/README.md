@@ -22,7 +22,7 @@ On Windows with MinGW, pass the real CMake executable (not a Python launcher):
 ./scripts/test_lwip_host.ps1 -Cmake 'C:/path/to/cmake.exe' -Compiler 'C:/path/to/gcc.exe' -Make 'C:/path/to/mingw32-make.exe'
 ```
 
-Both runners reject an empty CTest inventory. Twelve independent frame cases
+Both runners reject an empty CTest inventory. Thirteen independent frame cases
 cover NDP, DAD/conflict, TCP handshake/data, UDP/ICMP, repeated teardown,
 readiness/failure, malformed frames, fragment reassembly, thread/reentry and
 clock contracts. Sanitizer builds also enable lwIP heap/pool guard and sanity
@@ -83,6 +83,23 @@ The standalone client links only libc and kernel sockets. It checks three TCP
 byte content. TAP and veth passed on the API28 x86_64 task AVD; this is functional
 kernel interoperability, not actual USB/NCM, JNI-path, ARM performance or G2
 acceptance. Exact evidence is in the execution record.
+
+The optional `slow` scenario uses 4-KiB requested socket buffers, forks a
+continuous 1-MiB sender and pauses the reader for ten seconds after the first
+successful send. It requires the sender to remain backpressured, then verifies
+every recovered byte against its absolute stream position:
+
+```sh
+adb -s SERIAL shell sh /data/local/tmp/diplay-lwip-kernel/test_lwip_android_kernel.sh tap slow
+adb -s SERIAL shell sh /data/local/tmp/diplay-lwip-kernel/test_lwip_android_kernel.sh veth slow
+```
+
+The echo callback consumes large coalesced input in send-buffer-sized pieces;
+it retains its offset across refused-pbuf retries without crediting bytes twice.
+The deterministic `tcp_large_refused` case covers a 40320-byte callback with an
+unchanged 32768-byte send buffer. Aggregate test-tool pressure counters are
+sampled outside raw callbacks, not logged per packet. These checks do not prove
+production endpoint consumption/cancellation contracts or total memory budgets.
 
 ## Ownership and limits
 

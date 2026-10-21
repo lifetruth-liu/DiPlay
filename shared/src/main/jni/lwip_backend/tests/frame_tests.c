@@ -199,11 +199,10 @@ static void test_dad(void) {
     CHECK(address_state(&f) == DP_ADDRESS_DUPLICATE);
     close_core(&f);
 }
-static void send_tcp(struct fixture *f, uint8_t flags, uint32_t sequence, uint32_t ack,
-                     const char *data) {
-    uint8_t frame[256];
-    size_t n = strlen(data);
-    CHECK(n < 128);
+static void send_tcp_bytes(struct fixture *f, uint8_t flags, uint32_t sequence, uint32_t ack,
+                           const void *data, size_t n) {
+    uint8_t frame[1514];
+    CHECK(n <= 1440);
     ethernet(frame, local_mac);
     uint8_t *p = ipv6(frame, local_ip, 6, (uint16_t)(20 + n));
     w16(p, 50000);
@@ -216,6 +215,66 @@ static void send_tcp(struct fixture *f, uint8_t flags, uint32_t sequence, uint32
     memcpy(p + 20, data, n);
     w16(p + 16, checksum(frame + 14, p, 20 + n, 6));
     CHECK(dp_core_input(f->core, frame, 74 + n) == DP_OK);
+}
+static void send_tcp(struct fixture *f, uint8_t flags, uint32_t sequence, uint32_t ack,
+                     const char *data) {
+    send_tcp_bytes(f, flags, sequence, ack, data, strlen(data));
+}
+static void collect_echo(struct fixture *f, uint32_t server, const uint8_t *expected, uint8_t *seen,
+                         size_t total) {
+    for (size_t i = 0; i < f->count; i++) {
+        const uint8_t *p = f->frames[i].bytes;
+        if (f->frames[i].length < 74 || p[20] != 6)
+            continue;
+        size_t header = (p[66] >> 4) * 4;
+        size_t length = u16(p + 18) - header;
+        if (!length)
+            continue;
+        uint32_t offset = u32(p + 58) - (server + 1);
+        CHECK(offset <= total && length <= total - offset);
+        CHECK(checksum(p + 14, p + 54, u16(p + 18), 6) == 0);
+        CHECK(!memcmp(p + 54 + header, expected + offset, length));
+        memset(seen + offset, 1, length);
+    }
+    f->count = 0;
+}
+static void test_tcp_large_refused(void) {
+    struct fixture f;
+    ready_core(&f);
+    CHECK(dp_core_execute(f.core, echo_services_start, NULL) == DP_OK);
+    send_tcp(&f, 2, 1000, 0, "");
+    struct frame *syn = find(&f, 6, -1, 0);
+    CHECK(syn);
+    uint32_t server = u32(syn->bytes + 58);
+    f.count = 0;
+    send_tcp(&f, 16, 1001, server + 1, "");
+    enum { TOTAL = 28 * 1440 };
+    uint8_t payload[TOTAL], seen[TOTAL];
+    for (size_t i = 0; i < TOTAL; i++)
+        payload[i] = (uint8_t)(i ^ (i >> 8));
+    memset(seen, 0, sizeof(seen));
+    /* Close a 1440-byte hole after 27 out-of-order segments: one callback then
+     * receives 40320 bytes, larger than the unchanged 32768-byte send budget. */
+    for (size_t i = 1440; i < TOTAL; i += 1440)
+        send_tcp_bytes(&f, 24, 1001 + (uint32_t)i, server + 1, payload + i, 1440);
+    send_tcp_bytes(&f, 24, 1001, server + 1, payload, 1440);
+    collect_echo(&f, server, payload, seen, TOTAL);
+    CHECK(seen[0] && !seen[32768]);
+    size_t received = 0;
+    for (int attempt = 0; received < TOTAL && attempt < 16; attempt++) {
+        size_t before = received;
+        while (received < TOTAL && seen[received])
+            received++;
+        CHECK(received > before);
+        send_tcp(&f, 16, 1001 + TOTAL, server + 1 + (uint32_t)received, "");
+        advance(&f, 250);
+        collect_echo(&f, server, payload, seen, TOTAL);
+    }
+    CHECK(received == TOTAL);
+    for (size_t i = 0; i < TOTAL; i++)
+        CHECK(seen[i]);
+    send_tcp(&f, 16, 1001 + TOTAL, server + 1 + TOTAL, "");
+    close_core(&f);
 }
 static void test_tcp(void) {
     struct fixture f;
@@ -461,6 +520,8 @@ int main(int argc, char **argv) {
         test_dad();
     else if (!strcmp(argv[1], "tcp"))
         test_tcp();
+    else if (!strcmp(argv[1], "tcp_large_refused"))
+        test_tcp_large_refused();
     else if (!strcmp(argv[1], "udp"))
         test_udp();
     else if (!strcmp(argv[1], "lifecycle"))

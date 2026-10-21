@@ -6,17 +6,27 @@
 #include <fcntl.h>
 #include <net/if.h>
 #include <poll.h>
+#include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
-static int open_peer(int type, unsigned scope, unsigned short port) {
+static int open_peer(int type, unsigned scope, unsigned short port, int small_buffers) {
     int fd = socket(AF_INET6, type | SOCK_CLOEXEC, 0);
     if (fd < 0)
         return -1;
     struct timeval timeout = {10, 0};
+    if (small_buffers) {
+        int size = 4096;
+        if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, sizeof(size)) ||
+            setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &size, sizeof(size)))
+            goto fail;
+    }
     struct sockaddr_in6 local = {0}, remote = {0};
     local.sin6_family = remote.sin6_family = AF_INET6;
     local.sin6_scope_id = remote.sin6_scope_id = scope;
@@ -63,7 +73,7 @@ fail : {
 }
 }
 static int tcp_case(unsigned scope, const unsigned char *payload, size_t length) {
-    int fd = open_peer(SOCK_STREAM, scope, 7000);
+    int fd = open_peer(SOCK_STREAM, scope, 7000, 0);
     if (fd < 0) {
         perror("TCP connect");
         return 1;
@@ -101,7 +111,7 @@ done:
     return result;
 }
 static int udp_cases(unsigned scope, const unsigned char *payload) {
-    int fd = open_peer(SOCK_DGRAM, scope, 6000);
+    int fd = open_peer(SOCK_DGRAM, scope, 6000, 0);
     if (fd < 0) {
         perror("UDP connect");
         return 1;
@@ -138,9 +148,122 @@ done:
     close(fd);
     return result;
 }
+static unsigned char stream_byte(size_t offset) {
+    uint32_t value = (uint32_t)offset + UINT32_C(0x9e3779b9);
+    value = (value ^ (value >> 16)) * UINT32_C(0x85ebca6b);
+    value = (value ^ (value >> 13)) * UINT32_C(0xc2b2ae35);
+    return (unsigned char)((value ^ (value >> 16)) >> 24);
+}
+static int slow_reader(unsigned scope) {
+    const size_t total = 1024 * 1024;
+    int fd = open_peer(SOCK_STREAM, scope, 7000, 1);
+    if (fd < 0) {
+        perror("slow TCP connect");
+        return 1;
+    }
+    struct timeval timeout = {30, 0};
+    int pipefd[2];
+    if (setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) || pipe(pipefd)) {
+        perror("slow TCP setup");
+        close(fd);
+        return 1;
+    }
+    pid_t writer = fork();
+    if (writer < 0) {
+        perror("fork sender");
+        close(pipefd[0]);
+        close(pipefd[1]);
+        close(fd);
+        return 1;
+    }
+    if (!writer) {
+        close(pipefd[0]);
+        size_t sent = 0;
+        while (sent < total) {
+            unsigned char bytes[4096];
+            size_t count = total - sent < sizeof(bytes) ? total - sent : sizeof(bytes);
+            for (size_t i = 0; i < count; i++)
+                bytes[i] = stream_byte(sent + i);
+            ssize_t n = send(fd, bytes, count, MSG_NOSIGNAL);
+            if (n < 0 && errno == EINTR)
+                continue;
+            if (n <= 0) {
+                perror("slow sender");
+                _exit(1);
+            }
+            if (!sent && write(pipefd[1], "R", 1) != 1)
+                _exit(1);
+            sent += (size_t)n;
+        }
+        close(pipefd[1]);
+        close(fd);
+        _exit(0);
+    }
+    close(pipefd[1]);
+    int result = 1, status;
+    struct pollfd event = {pipefd[0], POLLIN, 0};
+    char started;
+    if (poll(&event, 1, 2000) <= 0 || read(pipefd[0], &started, 1) != 1) {
+        fprintf(stderr, "slow sender did not start\n");
+        goto done;
+    }
+    struct timespec pause = {10, 0};
+    while (nanosleep(&pause, &pause) && errno == EINTR) {
+    }
+    pid_t reaped = waitpid(writer, &status, WNOHANG);
+    if (reaped != 0) {
+        if (reaped == writer)
+            writer = -1;
+        fprintf(stderr, "sender did not remain backpressured during ten-second receive pause\n");
+        goto done;
+    }
+    size_t received = 0;
+    while (received < total) {
+        unsigned char bytes[4096];
+        ssize_t n = recv(fd, bytes, sizeof(bytes), 0);
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n <= 0 || (size_t)n > total - received) {
+            fprintf(stderr, "slow TCP ended early: received=%zu n=%zd errno=%d\n", received, n,
+                    errno);
+            goto done;
+        }
+        for (ssize_t i = 0; i < n; i++)
+            if (bytes[i] != stream_byte(received + (size_t)i)) {
+                fprintf(stderr, "slow TCP content/order mismatch at %zu\n", received + (size_t)i);
+                goto done;
+            }
+        received += (size_t)n;
+    }
+    for (int attempt = 0; attempt < 200; attempt++) {
+        reaped = waitpid(writer, &status, WNOHANG);
+        if (reaped == writer) {
+            writer = -1;
+            if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
+                result = 0;
+            break;
+        }
+        if (reaped < 0 && errno != EINTR)
+            break;
+        struct timespec tick = {0, 10000000};
+        nanosleep(&tick, NULL);
+    }
+    if (!result)
+        puts("PASS independent TCP 1 MiB: sender backpressured during 10-second pause, complete "
+             "ordered recovery");
+done:
+    if (writer > 0) {
+        kill(writer, SIGKILL);
+        while (waitpid(writer, NULL, 0) < 0 && errno == EINTR) {
+        }
+    }
+    close(pipefd[0]);
+    close(fd);
+    return result;
+}
 int main(int argc, char **argv) {
-    if (argc != 2) {
-        fprintf(stderr, "Usage: %s interface\n", argv[0]);
+    if (argc < 2 || argc > 3 || (argc == 3 && strcmp(argv[2], "--slow"))) {
+        fprintf(stderr, "Usage: %s interface [--slow]\n", argv[0]);
         return 2;
     }
     unsigned scope = if_nametoindex(argv[1]);
@@ -148,6 +271,8 @@ int main(int argc, char **argv) {
         perror("interface index");
         return 1;
     }
+    if (argc == 3)
+        return slow_reader(scope);
     unsigned char payload[65536];
     for (size_t i = 0; i < sizeof(payload); i++)
         payload[i] = (unsigned char)i;
