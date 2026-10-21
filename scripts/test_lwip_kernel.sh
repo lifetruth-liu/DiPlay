@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+build="$(cd "${1:?expected native build directory}" && pwd)"
+mode="${2:-tap}"
+[[ "$mode" == tap || "$mode" == veth ]] || { echo 'Expected tap or veth' >&2; exit 2; }
+[[ "$(uname -s)" == Linux && "$(id -u)" == 0 ]] || { echo 'Kernel interoperability requires Linux and root/CAP_NET_ADMIN' >&2; exit 1; }
+[[ -x "$build/lwip_kernel_echo" ]] || { echo 'Build lwip_kernel_echo first' >&2; exit 1; }
+namespace="$(readlink /proc/self/ns/net)"
+if [[ -z "${DIPLAY_LWIP_PARENT_NS:-}" ]]; then
+  exec unshare --net env DIPLAY_LWIP_PARENT_NS="$namespace" "$0" "$build" "$mode"
+fi
+[[ "$namespace" != "$DIPLAY_LWIP_PARENT_NS" ]] || { echo 'Refusing to modify the parent network namespace' >&2; exit 1; }
+pid=""
+cleanup() { if [[ -n "$pid" ]]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi; }
+trap cleanup EXIT
+ip link set lo up
+if [[ "$mode" == veth ]]; then
+  ip link add dp-lwip0 type veth peer name dp-peer0
+  sysctl -q -w net.ipv6.conf.dp-lwip0.disable_ipv6=1
+  ip link set dp-lwip0 address 02:00:00:00:00:01 up
+  peer=dp-peer0
+else
+  [[ -c /dev/net/tun ]] || { echo 'Linux TAP device is unavailable' >&2; exit 1; }
+  peer=dp-lwip0
+fi
+"$build/lwip_kernel_echo" "--$mode" dp-lwip0 > "$build/kernel-$mode.log" 2>&1 &
+pid=$!
+for ((attempt=0;attempt<100;attempt++)); do
+  [[ -d "/sys/class/net/$peer" ]] && break
+  kill -0 "$pid" 2>/dev/null || { cat "$build/kernel-$mode.log" >&2; exit 1; }
+  sleep 0.05
+done
+ip link set "$peer" address 02:00:00:00:00:02 mtu 1500 up
+ip -6 addr add fe80::2/64 dev "$peer" nodad
+python3 "$root/scripts/lwip_kernel_client.py" "$peer"
+kill "$pid"
+wait "$pid"
+pid=""
+cat "$build/kernel-$mode.log"
+echo "PASS Linux kernel IPv6 TCP/UDP via $mode (isolated namespace)"

@@ -7,6 +7,23 @@ on:
 permissions:
   contents: read
 jobs:
+  lwip-host:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify native source and ELF checker contracts
+        run: python3 -m unittest discover -s scripts/tests -p 'test_check_lwip_native.py'
+      - name: Native frame tests with ASan, UBSan and lwIP pool guards
+        run: bash scripts/test_lwip_host.sh --sanitize
+      - name: Native test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lwip-host-reports
+          path: |
+            build/lwip-host-linux/ctest.log
+            build/lwip-host-linux/Testing/
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -24,6 +41,8 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - name: Unit tests, lint and source-only debug build
         run: ./gradlew :shared:testDebugUnitTest :common:testDebugUnitTest :home:testDebugUnitTest :mobile:lintDebug :home:lintDebug :maphost:lintDebug :mobile:assembleDebug :home:assembleDebug :maphost:assembleDebug --stacktrace
+      - name: Verify pinned lwIP and four-ABI APK packaging
+        run: python3 scripts/check_lwip_native.py --apk mobile/build/outputs/apk/debug/mobile-debug.apk
       - name: Test reports
         if: always()
         uses: actions/upload-artifact@v4

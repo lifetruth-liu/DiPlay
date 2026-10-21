@@ -6,7 +6,7 @@
 
 - P0.1：完成源码通道清单，见 channel-inventory.md；抓包与设备验证尚缺。
 - P0.2：保存构建环境与设备基线缺口，见 baseline.md；记录 lwIP 2.2.1 官方标签、
-  commit 和已下载 ZIP 的 SHA-256，见 ADR 001 / native UPSTREAM.md；尚未引入源码。
+  commit 和 ZIP 的 SHA-256，见 ADR 001 / native UPSTREAM.md；P2 原型已固定引入源码。
 - P1.1：新增 SessionNetwork、协议端点、TCP/UDP 合同、结构化错误与系统适配基础。
   系统 TCP 用 NIO 进行可取消的带 deadline 读写；UDP 用独立 DatagramSocket，避免
   Android 7 DatagramChannel socket adaptor 的 send/receive 共用阻塞锁。
@@ -119,11 +119,11 @@ P1.1 仍需补齐 RST、真实 IPv6 scope、初始化/关闭竞态与完整 T01�
 公共宿主与普通服务已接入生产控制器；P1.2 把 AirPlay/媒体的系统 Socket
 边界改为显式注入 SessionNetwork 的源码工作已完成，仍需补齐各变体的全通道契约
 与设备基线比较，不能仅凭本批虚拟协商测试通过 G1。
-P2–P7 的 native 栈、NCM 原型、JNI、native 端点联调、选择设置及发布均未交付。
+P2 已新增固定版本 native 核心与宿主帧测试（见下节）；NCM 原型、JNI、native 端点联调、选择设置及 P3–P7 发布工作仍未交付。
 
 后续宿主工具预检：Windows 的 Python cmake 包内真实二进制为 CMake 3.15.3，
 PATH 上的启动器不能作为可用性证据；缓存 lwIP archive 再次核对 SHA-256 一致。
-现有 Ubuntu-20.04 是 WSL 1，GCC 9.4.0 可运行，但未安装 Linux CMake，
+现有 Ubuntu-20.04 是 WSL 1，GCC 9.4.0 可运行，现已安装 Linux CMake 3.16.3，
 `/dev/net/tun` 不存在，`unshare -n true` 报 Permission denied。
 因此该环境暂不能提供计划所需的 Linux TAP/veth/netns 验收，不能把确定性帧测试
 或 Windows 回环测试替代这项证据；可继续独立实现宿主 harness 与 Android 构建。
@@ -132,3 +132,44 @@ PATH 上的启动器不能作为可用性证据；缓存 lwIP archive 再次核�
 G0/G1 的真机条件未通过，后续可推进独立接口和宿主实验，不能跳过阶段门槛或
 声称实际有线 CarPlay 已能脱离 VPN。当前仍使用系统网络和原有线 VPN，
 没有用户态启动开关；无线会话宿主已迁至普通服务。
+
+## P2 原生核心与宿主 harness
+
+本批基于 `6d306b5f`。lwIP 2.2.1 的 314 个源码/说明文件保持原样，固定归档、
+commit、逐文件清单及清单摘要；自有配置、端口与 C ABI 独立维护。
+新增 IPv6 Ethernet netif、DAD/NDP、TCP/UDP 原始栈、单线程/单 context 所有权、
+显式 link ready、时钟/随机/有界发送回调、结构化失败及销毁清理。
+NOT_READY 的未发出 DAD 不会把地址误标为可用；失败发送使 context 终止。
+原型只有 C ABI，未提供生产 TCP/UDP 端点或 JNI，也未接入 NCM 或用户开关。
+
+Windows GCC 8.1 / CMake 3.15.3：12 项确定性帧测试通过，exit 0，
+`%TEMP%/diplay-native-windows-final.log`。
+Linux GCC 9.4 / CMake 3.16.3：同 12 项以 ASan/UBSan 和 lwIP heap/pool
+溢出及 sanity 检查通过，exit 0，`%TEMP%/diplay-native-asan-final.log`（最终重跑）。
+覆盖 NDP、DAD/冲突、TCP 握手/数据、UDP 空包/回显/不可达、生命周期重复100次、
+not-ready/failed 发送、畸形帧、乱序分片/重组销毁、重入/时钟逆行和错误线程。
+未发送 DAD 的回归先失败再修复：`diplay-native-ready-red.log`。
+ELF 检查器的非二次幂对齐/缺失 GNU_STACK 回归先失败，修正后5项通过：
+`diplay-native-verifier-red.log` / `diplay-native-verifier-green.log`。
+独立源码复审未发现明确实质问题；审查者未独立运行测试。
+
+NDK 28.2.13676358 独立构建 exit 0，四个目标 ABI 的 ELF 均有16 KiB LOAD 对齐
+和不可执行 GNU_STACK；数据+BSS 为1,474,540至1,488,440字节。
+这不包含动态 TCP 缓冲、线程栈、USB/JNI队列等完整运行时成本。
+日志 `%TEMP%/diplay-native-android.log`。Linux TAP/veth 工具和独立内核 socket
+客户端已实现，但两种模式在本机 `unshare --net` 均 exit 1（Permission denied），
+证据 `diplay-native-kernel-tap.log` / `diplay-native-kernel-veth.log`。
+不能据宿主确定性测试通过 G2，也未验证 Android 实机加载或 ARM 性能。
+构建与运行命令、原型边界见 native [README](../../shared/src/main/jni/lwip_backend/README.md)。
+
+本批完整 Android CI 九项任务 exit 0，BUILD SUCCESSFUL，6m55s；shared1691、
+common1578、home6项，零失败/错误/跳过（shared/home由Gradle增量复用）。
+日志 `%TEMP%/diplay-lwip-native-ci.log`。最终APK四个库均不压缩，ELF LOAD及
+ZIP数据偏移均16 KiB对齐，GNU_STACK不可执行；包含完整COPYING与132组上游通知。
+APK内库数据+BSS范围1,472,472至1,490,700字节；此为静态检查，不是运行时预算验收。
+`python scripts/check_lwip_native.py --apk mobile/build/outputs/apk/debug/mobile-debug.apk`
+exit 0，证据 `%TEMP%/diplay-native-apk.log`。APK SHA-256：
+`514a302ec98a940087acbf0865dc3e9ae14241ce143ff929843a83d56cd2c7df`。
+CI新增独立Linux宿主sanitizer任务，以及Android构建后的APK检查；本地已执行对应命令，
+尚未声称远程GitHub Actions运行通过。两份shell入口在Git中记录100755。
+许可证资产重新生成摘要一致，公开树凭据检查与staged diff检查通过；未修改上游空白。

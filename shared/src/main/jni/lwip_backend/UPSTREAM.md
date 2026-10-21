@@ -1,6 +1,7 @@
 # lwIP upstream pin
 
-This records the candidate only. No upstream source or native backend is compiled here yet.
+The pinned source is vendored and compiled into the prototype `libdiplay_lwip.so`.
+The application does not load or select this backend yet.
 
 - Release: **2.2.1**.
 - Official Git: `https://git.savannah.nongnu.org/git/lwip.git` (redirects to the GNU HTTPS Git host).
@@ -14,9 +15,14 @@ This records the candidate only. No upstream source or native backend is compile
   retain it unchanged when vendoring source and reproduce it in binary notices.
 - Local patches: none. Signature verification and security-fix audit: not yet performed.
 
-The downloaded archive is currently in the execution host's temporary directory as
-`diplay-lwip-2.2.1.zip`. Build inputs must eventually be vendored under `third_party/lwip/`;
-builds must not depend on this temporary file or on downloading code at build time.
+Build inputs are vendored under `third_party/lwip/`: the complete `src/` tree and
+COPYING, README, FILES, CHANGELOG and UPGRADING (314 unchanged files). Builds do
+not download dependencies. `UPSTREAM-SHA256.txt` records every file; its SHA-256 is
+`7882cdb8bc927ecd47a5b1e06b99f3190f245998e937fd0d043380c5e4a6f8c0`.
+`python scripts/check_lwip_native.py` checks the manifest and exact inventory.
+Git attributes preserve upstream bytes. Port/configuration changes live outside
+the upstream tree. `scripts/generate_lwip_notice.py` generates the packaged
+`diplay-lwip-NOTICE.txt` asset from COPYING and upstream copyright notices.
 
 For any future upgrade, independently verify the official release/tag and archive, preserve
 licenses, record every patch, and rerun protocol/JNI/cancellation tests, sanitizer/fuzz,
