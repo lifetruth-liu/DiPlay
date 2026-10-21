@@ -481,3 +481,31 @@ source清单与APK四ABI/16KiB/许可证检查exit0：
 公开树检查通过。设备G0/G1/G2仍未通过；启用路径安全回补也成为明确待完成项。
 
 只读复审核对16项变更、CNA记录及签名trust表述，未发现虚假闭环；审查者未重跑验证。staged diff检查通过。
+
+### TCP选项边界回补（2026-10-22）
+
+用户确认当前没有参考真机或报告；继续宿主工作，G0/G1不视为通过。
+基于e586b0e9，精确回补上游3d896ba0a37ff3ce73270ca5e230707fe47f60e3的四行检查。
+原始314文件清单及其digest不变，验证器先核对原始digest，再只接受精确补后digest。
+完整源身份见native目录BACKPORTS.md；额外修改回补文件或其他文件均被拒绝。
+
+新增直接编译真实tcp_in.c的测试，不添加产品测试入口。精确分配连续选项缓冲及
+双缓冲各分割点，覆盖缺长度字节的MSS/未知选项及有效MSS。
+原版ASan实测heap-buffer-overflow，tcp_get_next_optbyte从24字节分配末尾越界读一字节：
+WSL /tmp/diplay-tcp-option-red.log。修复后Linux ASan/UBSan/pool guards和Windows
+MinGW均26/26通过，完整性验证器Python测试7/7。
+直接双缓冲测试不宣称覆盖全部入口pbuf操作；既有真实帧测试继续运行。
+
+完整九项Android CI exit0，16s，250任务（17执行），日志TEMP/diplay-tcp-option-ci.log。
+四ABI APK ELF/16KiB/NX/许可证检查通过，APK SHA-256为
+8ccf584dc88209f7dd48b32921f29136286146943a1459a6af4a41f559400e48。
+JNI connected测试5/5、无失败/错误/跳过，exit0，13s：diplay-tcp-option-connected.log。
+DeviceMonitor查询AVD路径出现bad sub-command告警，随后设备测试正常完成，XML已核对。
+
+重建Android独立内核工具后，任务自有API28 x86_64模拟器验证：
+TAP basic TCP 3×64KiB及UDP空包/MTU/分片通过；veth faults-5 TCP 3×64KiB通过，
+admitted263/drop13/delay250/reorder10/duplicate3，repeated_tcp_admissions10。
+全部在独立网络命名空间，脚本exit0；日志diplay-tcp-option-kernel-{tap,veth}.log。
+这些是模拟器内核证据，不是NCM/iPhone或ARM验收。
+只读复核未发现测试/补丁/完整性逻辑实质问题；审查者未运行测试。
+NDP/IPv6重组/PMTU回补继续开放，整体安全审计未通过，生产未选用lwIP后端。

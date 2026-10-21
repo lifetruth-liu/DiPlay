@@ -2,7 +2,7 @@
 
 日期：2026-10-22。候选：DiPlay `d58c2f15`，lwIP 2.2.1，
 `77dcd25a72509eb83f72b033d219b1d40cd8eb95`。结论：发布ZIP签名验证通过；
-安全审计**未通过**。已定位启用路径上的后续修复，尚未回补/逐项回归。
+安全审计**未通过**。已定位启用路径上的后续修复；TCP选项边界已回补，其他项尚未闭环。
 不据未编译应用模块或既有绿色测试宣称该版本没有漏洞。
 
 ## 工件身份与签名
@@ -63,7 +63,7 @@ IPv4、DHCP、DNS、socket/netconn等配置关闭。下表只是这些问题的�
 | 提交 | 判断与下一步 |
 | --- | --- |
 | [56b29f8bcfaefe2974dca67bde16cc7c391feaeb](https://github.com/lwip-tcpip/lwip/commit/56b29f8bcfaefe2974dca67bde16cc7c391feaeb) | IPv6重组清理新增空pbuf检查；当前ICMP6/重组均启用。需分配失败回归及精确回补，不能凭正常分片测试排除 |
-| [3d896ba0a37ff3ce73270ca5e230707fe47f60e3](https://github.com/lwip-tcpip/lwip/commit/3d896ba0a37ff3ce73270ca5e230707fe47f60e3) | TCP选项读取新增边界检查；当前TCP启用。需截断选项/跨pbuf测试及回补 |
+| [3d896ba0a37ff3ce73270ca5e230707fe47f60e3](https://github.com/lwip-tcpip/lwip/commit/3d896ba0a37ff3ce73270ca5e230707fe47f60e3) | TCP选项读取边界检查已精确回补；原版ASan越界复现、截断MSS/未知选项及两缓冲区各分割点测试已通过。完整入口pbuf处理与直接解析器测试的范围见[补丁记录](../../shared/src/main/jni/lwip_backend/BACKPORTS.md) |
 | [0a65e654943c7e91c8f1129513572e99072ef142](https://github.com/lwip-tcpip/lwip/commit/0a65e654943c7e91c8f1129513572e99072ef142)、db4e4c9d、[8e75a40acfea6b05ee643099e41f3b2e11ee464d](https://github.com/lwip-tcpip/lwip/commit/8e75a40acfea6b05ee643099e41f3b2e11ee464d)、7d1327e5 | NDP选项查找、长度内复制及依赖性类型修正；当前NDP启用。作为依赖链评估，需未知/零长/截断选项回归，不能只拣末项 |
 | [d08f4773edd0182b7910fc8f046eed82ffcd67c9](https://github.com/lwip-tcpip/lwip/commit/d08f4773edd0182b7910fc8f046eed82ffcd67c9) | Packet Too Big的最小PMTU验证；当前ICMP6启用。需伪造/极小/过大PMTU和后续发包回归 |
 | 0f8331d47b21a24e7ed4542d42cffe4fab5e4dea | netif地址长度断言；本port固定6字节。当前受port约束，仍作为防御性回补候选 |

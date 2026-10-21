@@ -14,7 +14,8 @@ select this backend yet.
 - Checked on: 2026-10-21 using `git ls-remote` and PowerShell `Get-FileHash -Algorithm SHA256`.
 - License: the archive's `lwip-2.2.1/COPYING` contains the three-clause BSD terms;
   retain it unchanged when vendoring source and reproduce it in binary notices.
-- Local patches: none. On 2026-10-22 the ZIP detached signature was verified with
+- Local patches: TCP option bounds fix `3d896ba0a37ff3ce73270ca5e230707fe47f60e3`;
+  see [backport record](BACKPORTS.md). On 2026-10-22 the ZIP detached signature was verified with
   fingerprint `746BEB8E56372EB695EA02E71D6B61C1B84299F5`, anchored to the maintainer's
   Savannah account key. GPG returned GOODSIG/VALIDSIG; owner trust remains undefined.
   The annotated Git tag itself is unsigned. Signature SHA-256:
@@ -25,10 +26,11 @@ select this backend yet.
   upstream review head, configuration applicability and open work.
 
 Build inputs are vendored under `third_party/lwip/`: the complete `src/` tree and
-COPYING, README, FILES, CHANGELOG and UPGRADING (314 unchanged files). Builds do
+COPYING, README, FILES, CHANGELOG and UPGRADING (314 files, one exact backport). Builds do
 not download dependencies. `UPSTREAM-SHA256.txt` records every file; its SHA-256 is
 `7882cdb8bc927ecd47a5b1e06b99f3190f245998e937fd0d043380c5e4a6f8c0`.
-`python scripts/check_lwip_native.py` checks the manifest and exact inventory.
+`python scripts/check_lwip_native.py` checks the original manifest, exact inventory
+and the explicitly pinned post-image of each backported file.
 Git attributes preserve upstream bytes. Port/configuration changes live outside
 the upstream tree. `scripts/generate_lwip_notice.py` generates the packaged
 `diplay-lwip-NOTICE.txt` asset from COPYING and upstream copyright notices.

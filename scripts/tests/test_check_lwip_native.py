@@ -2,9 +2,13 @@ import struct
 import sys
 from pathlib import Path
 import unittest
+import shutil
+import tempfile
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from check_lwip_native import ABIS, inspect_elf, verify_source
+import check_lwip_native
 
 
 def elf(abi, alignment=16384, stack=True, stack_flags=6):
@@ -30,6 +34,26 @@ def elf(abi, alignment=16384, stack=True, stack_flags=6):
 class NativeVerifierTest(unittest.TestCase):
     def test_pinned_source_inventory(self):
         self.assertEqual(314, verify_source()["files"])
+
+    def test_exact_backport_is_reported(self):
+        self.assertEqual(
+            ["3d896ba0a37ff3ce73270ca5e230707fe47f60e3"],
+            verify_source()["backports"],
+        )
+
+    def test_rejects_tampered_backport_and_unpatched_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "backend"
+            shutil.copytree(check_lwip_native.ROOT / "third_party", root / "third_party")
+            shutil.copy(check_lwip_native.ROOT / "UPSTREAM-SHA256.txt", root)
+            with patch.object(check_lwip_native, "ROOT", root):
+                for name in ("src/core/tcp_in.c", "src/core/udp.c"):
+                    path = root / "third_party/lwip" / name
+                    original = path.read_bytes()
+                    path.write_bytes(original + b"\n/* unexpected modification */\n")
+                    with self.assertRaisesRegex(ValueError, "modified upstream source"):
+                        verify_source()
+                    path.write_bytes(original)
 
     def test_each_supported_elf_class(self):
         for abi in ABIS:
