@@ -212,3 +212,43 @@ shared1700、common1578、home6项，共3284项，最终XML确认零失败/错�
 `%TEMP%/diplay-ncm-apk-final.log`；四ABI ELF/ZIP对齐和许可证检查均通过。
 APK SHA-256：`246aed0c81332fb73ebc465f07fed8d9fd1d54e410da52eb33241cfdd0d51489`。
 凭据检查、staged diff检查通过；本批没有设备或Linux内核互通证据。
+
+## P2.2 有界运行器
+
+本批基于 `22dac90c`。新增 `LwipPrototype` 和 pull 型 `LwipPrototypeCore`
+接口；core工厂/准备/输入/定时器/输出拉取/销毁固定在一个线程，USB IN、OUT、
+关闭分别运行独立worker。输入和输出按字节数及帧数双重限额，批次最多32帧，
+事件与最近timer唤醒；没有满队列忙轮询。关闭使后续帧发布失效、清空排队引用，
+使用总deadline join，超时保留正在执行的core所有权，不从其它线程强行free。
+首因保留，额外错误最多4条。LISTENING不依赖USB接收首帧；LINK_ACTIVE只证明
+整块USB传输成功。NotReady计数丢弃、不隐式重发旧UDP帧；协议负责重试。
+未确认的startup输出交付队列后暂停core link，NotReady→Sent合并不吞掉中间暂停。
+
+测试先因缺少实现失败：`%TEMP%/diplay-prototype-red.log`。首轮7项通过后，
+补充startup暂停/就绪合并用例，8项中2项运行失败再修正：
+`diplay-prototype-readiness-red.log` / `diplay-prototype-readiness-green.log`。
+只读审查发现await漏等迟到的USB-close worker，9项中1项先失败再修正：
+`diplay-prototype-join-red.log` / `diplay-prototype-join-green.log`。
+重复close超时的错误历史10项中1项先失败再修正：`diplay-prototype-history-red.log`。
+最终11项包括长等待边界通过，exit 0：`diplay-prototype-boundary-green.log`。
+增量复审未发现新的实质问题；审查者未运行测试。以上使用可控core/port，
+不替代真实native/JNI/NCM互通证据。
+
+详细线程、就绪、预算与未覆盖项见 [运行器说明](prototype-runner.md)。
+尚未提供JNI工厂；还必须配置NCM接收限额并累计桥内部缓冲、native队列及Java队列，
+不能把运行器自身限额当作已满足总512KiB或16MiB预算。未新增后端选择或改变默认路径。
+
+本批完整Android CI exit 0，7m16s：`%TEMP%/diplay-prototype-ci.log`。
+最终检查把可控core保留的借用输入改为复制，再执行完整九项CI，exit 0，1m13s
+（未变任务增量复用）：`%TEMP%/diplay-prototype-final-ci.log`。
+最终XML为shared1711、common1578、home6项，共3295项，零失败/错误/跳过。
+APK四ABI、16KiB ELF/ZIP对齐与许可证检查再次exit 0：
+`%TEMP%/diplay-prototype-apk-final.log`。APK SHA-256：
+`17311e15503e20ca87b6593a258caa0094dc03a4043e59e1f363904cc90c82ad`。
+公开树检查、staged diff检查通过；没有JNI加载、NCM或ARM性能验收证据。
+
+后续验证环境预检：未找到docker/QEMU命令；现有WSL仍仅Ubuntu-20.04/WSL1。
+Android emulator可执行文件存在，`-accel-check`报告WHPX可用，`-list-avds`为空，
+SDK没有system-images。证据 `%TEMP%/diplay-prototype-emulator-preflight.log`。
+尚未安装镜像/创建AVD/启动模拟器；后续可用独立AVD补JNI加载和CheckJNI证据，
+不能替代实际iPhone/NCM或低配ARM性能门槛。
