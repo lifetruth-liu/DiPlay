@@ -1,9 +1,11 @@
 # P2 transport runner
 
 `LwipPrototype` owns an `EthernetFramePort` and a factory for `LwipPrototypeCore`.
-The factory is required: no JNI factory or user-visible backend selection is
-installed yet. The tests inject a controlled core, not the compiled lwIP library.
-This runner alone does not establish NCM/lwIP interoperability or pass G2.
+Controlled JVM tests inject a core; `LwipPrototype.nativeEcho` explicitly creates
+the real native echo adapter on the core worker. It copies configuration at
+construction and owns the supplied port. No user-visible backend selection is
+installed. This runner does not establish actual NCM/iPhone interoperability or
+pass G2.
 
 ## Threads and ownership
 
@@ -38,25 +40,35 @@ does not count as a delivered DAD probe. NotReady drops and counts the unsent
 frame; the queue does not replay it. The core is allowed to probe again after
 100 ms, and protocol timers govern actual retransmission. A NotReady transition
 is latched even when a later successful send arrives before the core wakes.
-The real native adapter must preserve the tested netif/DAD semantics; that
-cross-boundary behavior still needs JNI integration tests.
+The native adapter preserves netif/DAD semantics. Emulator tests exercise real
+timer output through JNI and the runner; USB readiness and actual device DAD
+still require NCM device coverage.
 
 ## Resource accounting still to finish
 
 | Owner | Current limit/status |
 | --- | --- |
-| Runner RX queue | 384 KiB payload and 256 frames |
+| Runner RX queue | 128 KiB payload and 128 frames |
 | Runner TX queue | 192 KiB payload and 128 frames |
-| Native output owner | Adapter contract requires at most 256 KiB including metadata; adapter not implemented |
+| Native output owner | Fixed 128 x 1514-byte ring; complete adapter context below 256 KiB |
 | In-flight frames | One per RX, TX and core call, each at most 1514 bytes |
-| Existing NcmUsbBridge | Retains its legacy 1 MiB/256-frame receive queue and separate read/reassembly buffers |
+| NcmFramePort | Configures bridge to 64 KiB/256 frames, with 14–1514-byte input; legacy VPN defaults remain 1 MiB/256 frames |
+| NCM read/reassembly | Two 32 KiB read buffers; reassembly grows through 32/64/128 KiB capacities |
 | Worker stacks | Up to four owned workers; Android/ARM stack cost not measured |
 
-The runner limits do **not** prove the plan's combined 512 KiB ingress/egress
-budget. Before enabling the prototype, the NCM adapter must configure a smaller
-receive allowance without changing legacy VPN defaults, and the native/Java
-handoff must account for all pools, metadata and temporary copies. Existing NCM
-buffers and worker stacks also belong in the total 16 MiB accounting. None of
+The parser checks frame lengths and cumulative quotas before copying payloads,
+rejects cyclic NDP chains and caps table/entry traversal. Prototype receive
+parses one productive NTB then lets its consumer drain, so coalesced blocks do
+not spuriously exhaust the smaller queue. Oversized frames are counted/dropped;
+an admitted-frame quota violation terminates with RESOURCE_LIMIT.
+
+Conservative ingress payload/allocation ceilings total 480 KiB (runner 128,
+bridge queue 64, read buffers 64, all reassembly growth allocations 224), leaving
+32 KiB for frame/collection metadata and in-flight copies. Egress combines the
+192 KiB runner queue with the adapter's below-256-KiB allocation and small copy
+buffers. These estimates are **not measured budget acceptance**: managed heap
+retention, lwIP pools, USB machinery and worker stacks still belong in total
+16 MiB accounting. None of
 the Android memory, throughput or shutdown performance gates have passed.
 Thread-creation/allocation failures and failed USB close still need explicit
 fault injection and quarantine/reuse tests before production integration.
@@ -73,3 +85,9 @@ close during an active core call, preparation failure, coalesced readiness,
 late-created close workers, repeated close timeouts and long explicit waits.
 Some cases cover multiple invariants. Full Android CI and run evidence are in
 [execution-status.md](execution-status.md).
+
+The Android instrumentation suite also loads the actual library, verifies JNI
+array bounds, old/wrong-thread handles, repeated recreation and timer output,
+and runs the explicit factory through its real core/I/O workers. Native secure
+entropy is supplied from `SecureRandom` outside raw callbacks. No raw callback
+logs, blocks on USB or calls Java.

@@ -53,17 +53,35 @@ object Ntb16Codec {
 
     /** Parses one NTB16 block from [offset] without copying the containing buffer. */
     fun parse(block: ByteArray, offset: Int, length: Int): List<ByteArray> {
+        return try {
+            parseBounded(block, offset, length, 256, 1 shl 20)
+        } catch (_: ReceiveLimitExceeded) { emptyList() }
+    }
+
+    class ReceiveLimitExceeded : IllegalArgumentException("NTB16 receive budget exceeded")
+
+    /** Quotas are checked before copying; skipped frame lengths never allocate a frame array. */
+    fun parseBounded(
+        block: ByteArray, offset: Int, length: Int, maxFrames: Int, maxPayloadBytes: Int,
+        minFrameBytes: Int = 1, maxFrameBytes: Int = MAX_DATAGRAM_BYTES,
+        onRejected: () -> Unit = {},
+    ): List<ByteArray> {
         require(offset >= 0 && length >= 0 && offset <= block.size - length) {
             "NTB16 range is outside the source buffer"
         }
+        require(maxFrames >= 0 && maxPayloadBytes >= 0 && minFrameBytes > 0 && maxFrameBytes >= minFrameBytes)
         val end = offset + length
         if (length < NTH_LENGTH || readU32(block, offset) != NTH16_SIG) return emptyList()
 
         val datagrams = ArrayList<ByteArray>(1)
+        val visited = HashSet<Int>()
+        var copiedBytes = 0
+        var entries = 0
         var ndpOffset = offset + readU16(block, offset + 10)
         var hops = 0
-        val maxHops = maxOf(1, length / 4)
+        val maxHops = minOf(MAX_NDP_TABLES, maxOf(1, length / 4))
         while (ndpOffset != 0 && hops < maxHops) {
+            if (!visited.add(ndpOffset)) break
             if (ndpOffset < offset || ndpOffset + 12 > end) break
             if (readU32(block, ndpOffset) and 0x00ffffff != NDP16_SIG and 0x00ffffff) break
             val ndpLength = readU16(block, ndpOffset + 4)
@@ -71,13 +89,19 @@ object Ntb16Codec {
             var entry = ndpOffset + 8
             val ndpEnd = minOf(ndpOffset + ndpLength, end)
             while (entry + 4 <= ndpEnd) {
+                if (++entries > MAX_NDP_ENTRIES) return datagrams
                 val datagramIndex = readU16(block, entry)
                 val datagramLength = readU16(block, entry + 2)
                 if (datagramIndex == 0 || datagramLength == 0) break
                 val datagramStart = offset + datagramIndex
                 val datagramEnd = datagramStart + datagramLength
                 if (datagramStart >= offset && datagramStart <= end && datagramEnd <= end) {
-                    datagrams.add(block.copyOfRange(datagramStart, datagramEnd))
+                    if (datagramLength !in minFrameBytes..maxFrameBytes) onRejected()
+                    else {
+                        if (datagrams.size >= maxFrames || datagramLength > maxPayloadBytes - copiedBytes) throw ReceiveLimitExceeded()
+                        datagrams.add(block.copyOfRange(datagramStart, datagramEnd))
+                        copiedBytes += datagramLength
+                    }
                 }
                 entry += 4
             }
@@ -109,4 +133,6 @@ object Ntb16Codec {
             ((source[offset + 3].toInt() and 0xff) shl 24)
 
     private const val MAX_DATAGRAM_BYTES = 0xffff - DATAGRAM_INDEX
+    private const val MAX_NDP_TABLES = 64
+    private const val MAX_NDP_ENTRIES = 1024
 }

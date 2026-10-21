@@ -18,6 +18,13 @@ interface EthernetFramePort : Closeable {
 
 /** Takes ownership of [bridge]; it must no longer be shared with a VPN bridge. */
 class NcmFramePort(private val bridge: NcmUsbBridge) : EthernetFramePort {
+    init {
+        try { bridge.limitReceiveQueue(256, 64 * 1024) }
+        catch (error: Throwable) {
+            try { bridge.close() } catch (cleanup: Throwable) { error.addSuppressed(cleanup) }
+            throw error
+        }
+    }
     override val hostMac: ByteArray? get() = bridge.hostMac
 
     override fun send(frame: ByteArray, timeoutMillis: Int): NcmSendResult {
@@ -28,7 +35,8 @@ class NcmFramePort(private val bridge: NcmUsbBridge) : EthernetFramePort {
         return bridge.sendFrame(frame, timeoutMillis)
     }
 
-    override fun recv(timeoutMillis: Long): ByteArray? = bridge.recv(timeoutMillis)
+    override fun recv(timeoutMillis: Long): ByteArray? = try { bridge.recv(timeoutMillis) }
+        catch (error: IphoneUsbException.ResourceLimit) { throw BackendFailure(BackendFailure.Kind.RESOURCE_LIMIT, error) }
     override fun close() = bridge.close()
 
     private companion object {

@@ -1,9 +1,11 @@
 # Native lwIP prototype
 
 This is the P2 core/harness, not an enabled CarPlay backend. The Android build
-packages `libdiplay_lwip.so` for armeabi-v7a, arm64-v8a, x86 and x86_64; the app
-does not load it. Production endpoints, generation-checked JNI handles and USB
-NCM integration remain to be implemented. Provenance is in [UPSTREAM.md](UPSTREAM.md).
+packages `libdiplay_lwip.so` for armeabi-v7a, arm64-v8a, x86 and x86_64.
+`LwipPrototype.nativeEcho` explicitly loads the P2 echo adapter on its core worker;
+production sessions still select the system backend. Production endpoint JNI
+and actual iPhone/NCM interoperability remain unimplemented or unverified.
+Provenance is in [UPSTREAM.md](UPSTREAM.md).
 
 ## Host checks
 
@@ -25,6 +27,8 @@ cover NDP, DAD/conflict, TCP handshake/data, UDP/ICMP, repeated teardown,
 readiness/failure, malformed frames, fragment reassembly, thread/reentry and
 clock contracts. Sanitizer builds also enable lwIP heap/pool guard and sanity
 checks; fixed pools otherwise hide some invalid accesses from ASan.
+Six additional adapter cases cover generation exhaustion/stale tokens, wrong
+threads, entropy depletion, bounded output, real core timers and teardown.
 
 For Linux kernel interoperability, run on a disposable Linux host with root,
 network namespaces and TAP or veth support:
@@ -55,6 +59,15 @@ Output failure is terminal. DAD remains tentative when its probe was not sent.
 Destruction clears TCP/UDP state, reassembly and neighbor queues on the owner
 thread; old pointers must never be reused.
 
+`include/diplay_prototype.h` adds opaque generation tokens, not pointer-valued
+Java handles. Tokens never wrap; exhausted generations reject new contexts.
+The owning thread supplies monotonic time and secure entropy before core calls.
+The native output callback only copies into a fixed 128 x 1514-byte ring and
+never enters Java. Entropy exhaustion fails closed. JNI uses bounded region
+copies, retains no Java references and creates no native threads. The explicit
+echo service exposes TCP 7000 and UDP 6000 only on the virtual netif; EOF aborts
+TCP and is unsuitable for production endpoint semantics.
+
 Configuration caps include 1 MiB lwIP heap, 256 x 1536-byte pbuf pool, 32 TCP
 PCBs, 16 listeners, 32 UDP PCBs, 4 reassemblies and 128 retained fragment pbufs.
 The test kernel tool has a separate 256-frame TX ring and bounded RX/TX batches.
@@ -73,3 +86,13 @@ This verifies the pinned 314-file source inventory, four ELF identities,
 16 KiB LOAD/ZIP alignment, non-executable stack, static data budget and packaged
 license. It does not prove Android loading, kernel/iPhone interoperability,
 throughput or low-end ARM stability. G0/G1/G2 device gates remain unmet.
+
+Run Android runtime checks separately on a task-owned emulator/device:
+
+```sh
+./gradlew :shared:connectedDebugAndroidTest --max-workers=2
+```
+
+Enable `debug.checkjni=1` before the test process starts. See
+[execution evidence](../../../../../docs/lwIP/execution-status.md) for the tested
+ABI/API, test results and limits; a successful APK build alone is not JNI evidence.

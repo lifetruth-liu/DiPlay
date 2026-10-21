@@ -24,7 +24,7 @@ interface LwipPrototypeCore : Closeable {
 }
 
 /**
- * P2 transport runner. No production endpoint/JNI factory or backend selection is installed here.
+ * P2 transport runner. The explicit nativeEcho factory is separate from production backend selection.
  * Owns port and core. Blocking port operations run only on I/O/close workers. Failures remain
  * available in snapshot after termination. A timed-out join never frees the live core externally.
  */
@@ -239,7 +239,7 @@ class LwipPrototype(
                 }
             }
         } catch (error: Throwable) {
-            if (!stopping) stop(BackendFailure(BackendFailure.Kind.USB_IO, error))
+            if (!stopping) stop(usbFailure(error))
         }
     }
 
@@ -262,19 +262,28 @@ class LwipPrototype(
                 }
             }
         } catch (error: Throwable) {
-            if (!stopping) stop(BackendFailure(BackendFailure.Kind.USB_IO, error))
+            if (!stopping) stop(usbFailure(error))
         }
     }
 
     private fun canQueueTx(): Boolean = synchronized(signal) {
         tx.size < TX_QUEUE_FRAMES && txBytes + MAX_FRAME_BYTES <= TX_QUEUE_BYTES
     }
+    private fun usbFailure(error: Throwable) = if (error is BackendFailure) error else BackendFailure(BackendFailure.Kind.USB_IO, error)
     private fun wake() { revision++; signal.notifyAll() }
     private fun worker(name: String, body: () -> Unit) = Thread(body, name).apply { isDaemon = true }
 
     companion object {
-        const val RX_QUEUE_BYTES = 384 * 1024
-        const val RX_QUEUE_FRAMES = 256
+        /** Explicit P2 echo harness; creates native state only on the runner's core thread. */
+        fun nativeEcho(port: EthernetFramePort, mac: ByteArray, ipv6: ByteArray, mtu: Int = 1500): LwipPrototype {
+            require(mac.size == 6 && ipv6.size == 16 && mtu in 1280..1500)
+            val ownedMac = mac.copyOf()
+            val ownedIp = ipv6.copyOf()
+            return LwipPrototype(port) { NativePrototypeCore.create(ownedMac, ownedIp, mtu) }
+        }
+
+        const val RX_QUEUE_BYTES = 128 * 1024
+        const val RX_QUEUE_FRAMES = 128
         const val TX_QUEUE_BYTES = 192 * 1024
         const val TX_QUEUE_FRAMES = 128
         private const val MIN_FRAME_BYTES = 14

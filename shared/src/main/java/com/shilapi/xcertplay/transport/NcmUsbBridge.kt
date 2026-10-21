@@ -46,6 +46,12 @@ class NcmUsbBridge internal constructor(
         private set
     private val frames = ArrayDeque<ByteArray>()
     private var queuedBytes = 0
+    private var receiveMaxFrames = MAX_QUEUED_FRAMES
+    private var receiveMaxBytes = MAX_QUEUED_BYTES
+    private var boundedPrototypeReceive = false
+    @Volatile var rejectedReceiveFrames = 0L
+        private set
+    private val rejectReceiveFrame: () -> Unit = { rejectedReceiveFrames++ }
     private var buffered = ByteArray(0)
     private var bufferedSize = 0
     private var optionalShortPacketPad = false
@@ -185,6 +191,14 @@ class NcmUsbBridge internal constructor(
         }
     }
 
+    /** Configure once under exclusive ownership, before starting the prototype I/O workers. */
+    internal fun limitReceiveQueue(maxFrames: Int, maxBytes: Int) = synchronized(readLock) {
+        require(maxFrames in 1..MAX_QUEUED_FRAMES && maxBytes in 1514..MAX_QUEUED_BYTES)
+        checkOpen()
+        if (frames.size > maxFrames || queuedBytes > maxBytes) throw IphoneUsbException.ResourceLimit("NCM receive queue exceeds new budget")
+        receiveMaxFrames = maxFrames; receiveMaxBytes = maxBytes; boundedPrototypeReceive = true
+    }
+
     override fun close() {
         statusRunning.set(false)
         val requestToClose = synchronized(stateLock) {
@@ -271,10 +285,17 @@ class NcmUsbBridge internal constructor(
                 continue
             }
             if (bufferedSize < blockLength) return
-            for (frame in Ntb16Codec.parse(buffered, 0, blockLength)) enqueueFrame(frame)
+            val parsed = try {
+                Ntb16Codec.parseBounded(buffered, 0, blockLength, receiveMaxFrames - frames.size,
+                    receiveMaxBytes - queuedBytes, if (boundedPrototypeReceive) 14 else 1,
+                    if (boundedPrototypeReceive) 1514 else 65_507, rejectReceiveFrame)
+            } catch (_: Ntb16Codec.ReceiveLimitExceeded) { throw receiveLimitFailure() }
+            for (frame in parsed) enqueueFrame(frame)
             discard(blockLength)
             optionalShortPacketPad = blockLength % usbPacketSize == 0
             finishResync()
+            // Let the consumer drain this NTB before admitting the next buffered block.
+            if (boundedPrototypeReceive && frames.isNotEmpty()) return
         }
     }
 
@@ -340,11 +361,18 @@ class NcmUsbBridge internal constructor(
     }
 
     private fun enqueueFrame(frame: ByteArray) {
-        if (frames.size >= MAX_QUEUED_FRAMES || queuedBytes + frame.size > MAX_QUEUED_BYTES) {
-            throw failSession("NCM frame queue exceeded its bounds")
+        if (frames.size >= receiveMaxFrames || queuedBytes + frame.size > receiveMaxBytes) {
+            throw receiveLimitFailure()
         }
         frames.addLast(frame)
         queuedBytes += frame.size
+    }
+
+    private fun receiveLimitFailure(): IphoneUsbException {
+        val error = if (boundedPrototypeReceive) IphoneUsbException.ResourceLimit("NCM receive budget exceeded")
+            else IphoneUsbException.DeviceUnavailable("NCM frame queue exceeded its bounds")
+        synchronized(stateLock) { if (failure == null) failure = error }
+        return error
     }
 
     private fun pollFrame(): ByteArray {

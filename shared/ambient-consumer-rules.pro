@@ -1,4 +1,7 @@
 # Entry point launched by app_process from the installed application classpath.
+-keep class com.shilapi.xcertplay.network.backend.lwip.LwipNativeBindings {
+    native <methods>;
+}
 -keep class com.shilapi.xcertplay.hud.BydAmbientLightTool {
     public static void main(java.lang.String[]);
 }

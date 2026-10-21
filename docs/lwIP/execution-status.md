@@ -4,6 +4,12 @@
 
 ## 当前交付
 
+- P2 原型增量：已有 generation token JNI、native 有界输出环、SecureRandom 熵注入，
+  `LwipPrototype.nativeEcho` 在 core worker 创建真实 TCP/UDP echo netif；NCM 帧端口
+  配置独立接收限额。API 28 x86_64 模拟器的 5 项 CheckJNI 仪器测试通过，含实际
+  IPv6/NDP、TCP/UDP 帧回显和运行器线程集成。生产端点 JNI、实际 iPhone/NCM 互通、
+  ARM 性能及 G0/G1/G2 仍未验收；用户确认目前没有设备或报告。
+
 - P0.1：完成源码通道清单，见 channel-inventory.md；抓包与设备验证尚缺。
 - P0.2：保存构建环境与设备基线缺口，见 baseline.md；记录 lwIP 2.2.1 官方标签、
   commit 和 ZIP 的 SHA-256，见 ADR 001 / native UPSTREAM.md；P2 原型已固定引入源码。
@@ -252,3 +258,62 @@ Android emulator可执行文件存在，`-accel-check`报告WHPX可用，`-list-
 SDK没有system-images。证据 `%TEMP%/diplay-prototype-emulator-preflight.log`。
 尚未安装镜像/创建AVD/启动模拟器；后续可用独立AVD补JNI加载和CheckJNI证据，
 不能替代实际iPhone/NCM或低配ARM性能门槛。
+
+## P2.2 native 原型适配与 JNI
+
+本批基于 `0147c982`。新增 `diplay_prototype.h` 与 native adapter：句柄是带标签的
+单调 generation token，不向 Java 暴露指针；代际耗尽拒绝创建而不回绕。
+上下文固定 TLS owner，错误线程不能访问或销毁。输出回调只复制到128槽、每槽1514字节的
+环，不调用 Java；整体 adapter 配置分配小于256KiB。JNI 使用有界 region copy，
+不保留 Java 引用、不创建 native 线程。Java 在 raw callback 外供给单调时钟与
+SecureRandom 熵；耗尽终止且禁止继续输出。销毁仍只在 owner 线程执行并擦除熵。
+`nativeEcho` 是显式 P2 工厂，配置防御复制，创建延迟到运行器 core worker；
+没有接入用户设置、生产 SessionNetwork 选择或 AirPlay 启动路径。echo TCP7000 /
+UDP6000 仅虚拟 netif，TCP EOF abort，不具备生产半关闭合同。R8 保留 JNI 名称。
+
+NcmFramePort 接管时设置64KiB/256帧接收限额，运行器RX降为128KiB/128帧。
+Ntb16Codec 在分配 datagram 前检查长度和累计限额，限制 NDP/entry 遍历并拒绝循环链；
+原型丢弃并计数14–1514以外帧，限额超出映射RESOURCE_LIMIT，旧VPN默认不变。
+一个有数据的 NTB 入队后先交消费方排空，再处理同一USB read中的后续块。
+发现并先复现合法合并块被小队列误拒绝，再修复，保留 red/green 日志。
+预算推导见 [运行器说明](prototype-runner.md)，不是 Android 内存实测验收。
+
+测试先后证据（均执行主机 `%TEMP%`）：
+- native API 缺失 red：`diplay-proto-native-red.log`；最终 Linux ASan/UBSan +
+  lwIP heap/pool guards 18/18，exit0，`diplay-proto-native-final.log`；Windows
+  MinGW 18/18，exit0，`diplay-proto-windows-final.log`。新增6例覆盖token、熵、
+  环、时钟和销毁边界；其余12例继续覆盖真实IPv6/NDP/TCP/UDP帧。
+- JNI Kotlin API 缺失 red：`diplay-proto-jni-red.log`。保留缺少JNI实现的APK
+  `build/reports/lwip/proto-red-androidTest.apk`，在模拟器执行3例全部因缺失
+  abiVersion native方法失败：`diplay-proto-jni-runtime-red.log`。新实现同3例
+  全通过：`diplay-proto-jni-runtime-green.log`。
+- 工厂缺失 red：`diplay-proto-factory-red.log`；真实运行器集成加入后4例全通过：
+  `diplay-proto-factory-runtime.log`。
+- NDP、UDP payload、TCP握手和payload JNI往返加入后，执行
+  `./gradlew.bat :shared:connectedDebugAndroidTest --max-workers=2`，exit0，
+  BUILD SUCCESSFUL，1m49s，5例零失败/错误/跳过：`diplay-proto-connected.log`。
+  JUnit XML与逐测试logcat在 `shared/build/outputs/androidTest-results/connected/debug/`。
+  环境为任务独立AVD `diplay-lwip-api28`，Android9/API28、x86_64、WHPX，
+  serial emulator-5580；debug.checkjni=1，测试进程报告已开启-Xcheck:jni。
+  logcat副本 `build/reports/lwip/proto-checkjni-logcat.txt`；AVD已关闭。
+  ddmlib曾报告旧emulator console不支持getAvdPath命令，随后正常执行5例，非测试失败。
+- NCM循环链运行red：`diplay-proto-ntb-cycle-red.log`；预算API编译red：
+  `diplay-proto-rx-budget-red.log`；合并块运行red：`diplay-proto-rx-stream-red.log`。
+  codec/framing/send/runner定向回归exit0：`diplay-proto-rx-stream-green.log`。
+- native APK检查器Python单测5项通过；只读增量复审没有发现新的实质缺陷，
+  审查者未跑Gradle。
+
+上述模拟器和宿主证据不是系统内核TAP/veth互通、真实NCM或低配ARM性能证据。
+G0/G1缺少参考设备与基线报告，G2吞吐/资源/稳定性门槛仍未通过。
+
+仪器测试APK SHA-256（用于对应红绿运行）：
+- 缺失JNI版本：`eb2f7b7c9ab303cdcd127e612a33a86861dfe1eb5578e6ab7902e5953f355f3e`。
+- 最终5例版本：`962fbdaec68bd422e8b84a72043da1d857e724006e87305c6c019c999620b1cf`。
+
+本批最终完整Android CI九项任务exit0，BUILD SUCCESSFUL，7m50s：
+`%TEMP%/diplay-proto-jni-final-ci.log`。终态JUnit XML为shared1718、common1578、
+samples/home6项，共3302项，零失败/错误/跳过（home任务增量复用）。
+最终APK检查exit0，`%TEMP%/diplay-proto-apk-final.log`；四ABI库不压缩、
+ELF LOAD及ZIP偏移16KiB对齐、栈不可执行，固定314文件源码与许可证检查通过。
+APK SHA-256：`b030790b17625349f0abbac996f10af63d758b76224805378c8e311f7b01a3d7`。
+公开树检查和staged diff检查通过；未修改上游源码。

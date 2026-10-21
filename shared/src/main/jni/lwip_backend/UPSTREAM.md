@@ -1,7 +1,8 @@
 # lwIP upstream pin
 
 The pinned source is vendored and compiled into the prototype `libdiplay_lwip.so`.
-The application does not load or select this backend yet.
+Only the explicit P2 prototype/test factory loads it; production sessions do not
+select this backend yet.
 
 - Release: **2.2.1**.
 - Official Git: `https://git.savannah.nongnu.org/git/lwip.git` (redirects to the GNU HTTPS Git host).
