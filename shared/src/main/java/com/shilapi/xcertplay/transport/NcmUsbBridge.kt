@@ -75,9 +75,27 @@ class NcmUsbBridge internal constructor(
     }
 
     /** Wraps one Ethernet frame in one NTB16 block and writes it to bulk OUT. */
-    fun send(frame: ByteArray, timeoutMillis: Int) = synchronized(writeLock) {
-        checkOpen()
+    fun send(frame: ByteArray, timeoutMillis: Int) {
+        when (val result = sendFrame(frame, timeoutMillis)) {
+            is NcmSendResult.Failed -> throw result.cause
+            NcmSendResult.Sent, NcmSendResult.NotReady -> Unit
+        }
+    }
+
+    /** Blocking USB operation for an I/O worker; never call on the lwIP core thread. */
+    fun sendFrame(frame: ByteArray, timeoutMillis: Int): NcmSendResult {
         require(timeoutMillis > 0) { "timeoutMillis must be positive" }
+        return synchronized(writeLock) {
+            try {
+                sendLocked(frame, timeoutMillis)
+            } catch (error: IphoneUsbException) {
+                NcmSendResult.Failed(error)
+            }
+        }
+    }
+
+    private fun sendLocked(frame: ByteArray, timeoutMillis: Int): NcmSendResult {
+        checkOpen()
         val sequence = synchronized(stateLock) {
             checkOpenLocked()
             this.sequence.also { this.sequence = (this.sequence + 1) and 0xffff }
@@ -88,12 +106,30 @@ class NcmUsbBridge internal constructor(
         // timeout, and each USBMUX write of the iAP2 handshake finished only when one expired:
         // ~2 s per step on Android 8.1–14 (#634, #335, #301). Until the phone takes its first
         // frame, a frame that cannot go out at once is dropped, as it was after the full timeout.
-        val transferred = connection.bulkTransfer(
-            outEndpoint,
-            block,
-            block.size,
-            if (bulkOutAccepted) timeoutMillis else minOf(timeoutMillis, NOT_READY_WRITE_TIMEOUT_MILLIS),
-        )
+        val transferred = try {
+            connection.bulkTransfer(
+                outEndpoint,
+                block,
+                block.size,
+                if (bulkOutAccepted) timeoutMillis else minOf(timeoutMillis, NOT_READY_WRITE_TIMEOUT_MILLIS),
+            )
+        } catch (error: RuntimeException) {
+            throw failSession("NCM write failed", error)
+        }
+        // A detach/close may have completed while bulkTransfer was in flight.
+        var readyDiagnostic: String? = null
+        val result = synchronized(stateLock) {
+            checkOpenLocked()
+            val firstAccepted = !bulkOutAccepted && transferred == block.size
+            completeSendLocked(transferred, block.size).also {
+                if (firstAccepted) readyDiagnostic = "NCM bulk-out ready after $notReadyFrames dropped frames"
+            }
+        }
+        readyDiagnostic?.let { message -> runCatching { onDiagnostic(message) } }
+        return result
+    }
+
+    private fun completeSendLocked(transferred: Int, expected: Int): NcmSendResult {
         // Before StartCarPlaySession the phone keeps the NCM data path NAKed. Android reports the
         // resulting timeout as -1; it is not a detach and later packets must be allowed to retry.
         if (transferred <= 0) {
@@ -102,23 +138,21 @@ class NcmUsbBridge internal constructor(
                 loggedWriteTimeout = true
                 Log.i(IphoneCarPlayConfiguration.TAG, "ncm bulk-out not ready; retaining bridge for retry")
             }
-            return@synchronized
+            return NcmSendResult.NotReady
+        }
+        if (transferred != expected) {
+            return NcmSendResult.Failed(failSession("NCM write transferred $transferred of $expected bytes"))
         }
         if (!bulkOutAccepted) {
             bulkOutAccepted = true
             linkOpenedAtNanos = System.nanoTime()
-            runCatching { onDiagnostic("NCM bulk-out ready after $notReadyFrames dropped frames") }
-        }
-        if (transferred != block.size) {
-            throw IphoneUsbException.DeviceUnavailable(
-                "NCM write transferred $transferred of ${block.size} bytes",
-            )
         }
         traffic.sent()
         if (loggedWriteTimeout) {
             loggedWriteTimeout = false
             Log.i(IphoneCarPlayConfiguration.TAG, "ncm bulk-out became ready")
         }
+        return NcmSendResult.Sent
     }
 
     /** Frames to and from the iPhone so far, for a report line; see [NcmTrafficCounter]. */

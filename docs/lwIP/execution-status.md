@@ -173,3 +173,42 @@ exit 0，证据 `%TEMP%/diplay-native-apk.log`。APK SHA-256：
 CI新增独立Linux宿主sanitizer任务，以及Android构建后的APK检查；本地已执行对应命令，
 尚未声称远程GitHub Actions运行通过。两份shell入口在Git中记录100755。
 许可证资产重新生成摘要一致，公开树凭据检查与staged diff检查通过；未修改上游空白。
+
+## P2.2 NCM 发送结果与帧端口
+
+本批基于 `ba80fdf7`。`NcmUsbBridge.sendFrame()` 新增 Sent / NotReady /
+Failed 结果；旧 `send()` 继续对 NotReady 静默返回、失败抛错，并保留参数校验异常。
+Android bulkTransfer 返回负数或0只能说明没有报告完整发送，不能独自证明拔线。
+短写不设置 link-open 时间或成功计数，USB异常和短写成为终止失败；USB返回后在
+状态锁内重检关闭并发布结果。诊断回调位于状态锁外，避免阻断另一个线程关闭。
+新增 `EthernetFramePort` / `NcmFramePort`，适配器接管 bridge 的独占所有权，
+发送限制14–1514字节，接收继续复用原有 UsbRequest 异步读；不能同时交给VPN。
+这是阻塞I/O适配层，必须由单独I/O worker调用；尚无原型core线程或队列，
+不把接口注释视为已实现线程隔离。
+
+发送结果与端口测试首次均因缺少类型/入口失败：
+`%TEMP%/diplay-ncm-result-red.log` / `diplay-ncm-port-red.log`。
+状态锁内诊断阻断关闭、输入校验被错误包装分别先失败：
+`diplay-ncm-diagnostic-red.log` / `diplay-ncm-validation-red.log`；修正后
+发送13项及原分帧/计数定向回归 exit 0：`diplay-ncm-final-focused.log`。
+覆盖not-ready前后、0/-1、完整发送、短写、关闭、USB异常、传输中关闭、
+MAC防御复制、帧长度限制与独占关闭。只读复审未发现新实质问题；审查者未跑测试。
+
+P2.2 仍需实现 `LwipPrototype` 与有界RX/TX/core工作线程，接入native上下文、
+实际NCM互通及性能预检；当前没有用户态后端启动入口。
+
+首轮完整CI exit 1，6m41s：shared1700项通过，common1578项中既有
+`SettingsBackupServerTest.severalIdleConnectionsDoNotHoldUpTheNextRequestEither`
+在创建6个空闲Socket时Connection refused（第381行），未进入后续HTTP断言。
+日志 `%TEMP%/diplay-ncm-ci.log`，失败XML副本
+`build/reports/lwip/ncm-ci-backup-failure.xml`。单独该类30项重跑exit 0，10s：
+`%TEMP%/diplay-ncm-backup-repro.log`。尚未稳定复现，未改该类测试或备份服务代码，
+不能声称其根因已修复。该服务backlog为4，调度下连接突发是待证实的可能因素。
+
+未改生产代码或测试断言的完整CI重跑 exit 0，BUILD SUCCESSFUL，5m37s：
+shared1700、common1578、home6项，共3284项，最终XML确认零失败/错误/跳过。
+日志 `%TEMP%/diplay-ncm-ci-final.log`。首轮失败仍为未定位的间歇问题，
+不能用此重跑通过宣称已修复。APK检查再次 exit 0，
+`%TEMP%/diplay-ncm-apk-final.log`；四ABI ELF/ZIP对齐和许可证检查均通过。
+APK SHA-256：`246aed0c81332fb73ebc465f07fed8d9fd1d54e410da52eb33241cfdd0d51489`。
+凭据检查、staged diff检查通过；本批没有设备或Linux内核互通证据。
