@@ -41,8 +41,9 @@ heap peak只覆盖lwIP heap，不包括静态池、工具TX环、临时复制、
 不能据此通过16MiB动态内存或24MiB PSS预算。未测低配ARM吞吐、core延迟、
 十分钟稳定负载、生产端点关闭取消或完整会话。
 
-Android镜像虽有tc，但不支持netem；丢包/延迟注入预检失败，未把该项标为通过。
-后续仍需独立的丢包、乱序、重复与延迟实验，以及实际NCM/ARM数据。
+Android镜像虽有tc，但不支持netem；本批没有把该项标为通过。
+后续已补[确定性出口故障实验](prototype-wire-faults.md)，仍缺双向随机故障、
+UDP损失及实际NCM/ARM数据。
 本回归覆盖N05相关原型机制，不把它等同于T05生产合同全部满足。
 
 运行日志、命令和后续完整CI见[实施记录](execution-status.md)。

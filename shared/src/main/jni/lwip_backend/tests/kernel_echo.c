@@ -3,6 +3,7 @@
 #include "diplay_lwip.h"
 #include "echo_services.h"
 #include "lwip/priv/tcp_priv.h"
+#include "wire_faults.h"
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -22,20 +23,53 @@
 #include <unistd.h>
 
 /* Test tool only: 256 * 1514-byte frames, never more than the 512 KiB TX budget.
- * Raw callbacks only copy into this queue. File I/O, logging and waiting stay outside lwIP. */
-#define TX_CAPACITY 256
-struct frame {
-    size_t length;
-    uint8_t bytes[1514];
-};
+ * Raw callbacks do bounded in-memory queue/diagnostic work. I/O, logging and waiting
+ * stay outside lwIP. */
 struct port {
     int fd, control, random_fd, raw, paused;
     struct ifreq interface;
-    size_t head, count, random_remaining;
+    size_t random_remaining;
+    uint64_t now;
     unsigned max_refused, sndbuf_at_max_refused, zero_window_samples;
     uint32_t random[512];
-    struct frame tx[TX_CAPACITY];
+    wf_queue tx;
+    struct {
+        uint32_t sequence, hash;
+        uint16_t peer, length;
+    } seen[1024];
+    size_t seen_count, seen_next;
+    uint64_t repeated_tcp_admissions;
 };
+_Static_assert(sizeof(struct port) <= 512 * 1024, "test transport/diagnostics budget exceeded");
+static void inspect_output(struct port *port, const uint8_t *bytes, size_t length) {
+    if (length < 74 || bytes[20] != 6 || bytes[54] != (7000 >> 8) || bytes[55] != (7000 & 255))
+        return;
+    size_t header = (bytes[66] >> 4) * 4;
+    if (header < 20 || 54 + header >= length)
+        return;
+    uint32_t sequence = (uint32_t)bytes[58] << 24 | (uint32_t)bytes[59] << 16 |
+                        (uint32_t)bytes[60] << 8 | bytes[61];
+    uint16_t peer = (uint16_t)((bytes[56] << 8) | bytes[57]);
+    uint16_t size = (uint16_t)(length - 54 - header);
+    uint32_t hash = UINT32_C(2166136261);
+    for (size_t i = 54 + header; i < length; i++)
+        hash = (hash ^ bytes[i]) * UINT32_C(16777619);
+    for (size_t i = 0; i < port->seen_count; i++) {
+        if (port->seen[i].sequence == sequence && port->seen[i].peer == peer &&
+            port->seen[i].length == size && port->seen[i].hash == hash) {
+            port->repeated_tcp_admissions++;
+            return;
+        }
+    }
+    size_t index = port->seen_next;
+    port->seen[index].sequence = sequence;
+    port->seen[index].peer = peer;
+    port->seen[index].length = size;
+    port->seen[index].hash = hash;
+    port->seen_next = (index + 1) % 1024;
+    if (port->seen_count < 1024)
+        port->seen_count++;
+}
 static int inspect_pressure(void *arg) {
     struct port *port = arg;
     for (struct tcp_pcb *pcb = tcp_active_pcbs; pcb; pcb = pcb->next) {
@@ -84,16 +118,14 @@ static uint32_t random32(void *arg) {
 }
 static dp_tx_result enqueue(void *arg, const uint8_t *bytes, size_t length) {
     struct port *port = arg;
-    if (length > 1514)
+    int admitted = wf_push(&port->tx, bytes, length, clock_ms(NULL));
+    if (admitted < 0)
         return DP_TX_FAILED;
-    if (port->count == TX_CAPACITY) {
+    if (!admitted) {
         port->paused = 1;
         return DP_TX_NOT_READY;
     }
-    struct frame *frame = &port->tx[(port->head + port->count) % TX_CAPACITY];
-    frame->length = length;
-    memcpy(frame->bytes, bytes, length);
-    port->count++;
+    inspect_output(port, bytes, length);
     return DP_TX_ACCEPTED;
 }
 static int open_port(struct port *port, const char *name, int raw) {
@@ -138,15 +170,17 @@ static int interface_up(struct port *port) {
     return !!(port->interface.ifr_flags & IFF_UP);
 }
 static int flush(struct port *port) {
-    for (int batch = 0; batch < 32 && port->count; batch++) {
-        struct frame *frame = &port->tx[port->head];
-        ssize_t n = write(port->fd, frame->bytes, frame->length);
+    for (int batch = 0; batch < 32; batch++) {
+        const unsigned char *bytes;
+        size_t length;
+        if (!wf_peek(&port->tx, port->now, &bytes, &length))
+            break;
+        ssize_t n = write(port->fd, bytes, length);
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR))
             break;
-        if (n != (ssize_t)frame->length)
+        if (n != (ssize_t)length)
             return -1;
-        port->head = (port->head + 1) % TX_CAPACITY;
-        port->count--;
+        wf_sent(&port->tx);
     }
     return 0;
 }
@@ -161,13 +195,16 @@ static ssize_t receive(struct port *port, uint8_t *bytes, size_t length) {
     return n;
 }
 int main(int argc, char **argv) {
-    if (argc != 3 || (strcmp(argv[1], "--tap") && strcmp(argv[1], "--veth"))) {
-        fprintf(stderr, "Usage: %s --tap|--veth interface\n", argv[0]);
+    if ((argc != 3 && argc != 4) || (strcmp(argv[1], "--tap") && strcmp(argv[1], "--veth")) ||
+        (argc == 4 && strcmp(argv[3], "--faults-1") && strcmp(argv[3], "--faults-5"))) {
+        fprintf(stderr, "Usage: %s --tap|--veth interface [--faults-1|--faults-5]\n", argv[0]);
         return 2;
     }
     struct port *port = calloc(1, sizeof(*port));
     if (!port)
         return 1;
+    if (argc == 4)
+        port->tx.config = (wf_config){!strcmp(argv[3], "--faults-1") ? 100 : 20, 5, 10, 100};
     port->fd = port->control = port->random_fd = -1;
     dp_core *core = NULL;
     int result = 1;
@@ -192,6 +229,7 @@ int main(int argc, char **argv) {
     uint64_t start = clock_ms(NULL);
     int ready = 0;
     while (!stopping) {
+        port->now = clock_ms(NULL);
         if (refill_random(port)) {
             perror("entropy");
             goto cleanup;
@@ -209,7 +247,7 @@ int main(int argc, char **argv) {
             perror("Ethernet TX (failed or short frame)");
             goto cleanup;
         }
-        if (port->paused && port->count < TX_CAPACITY / 2) {
+        if (port->paused && port->tx.count < WF_CAPACITY / 2) {
             port->paused = 0;
             if (dp_core_set_link_ready(core, 1) != DP_OK)
                 goto cleanup;
@@ -221,7 +259,10 @@ int main(int argc, char **argv) {
             goto cleanup;
         if (!ready && timeout > 100)
             timeout = 100;
-        struct pollfd event = {port->fd, (short)(POLLIN | (port->count ? POLLOUT : 0)), 0};
+        uint32_t wait = wf_wait(&port->tx, clock_ms(NULL));
+        if (wait && wait < timeout)
+            timeout = wait;
+        struct pollfd event = {port->fd, (short)(POLLIN | (!wait ? POLLOUT : 0)), 0};
         int events = poll(&event, 1, timeout > 10000 ? 10000 : (int)timeout);
         if (events < 0 && errno == EINTR)
             continue;
@@ -250,6 +291,15 @@ int main(int argc, char **argv) {
     }
     result = 0;
 cleanup:
+    fprintf(stderr,
+            "faults: admitted=%" PRIu64 " dropped=%" PRIu64 " delayed=%" PRIu64
+            " reordered=%" PRIu64 " duplicated=%" PRIu64 "\n",
+            port->tx.admitted, port->tx.dropped, port->tx.delayed, port->tx.reordered,
+            port->tx.duplicates_sent);
+    fprintf(stderr, "repeated_tcp_admissions=%" PRIu64 "\n", port->repeated_tcp_admissions);
+    if (argc == 4 && (!port->tx.dropped || !port->tx.delayed || !port->tx.reordered ||
+                      !port->tx.duplicates_sent))
+        result = 1;
     fprintf(stderr, "max_refused=%u sndbuf_at_max_refused=%u zero_window_samples=%u\n",
             port->max_refused, port->sndbuf_at_max_refused, port->zero_window_samples);
     if (core) {

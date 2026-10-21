@@ -7,14 +7,14 @@ if [ "${1:-}" != --child ]; then
     [ "$(id -u)" = 0 ] || { echo 'Requires emulator adb root' >&2; exit 1; }
     case "${1:-}" in tap|veth) ;; *) echo 'Expected tap or veth' >&2; exit 2 ;; esac
     [ "$#" -le 2 ] || exit 2
-    case "${2:-basic}" in basic|slow) ;; *) echo 'Expected basic or slow scenario' >&2; exit 2 ;; esac
+    case "${2:-basic}" in basic|slow|faults-1|faults-5) ;; *) echo 'Expected basic, slow, faults-1 or faults-5 scenario' >&2; exit 2 ;; esac
     exec "$root/lwip_namespace_exec" sh "$0" --child "$1" "$(readlink /proc/self/ns/net)" "${2:-basic}"
 fi
 [ "$#" = 4 ] || exit 2
 [ "$(readlink /proc/self/ns/net)" != "$3" ] || { echo 'Refusing parent namespace' >&2; exit 1; }
 mode="$2"
 scenario="$4"
-case "$scenario" in basic|slow) ;; *) exit 2 ;; esac
+case "$scenario" in basic|slow|faults-1|faults-5) ;; *) exit 2 ;; esac
 case "$mode" in tap|veth) ;; *) exit 2 ;; esac
 pid=''
 cleanup() {
@@ -34,7 +34,11 @@ if [ "$mode" = veth ]; then
 else
     peer=dp-lwip0
 fi
-"$root/lwip_kernel_echo" "--$mode" dp-lwip0 > "$root/kernel-$mode.log" 2>&1 &
+case "$scenario" in
+    faults-1|faults-5) set -- "--$mode" dp-lwip0 "--$scenario" ;;
+    *) set -- "--$mode" dp-lwip0 ;;
+esac
+"$root/lwip_kernel_echo" "$@" > "$root/kernel-$mode.log" 2>&1 &
 pid=$!
 attempt=0
 while ! ip link show dev "$peer" >/dev/null 2>&1; do
@@ -45,11 +49,11 @@ while ! ip link show dev "$peer" >/dev/null 2>&1; do
 done
 ip link set "$peer" address 02:00:00:00:00:02 mtu 1500 up
 ip -6 addr add fe80::2/64 dev "$peer" nodad
-if [ "$scenario" = slow ]; then
-    "$root/lwip_kernel_peer" "$peer" --slow
-else
-    "$root/lwip_kernel_peer" "$peer"
-fi
+case "$scenario" in
+    slow) "$root/lwip_kernel_peer" "$peer" --slow ;;
+    faults-1|faults-5) "$root/lwip_kernel_peer" "$peer" --tcp-only ;;
+    *) "$root/lwip_kernel_peer" "$peer" ;;
+esac
 kill "$pid"
 wait "$pid"
 pid=''

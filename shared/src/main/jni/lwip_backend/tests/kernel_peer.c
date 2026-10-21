@@ -262,8 +262,9 @@ done:
     return result;
 }
 int main(int argc, char **argv) {
-    if (argc < 2 || argc > 3 || (argc == 3 && strcmp(argv[2], "--slow"))) {
-        fprintf(stderr, "Usage: %s interface [--slow]\n", argv[0]);
+    if (argc < 2 || argc > 3 ||
+        (argc == 3 && strcmp(argv[2], "--slow") && strcmp(argv[2], "--tcp-only"))) {
+        fprintf(stderr, "Usage: %s interface [--slow|--tcp-only]\n", argv[0]);
         return 2;
     }
     unsigned scope = if_nametoindex(argv[1]);
@@ -271,14 +272,18 @@ int main(int argc, char **argv) {
         perror("interface index");
         return 1;
     }
-    if (argc == 3)
+    if (argc == 3 && !strcmp(argv[2], "--slow"))
         return slow_reader(scope);
     unsigned char payload[65536];
     for (size_t i = 0; i < sizeof(payload); i++)
-        payload[i] = (unsigned char)i;
+        payload[i] = stream_byte(i);
     for (int repeat = 0; repeat < 3; repeat++)
         if (tcp_case(scope, payload, sizeof(payload)))
             return 1;
+    if (argc == 3) {
+        puts("PASS independent kernel TCP (3 x 64 KiB)");
+        return 0;
+    }
     if (udp_cases(scope, payload))
         return 1;
     puts("PASS independent kernel TCP (3 x 64 KiB), UDP (empty/MTU/fragmented)");

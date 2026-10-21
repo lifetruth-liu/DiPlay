@@ -407,3 +407,43 @@ APK SHA-256：`54677a220cff6e9fa79ee1c7984212bc38cdea2c01282a7181b1de8adc918359`
 G0/G1/G2、生产端点合同、实际NCM/ARM预算仍未验收。
 
 最终CI终态XML：shared1718、common1578、samples/home6，共3302项零失败/错误/跳过；公开树与staged diff检查通过。
+
+## P2.1 有界出口故障注入
+
+本批基于 `650b1920`，为不支持netem的任务AVD新增测试专用wire_faults调度队列。
+固定256槽拥有帧副本，不扩容；满队列返回not-ready。faults-1/faults-5每100/20个
+接纳Ethernet帧丢一个，另调度5ms延迟、每第10帧与可用排队前帧交换，
+每100帧相位50复制一次。重复写共用槽，第二次完整write后才计数；短写/失败不出队。
+head deadline和core timer控制poll，未到期不请求POLLOUT。CLI/脚本保留无注入默认；
+fault配置退出时任一故障计数为零则失败，客户端/echo失败均传播。
+仅CMake测试工具链接该模块，Android.mk产品库不变。
+
+先创建测试后因缺少wire_faults.c失败：`%TEMP%/diplay-wire-red.log`。
+新增6例覆盖容量、绕环、输入复制、延迟deadline、丢弃、相邻重排、重复完成、
+非法长度及时间溢出。最终Linux ASan/UBSan +lwIP guards25/25 exit0：
+`diplay-wire-linux-verified.log`；Windows25/25 exit0：`diplay-wire-windows-final.log`。
+Android shell语法检查通过。
+
+API28 x86_64任务AVD上独立内核TCP三次64KiB，四种模式均exit0：
+- TAP faults-1：236 admitted /2 drop /234 delayed /18 queued swaps /2 duplicates，
+  `diplay-wire-tap-1-first.log`。
+- TAP faults-5：260/13/247/10/3；veth faults-1：204/2/202/16/2；
+  veth faults-5：246/12/234/7/2，`diplay-wire-other-first.log`。
+以上是发送方向Ethernet帧确定性规则，不是随机损失或精确TCP数据段比例。
+格式化重编后无故障TAP基本互通、veth十秒暂停1MiB恢复均exit0且全部注入计数0：
+`diplay-wire-baseline-final.log`。
+
+另保存veth faults-5抓包build/reports/lwip/wire-faults5.pcap；仅抓包见到的重复
+TCP载荷与人工复制数量相同，不能用作栈重传证据（首次输出可能在线缆前已丢弃）。
+新增固定1024项native输出重复提交观测，人工复制write不重复经过它；整个port的
+队列/观测/熵/元数据编译期断言<=512KiB。最终veth faults-5再运行exit0，
+记录10次重复native提交，而人工复制2次：`diplay-wire-retransmission-final.log`。
+这是有界工作集估计，非完整TCP MIB；哈希碰撞/淘汰/分段变化可能影响。
+规则、完整数据与范围见[出口故障实验](prototype-wire-faults.md)。
+
+父namespace无遗留测试接口/进程，AVD已关闭：`diplay-wire-cleanup.log`。
+完整九项Android CI exit0，3s（增量复用）：`diplay-wire-final-ci.log`。
+APK四ABI/16KiB/许可证检查exit0：`diplay-wire-apk-final.log`；产品APK未变，SHA-256
+`54677a220cff6e9fa79ee1c7984212bc38cdea2c01282a7181b1de8adc918359`。
+公开树检查、staged diff检查通过。只读审查未发现实质问题，未运行测试。
+UDP故障归因、双向随机故障、长时负载、实际NCM/ARM以及G0/G1/G2仍未验收。

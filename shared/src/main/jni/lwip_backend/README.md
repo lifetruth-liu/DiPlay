@@ -29,6 +29,8 @@ clock contracts. Sanitizer builds also enable lwIP heap/pool guard and sanity
 checks; fixed pools otherwise hide some invalid accesses from ASan.
 Six additional adapter cases cover generation exhaustion/stale tokens, wrong
 threads, entropy depletion, bounded output, real core timers and teardown.
+Six wire-scheduler cases cover capacity/wraparound, copied input, deadlines,
+periodic drops, queued pair swaps, duplicate completion and invalid lengths.
 
 For Linux kernel interoperability, run on a disposable Linux host with root,
 network namespaces and TAP or veth support:
@@ -100,6 +102,21 @@ The deterministic `tcp_large_refused` case covers a 40320-byte callback with an
 unchanged 32768-byte send buffer. Aggregate test-tool pressure counters are
 sampled outside raw callbacks, not logged per packet. These checks do not prove
 production endpoint consumption/cancellation contracts or total memory budgets.
+
+`faults-1` and `faults-5` replace netem for deterministic one-way output faults:
+
+```sh
+adb -s SERIAL shell sh /data/local/tmp/diplay-lwip-kernel/test_lwip_android_kernel.sh tap faults-1
+adb -s SERIAL shell sh /data/local/tmp/diplay-lwip-kernel/test_lwip_android_kernel.sh veth faults-5
+```
+
+They drop every 100th/20th admitted Ethernet frame, schedule 5-ms delay, swap
+every eligible 10th frame with its queued predecessor, and duplicate phase 50
+of each 100 frames. Actual counts are printed; they are not random distributions
+or exact TCP-segment percentages. The test fails if a fault type never occurred.
+The queue plus bounded output-observation metadata stays below 512 KiB.
+Only TCP is checked with these profiles; UDP loss and bidirectional random
+impairments remain unverified. See [wire fault evidence](../../../../../docs/lwIP/prototype-wire-faults.md).
 
 ## Ownership and limits
 
