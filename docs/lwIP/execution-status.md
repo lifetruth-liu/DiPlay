@@ -7,7 +7,8 @@
 - P2 原型增量：已有 generation token JNI、native 有界输出环、SecureRandom 熵注入，
   `LwipPrototype.nativeEcho` 在 core worker 创建真实 TCP/UDP echo netif；NCM 帧端口
   配置独立接收限额。API 28 x86_64 模拟器的 5 项 CheckJNI 仪器测试通过，含实际
-  IPv6/NDP、TCP/UDP 帧回显和运行器线程集成。生产端点 JNI、实际 iPhone/NCM 互通、
+  IPv6/NDP、TCP/UDP 帧回显和运行器线程集成；同一任务AVD上独立内核客户端通过
+  TAP及veth的TCP/UDP含分片往返。生产端点 JNI、实际 iPhone/NCM 互通、
   ARM 性能及 G0/G1/G2 仍未验收；用户确认目前没有设备或报告。
 
 - P0.1：完成源码通道清单，见 channel-inventory.md；抓包与设备验证尚缺。
@@ -317,3 +318,51 @@ samples/home6项，共3302项，零失败/错误/跳过（home任务增量复用
 ELF LOAD及ZIP偏移16KiB对齐、栈不可执行，固定314文件源码与许可证检查通过。
 APK SHA-256：`b030790b17625349f0abbac996f10af63d758b76224805378c8e311f7b01a3d7`。
 公开树检查和staged diff检查通过；未修改上游源码。
+
+## P2.1 独立 Linux 内核互通（Android 任务 AVD）
+
+本批基于 `e5371cbc`，补足原宿主环境缺少网络命名空间时的独立对端证据。
+新增仅用于测试的 `lwip_namespace_exec`、`lwip_kernel_peer`、
+`lwip_kernel_offloads` CLI；CMake 为 Linux/Android 生成工具，Android.mk 产品库不变。
+客户端只链接 libc/kernel socket，不依赖 lwIP 或自制帧构造器。
+设备侧脚本仅接受 disposable emulator/root，并在 helper unshare + 核对不同
+netns 后才配置接口。脚本结束关闭 echo，接口随临时 namespace 回收。
+
+环境：任务 AVD `diplay-lwip-api28`，serial emulator-5580，Android9/API28 x86_64，
+Linux4.4.124+、WHPX；NDK28.2.13676358，Android API24 standalone工具，
+CMake3.15.3/MinGW Makefiles。旧CMake给出版本警告，但构建目标成功。
+测试中的root/TAP/veth权限仅用于内核对端，不是产品用户态网络的权限要求。
+
+先观察 Android target 缺失：`%TEMP%/diplay-kernel-android-target-red.log`。
+增加跨编译目标后，原 `/dev/net/tun` 在Android不存在导致真实运行exit1：
+`diplay-kernel-android-tap-red.log`；测试工具仅在ENOENT时回退 `/dev/tun`。
+初轮 TAP 又因等待 `/sys/class/net` 的接口超时，调查在同一新netns中
+`ip link show dev dp-lwip0` 能看到接口，继承的sysfs却看不到：
+`diplay-kernel-android-sysfs-probe.log`。两个测试脚本改为通过ip查询当前namespace。
+
+veth 首轮 TCP connect timeout：`diplay-kernel-android-veth-first.log`。
+保留抓包 `build/reports/lwip/kernel-veth-red.pcap`，tcpdump显示NDP有效但
+TCP SYN cksum 0xfd32 incorrect（expected0x9a02等），证实AF_PACKET收到卸载前报文。
+新CLI在两端隔离veth上关闭TSO/GSO/GRO/TX checksum并读取确认；未关闭lwIP校验。
+修正后veth通过：`diplay-kernel-android-veth-green.log`。
+
+格式化并重新跨编译全部工具后，最终依次执行tap、veth均exit0：
+`%TEMP%/diplay-kernel-android-final.log`。每种模式独立内核对端验证：
+- TCP三次连接，每次64KiB，累计内容、顺序和完整长度一致。
+- UDP长度0、1、1200、4096、8192，内容及来源fe80::1/6000一致，含IPv6分片往返。
+- 最终tap：rx271/tx226/not_ready0/heap_peak35880；veth：rx307/tx230/
+  not_ready0/heap_peak34448。这些是本次echo计数，不是性能或总内存验收。
+
+父namespace仍为net:[4026531963]，测试前后无dp-lwip0/dp-peer0，结束后无lwIP
+测试进程：`diplay-kernel-android-cleanup.log`；任务AVD已关闭。
+Linux宿主18项ASan/UBSan +heap/pool guards通过，exit0：
+`diplay-kernel-host-final.log`，shell语法检查通过。
+完整九项Android CI exit0，4s（增量复用）：`diplay-kernel-final-ci.log`。
+APK四ABI/16KiB/许可证检查exit0：`diplay-kernel-apk-final.log`，APK仍为
+`b030790b17625349f0abbac996f10af63d758b76224805378c8e311f7b01a3d7`。
+只读复审未发现明确实质问题，审查者未执行测试。
+
+可复现命令见 native README 的 Disposable Android emulator kernel peer。
+WSL1原Linux shell入口仍因unshare权限不足未覆盖；本记录只证明Android Linux内核
+TAP/veth功能互通。它没有经过Java/JNI运行器、USB/NCM或真实iPhone，不能替代
+低配ARM预算、G0/G1真机回归或G2门槛。生产端点仍未启用。

@@ -105,6 +105,9 @@ static int open_port(struct port *port, const char *name, int raw) {
             return -1;
     } else {
         port->fd = open("/dev/net/tun", O_RDWR | O_NONBLOCK | O_CLOEXEC);
+        /* Android exposes the same TUN driver at /dev/tun. Test harness only. */
+        if (port->fd < 0 && errno == ENOENT)
+            port->fd = open("/dev/tun", O_RDWR | O_NONBLOCK | O_CLOEXEC);
         if (port->fd < 0)
             return -1;
         port->interface.ifr_flags = IFF_TAP | IFF_NO_PI;

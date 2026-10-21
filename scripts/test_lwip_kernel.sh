@@ -17,6 +17,8 @@ trap cleanup EXIT
 ip link set lo up
 if [[ "$mode" == veth ]]; then
   ip link add dp-lwip0 type veth peer name dp-peer0
+  "$build/lwip_kernel_offloads" dp-lwip0
+  "$build/lwip_kernel_offloads" dp-peer0
   sysctl -q -w net.ipv6.conf.dp-lwip0.disable_ipv6=1
   ip link set dp-lwip0 address 02:00:00:00:00:01 up
   peer=dp-peer0
@@ -27,7 +29,7 @@ fi
 "$build/lwip_kernel_echo" "--$mode" dp-lwip0 > "$build/kernel-$mode.log" 2>&1 &
 pid=$!
 for ((attempt=0;attempt<100;attempt++)); do
-  [[ -d "/sys/class/net/$peer" ]] && break
+  ip link show dev "$peer" >/dev/null 2>&1 && break
   kill -0 "$pid" 2>/dev/null || { cat "$build/kernel-$mode.log" >&2; exit 1; }
   sleep 0.05
 done

@@ -1,0 +1,161 @@
+/* Independent kernel socket client. Deliberately does not include/link lwIP or frame helpers. */
+#define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE
+#include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <net/if.h>
+#include <poll.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <unistd.h>
+
+static int open_peer(int type, unsigned scope, unsigned short port) {
+    int fd = socket(AF_INET6, type | SOCK_CLOEXEC, 0);
+    if (fd < 0)
+        return -1;
+    struct timeval timeout = {10, 0};
+    struct sockaddr_in6 local = {0}, remote = {0};
+    local.sin6_family = remote.sin6_family = AF_INET6;
+    local.sin6_scope_id = remote.sin6_scope_id = scope;
+    remote.sin6_port = htons(port);
+    inet_pton(AF_INET6, "fe80::2", &local.sin6_addr);
+    inet_pton(AF_INET6, "fe80::1", &remote.sin6_addr);
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) ||
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) ||
+        bind(fd, (struct sockaddr *)&local, sizeof(local)))
+        goto fail;
+    int flags = fcntl(fd, F_GETFL);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK))
+        goto fail;
+    if (connect(fd, (struct sockaddr *)&remote, sizeof(remote))) {
+        if (errno != EINPROGRESS)
+            goto fail;
+        struct pollfd event = {fd, POLLOUT, 0};
+        int result;
+        do {
+            result = poll(&event, 1, 10000);
+        } while (result < 0 && errno == EINTR);
+        if (result <= 0) {
+            if (!result)
+                errno = ETIMEDOUT;
+            goto fail;
+        }
+        int error = 0;
+        socklen_t size = sizeof(error);
+        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &size))
+            goto fail;
+        if (error) {
+            errno = error;
+            goto fail;
+        }
+    }
+    if (fcntl(fd, F_SETFL, flags))
+        goto fail;
+    return fd;
+fail : {
+    int error = errno;
+    close(fd);
+    errno = error;
+    return -1;
+}
+}
+static int tcp_case(unsigned scope, const unsigned char *payload, size_t length) {
+    int fd = open_peer(SOCK_STREAM, scope, 7000);
+    if (fd < 0) {
+        perror("TCP connect");
+        return 1;
+    }
+    int result = 1;
+    size_t sent = 0, received = 0;
+    while (sent < length) {
+        ssize_t n = send(fd, payload + sent, length - sent, MSG_NOSIGNAL);
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n <= 0) {
+            perror("TCP send");
+            goto done;
+        }
+        sent += (size_t)n;
+    }
+    while (received < length) {
+        unsigned char bytes[4096];
+        ssize_t n = recv(fd, bytes, sizeof(bytes), 0);
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n <= 0) {
+            fprintf(stderr, "TCP ended early: %zd errno=%d\n", n, errno);
+            goto done;
+        }
+        if ((size_t)n > length - received || memcmp(payload + received, bytes, (size_t)n)) {
+            fprintf(stderr, "TCP byte order/content mismatch\n");
+            goto done;
+        }
+        received += (size_t)n;
+    }
+    result = 0;
+done:
+    close(fd);
+    return result;
+}
+static int udp_cases(unsigned scope, const unsigned char *payload) {
+    int fd = open_peer(SOCK_DGRAM, scope, 6000);
+    if (fd < 0) {
+        perror("UDP connect");
+        return 1;
+    }
+    const size_t sizes[] = {0, 1, 1200, 4096, 8192};
+    int result = 1;
+    for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+        ssize_t n;
+        do {
+            n = send(fd, payload, sizes[i], MSG_NOSIGNAL);
+        } while (n < 0 && errno == EINTR);
+        if (n != (ssize_t)sizes[i]) {
+            perror("UDP send");
+            goto done;
+        }
+        unsigned char bytes[8193];
+        struct sockaddr_in6 source = {0};
+        socklen_t size = sizeof(source);
+        do {
+            n = recvfrom(fd, bytes, sizeof(bytes), 0, (struct sockaddr *)&source, &size);
+        } while (n < 0 && errno == EINTR);
+        struct in6_addr expected;
+        inet_pton(AF_INET6, "fe80::1", &expected);
+        if (n != (ssize_t)sizes[i] || memcmp(bytes, payload, sizes[i]) ||
+            source.sin6_family != AF_INET6 || source.sin6_port != htons(6000) ||
+            memcmp(&source.sin6_addr, &expected, sizeof(expected))) {
+            fprintf(stderr, "UDP data/source mismatch: expected=%zu actual=%zd errno=%d\n",
+                    sizes[i], n, errno);
+            goto done;
+        }
+    }
+    result = 0;
+done:
+    close(fd);
+    return result;
+}
+int main(int argc, char **argv) {
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s interface\n", argv[0]);
+        return 2;
+    }
+    unsigned scope = if_nametoindex(argv[1]);
+    if (!scope) {
+        perror("interface index");
+        return 1;
+    }
+    unsigned char payload[65536];
+    for (size_t i = 0; i < sizeof(payload); i++)
+        payload[i] = (unsigned char)i;
+    for (int repeat = 0; repeat < 3; repeat++)
+        if (tcp_case(scope, payload, sizeof(payload)))
+            return 1;
+    if (udp_cases(scope, payload))
+        return 1;
+    puts("PASS independent kernel TCP (3 x 64 KiB), UDP (empty/MTU/fragmented)");
+    return 0;
+}

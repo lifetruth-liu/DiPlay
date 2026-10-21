@@ -43,6 +43,47 @@ independent Python client uses kernel TCP/UDP sockets. WSL1 on the execution
 host rejects `unshare --net`; these two modes have **not** passed there.
 The test echo service aborts on EOF and is not a production half-close endpoint.
 
+### Disposable Android emulator kernel peer
+
+An Android emulator with `adb root`, network namespaces, TAP/veth and `ip` can
+also supply an independent Linux kernel peer. This is test infrastructure;
+the product backend requires none of these permissions. Check
+`adb -s SERIAL shell getprop ro.kernel.qemu` is `1` before rooting the task-owned
+emulator. Build the standalone tools with the installed NDK (use an appropriate
+CMake generator for the host):
+
+```sh
+cmake -S shared/src/main/jni/lwip_backend -B build/lwip-android-kernel \
+  -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+  -DANDROID_ABI=x86_64 -DANDROID_PLATFORM=android-24
+cmake --build build/lwip-android-kernel --parallel 2 --target \
+  lwip_kernel_echo lwip_kernel_peer lwip_namespace_exec lwip_kernel_offloads
+adb -s SERIAL root
+adb -s SERIAL wait-for-device
+adb -s SERIAL shell mkdir -p /data/local/tmp/diplay-lwip-kernel
+adb -s SERIAL push build/lwip-android-kernel/lwip_kernel_echo \
+  build/lwip-android-kernel/lwip_kernel_peer \
+  build/lwip-android-kernel/lwip_namespace_exec \
+  build/lwip-android-kernel/lwip_kernel_offloads \
+  scripts/test_lwip_android_kernel.sh /data/local/tmp/diplay-lwip-kernel/
+adb -s SERIAL shell 'chmod 700 /data/local/tmp/diplay-lwip-kernel/lwip_*'
+adb -s SERIAL shell sh /data/local/tmp/diplay-lwip-kernel/test_lwip_android_kernel.sh tap
+adb -s SERIAL shell sh /data/local/tmp/diplay-lwip-kernel/test_lwip_android_kernel.sh veth
+```
+
+The launcher verifies a changed network namespace before executing interface
+setup. Interface readiness uses `ip link`, since inherited sysfs can show the
+parent namespace. Android TAP uses `/dev/tun`. The veth setup disables checksum
+and segmentation/aggregation offloads on both isolated interfaces: AF_PACKET
+otherwise sees unfinished checksums or oversized offload packets, rather than
+wire-valid frames. This does not disable lwIP checksum validation.
+
+The standalone client links only libc and kernel sockets. It checks three TCP
+64-KiB echoes and UDP sizes 0/1/1200/4096/8192, including reply address/port and
+byte content. TAP and veth passed on the API28 x86_64 task AVD; this is functional
+kernel interoperability, not actual USB/NCM, JNI-path, ARM performance or G2
+acceptance. Exact evidence is in the execution record.
+
 ## Ownership and limits
 
 `include/diplay_lwip.h` describes the prototype C ABI. A process has at most one
