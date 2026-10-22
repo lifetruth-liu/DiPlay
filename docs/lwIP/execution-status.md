@@ -1,6 +1,6 @@
 # 实施记录
 
-执行日期：2026-10-21 至 2026-10-22。工作分支：`codex/lwip-backend`。起点：`143f4674`。
+执行日期：2026-10-21 至 2026-10-23。工作分支：`codex/lwip-backend`。起点：`143f4674`。
 
 ## 当前交付
 
@@ -1787,3 +1787,17 @@ HttpURLConnection 访问外部认证服务，由 Android 系统网络栈路由�
 源码搜索未见其他有线 CarPlay 数据通道直接使用系统 Socket。静态审查项完成；是否迁移远程
 认证依赖仍是产品范围决策。该审计没有设备抓包或全通道协商回归，不据此标记 G4 或任一设备
 门槛完成。
+
+### P2 安全回补：NDP 真实入口约束
+
+在固定 lwIP `nd6.c` 上补齐原有 NA/NS/RA/Redirect 校验 TODO。完整 ND 选项链必须非零且
+不越过报文边界，检查发生在改写邻居/路由/目的缓存之前；新增 NA Solicited/源地址约束、
+DAD NS 目标与 Source LL 约束，以及 Redirect 第一跳来源和目标地址约束。对应 10 个新真实
+Ethernet/IPv6 CTest 加既有 NDP、选项和 DAD 测试，共 13/13 通过；旧实现下相关负例能复现
+缓存/路由改变或错误响应。Linux ASan/UBSan/池保护 CTest 73/73、Windows MinGW CTest 73/73
+均通过；仓库要求的 Gradle 单测、三模块 lint 和 assemble 命令成功，四 ABI APK ELF/ZIP
+16 KiB 对齐、许可证及固定源码检查通过。APK SHA-256：
+`cbdc909f80f105dfd1580baaebb8470aa21cfdb6e99009d612b886675fbfb312`。公开树检查通过；
+脚本单测 25 项中 16 项通过、9 项按平台跳过。三类长时 fuzz 原先构建于本次 NDP 修改之前，
+已要求保存旧报告并在当前源码上重建重跑。完整 RFC/安全评审、三个 target 各 8 CPU 小时、
+隔离网络下 10 分钟基准，以及 G0/G1 真机和 G2 实际 NCM 门槛仍未完成。

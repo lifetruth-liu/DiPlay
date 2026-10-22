@@ -130,9 +130,8 @@ accepting exactly the reviewed post-image. No other vendor modification is allow
   option before Source LL Address. Original release responds to the unknown
   option's `a5` bytes as a MAC; the backport responds to the actual peer MAC.
   Zero-length preceding options and truncated following LL options produce no NA.
-- Scope: this first directed frame test covers NS. Directed NA, Redirect, RA and
-  non-Ethernet address-length/copy cases are still pending; generic sanitizer,
-  frame and kernel tests alone do not establish complete NDP security coverage.
+- Scope: the initial directed frame test covered NS. NA, Redirect and RA entry
+  checks were added on 2026-10-23; remaining coverage limits are listed below.
 - Additional local guard: reject an option length exceeding the remaining total
   pbuf bytes before advancing the 16-bit offset. A direct real-parser regression
   at the 65535-byte boundary fails on the upstream chain: the cursor wraps and
@@ -145,7 +144,7 @@ accepting exactly the reviewed post-image. No other vendor modification is allow
 ## IPv6 minimum PMTU validation
 
 - Based on upstream `d08f4773edd0182b7910fc8f046eed82ffcd67c9`.
-- Same file: `src/core/ipv6/nd6.c`; final SHA-256 including all NDP changes above:
+- Same file: `src/core/ipv6/nd6.c`; post-image before the NDP entry validation below:
   `0117ecded27bf8382a1c977ec259b3a8cc8dc34aa07fa6ae452e58dcad4aa8ee`.
 - Adaptation: apply the upstream lower-bound rejection at 1280, while preserving
   the original full 32-bit decoded MTU and saturation at 65535. Do not apply the
@@ -159,8 +158,26 @@ accepting exactly the reviewed post-image. No other vendor modification is allow
 - This tests value handling and continued UDP delivery, not authentication of
   every quoted packet, large TCP transfer recovery or all RFC PMTU behaviors.
 
-NDP directed coverage and broader protocol audit findings remain
-open; it does not establish full upstream security approval or device gates.
+## NDP message entry validation (local correction, 2026-10-23)
+
+- File: `src/core/ipv6/nd6.c`, cumulative with the upstream NDP dependency chain,
+  local cursor guard and PMTU adaptation above.
+- Previous post-image: `0117ecded27bf8382a1c977ec259b3a8cc8dc34aa07fa6ae452e58dcad4aa8ee`.
+- Current post-image: `77dcd0cf78909203632185ca43f5fc5c3b6262022e1ff05f2f45751b86621eaf`.
+- Before an ND message can change neighbor, router or destination-cache state,
+  validate the complete option chain for nonzero lengths and in-bounds extents.
+  Enforce NA source/destination flag constraints; enforce the unspecified-source
+  NS solicited-node destination and absence of Source LL options; require a
+  Redirect source to match the cached first-hop router and its target to be
+  link-local or equal to the redirected destination.
+- Real Ethernet/IPv6 input regressions cover NA solicited-to-multicast, unspecified
+  NA source and malformed trailing options; NS malformed trailing options and
+  both unspecified-source restrictions; RA malformed options before route state
+  changes; Redirect wrong source, invalid target and malformed trailing options.
+  The valid RA route setup and existing NDP/DAD tests also remain green.
+- This closes these specific TODO-backed input checks only. It is not full RFC
+  4861 conformance, all option semantics/address-length coverage, a complete
+  security audit, remote exploitability finding or device-gate evidence.
 
 ## Local TCP timer allocation recovery
 

@@ -327,6 +327,29 @@ nd6_find_option(struct pbuf *p, u16_t offset, int wanted_type)
   return NULL;
 }
 
+/** Validate every option before a message can change ND state. */
+static int
+nd6_options_valid(struct pbuf *p, u16_t offset)
+{
+  while (offset < p->tot_len) {
+    u16_t option_len;
+    int option_len8;
+    if ((p->tot_len - offset) < 2) {
+      return 0;
+    }
+    option_len8 = pbuf_try_get_at(p, offset + 1);
+    if (option_len8 <= 0) {
+      return 0;
+    }
+    option_len = ((u8_t)option_len8) << 3;
+    if (option_len > (p->tot_len - offset)) {
+      return 0;
+    }
+    offset += option_len;
+  }
+  return 1;
+}
+
 static void
 nd6_store_neighbor_lladdr(struct nd6_neighbor_cache_entry *entry,
                           struct lladdr_option *opt, struct netif *netif)
@@ -376,15 +399,15 @@ nd6_input(struct pbuf *p, struct netif *inp)
 
     /* Check a subset of the other RFC 4861 Sec. 7.1.2 requirements. */
     if (IP6H_HOPLIM(ip6_current_header()) != ND6_HOPLIM || na_hdr->code != 0 ||
-        ip6_addr_ismulticast(&target_address)) {
+        ip6_addr_ismulticast(&target_address) || ip6_addr_isany(ip6_current_src_addr()) ||
+        (ip6_addr_ismulticast(ip6_current_dest_addr()) &&
+         (na_hdr->flags & ND6_FLAG_SOLICITED)) ||
+        !nd6_options_valid(p, sizeof(*na_hdr))) {
       pbuf_free(p);
       ND6_STATS_INC(nd6.proterr);
       ND6_STATS_INC(nd6.drop);
       return;
     }
-
-    /* @todo RFC MUST: if IP destination is multicast, Solicited flag is zero */
-    /* @todo RFC MUST: all included options have a length greater than zero */
 
     /* Unsolicited NA?*/
     if (ip6_addr_ismulticast(ip6_current_dest_addr())) {
@@ -489,16 +512,21 @@ nd6_input(struct pbuf *p, struct netif *inp)
 
     /* Check a subset of the other RFC 4861 Sec. 7.1.1 requirements. */
     if (IP6H_HOPLIM(ip6_current_header()) != ND6_HOPLIM || ns_hdr->code != 0 ||
-       ip6_addr_ismulticast(&target_address)) {
+       ip6_addr_ismulticast(&target_address) || !nd6_options_valid(p, sizeof(*ns_hdr))) {
       pbuf_free(p);
       ND6_STATS_INC(nd6.proterr);
       ND6_STATS_INC(nd6.drop);
       return;
     }
 
-    /* @todo RFC MUST: all included options have a length greater than zero */
-    /* @todo RFC MUST: if IP source is 'any', destination is solicited-node multicast address */
-    /* @todo RFC MUST: if IP source is 'any', there is no source LL address option */
+    if (ip6_addr_isany(ip6_current_src_addr()) &&
+        (!ip6_addr_solicitednode_eq(ip6_current_dest_addr(), &target_address) ||
+         (nd6_find_option(p, sizeof(*ns_hdr), ND6_OPTION_TYPE_SOURCE_LLADDR) != NULL))) {
+      pbuf_free(p);
+      ND6_STATS_INC(nd6.proterr);
+      ND6_STATS_INC(nd6.drop);
+      return;
+    }
 
     /* Check if there is a link-layer address provided. Only point to it if in this buffer. */
     lladdr_opt = (struct lladdr_option*)
@@ -609,14 +637,13 @@ nd6_input(struct pbuf *p, struct netif *inp)
 
     /* Check a subset of the other RFC 4861 Sec. 6.1.2 requirements. */
     if (!ip6_addr_islinklocal(ip6_current_src_addr()) ||
-        IP6H_HOPLIM(ip6_current_header()) != ND6_HOPLIM || ra_hdr->code != 0) {
+        IP6H_HOPLIM(ip6_current_header()) != ND6_HOPLIM || ra_hdr->code != 0 ||
+        !nd6_options_valid(p, sizeof(*ra_hdr))) {
       pbuf_free(p);
       ND6_STATS_INC(nd6.proterr);
       ND6_STATS_INC(nd6.drop);
       return;
     }
-
-    /* @todo RFC MUST: all included options have a length greater than zero */
 
     /* If we are sending RS messages, stop. */
 #if LWIP_IPV6_SEND_ROUTER_SOLICIT
@@ -862,16 +889,13 @@ nd6_input(struct pbuf *p, struct netif *inp)
     /* Check a subset of the other RFC 4861 Sec. 8.1 requirements. */
     if (!ip6_addr_islinklocal(ip6_current_src_addr()) ||
         IP6H_HOPLIM(ip6_current_header()) != ND6_HOPLIM ||
-        redir_hdr->code != 0 || ip6_addr_ismulticast(&destination_address)) {
+        redir_hdr->code != 0 || ip6_addr_ismulticast(&destination_address) ||
+        !nd6_options_valid(p, sizeof(*redir_hdr))) {
       pbuf_free(p);
       ND6_STATS_INC(nd6.proterr);
       ND6_STATS_INC(nd6.drop);
       return;
     }
-
-    /* @todo RFC MUST: IP source address equals first-hop router for destination_address */
-    /* @todo RFC MUST: ICMP target address is either link-local address or same as destination_address */
-    /* @todo RFC MUST: all included options have a length greater than zero */
 
     /* Check if there is a link-layer address provided. Only point to it if in this buffer. */
     lladdr_opt = (struct lladdr_option *)
@@ -885,9 +909,24 @@ nd6_input(struct pbuf *p, struct netif *inp)
       return;
     }
 
+    if (!ip6_addr_eq(ip6_current_src_addr(), &destination_cache[dest_idx].next_hop_addr)) {
+      pbuf_free(p);
+      ND6_STATS_INC(nd6.proterr);
+      ND6_STATS_INC(nd6.drop);
+      return;
+    }
+
     /* Create an aligned, zoned copy of the target address. */
     ip6_addr_copy_from_packed(target_address, redir_hdr->target_address);
     ip6_addr_assign_zone(&target_address, IP6_UNICAST, inp);
+
+    if (!ip6_addr_islinklocal(&target_address) &&
+        !ip6_addr_eq(&target_address, &destination_address)) {
+      pbuf_free(p);
+      ND6_STATS_INC(nd6.proterr);
+      ND6_STATS_INC(nd6.drop);
+      return;
+    }
 
     /* Set the new target address. */
     ip6_addr_copy(destination_cache[dest_idx].next_hop_addr, target_address);

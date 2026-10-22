@@ -91,6 +91,10 @@ static const uint8_t local_ip[16] = {0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 static const uint8_t peer_ip[16] = {0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2};
 static const uint8_t solicited[16] = {0xff, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0xff, 0, 0, 1};
 static const uint8_t all_nodes[16] = {0xff, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+static const uint8_t global_destination[16] = {0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x99};
+static const uint8_t invalid_redirect_target[16] = {0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x88};
+static const uint8_t other_router[16] = {0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3};
+static const uint8_t unspecified_ip[16] = {0};
 static uint16_t u16(const uint8_t *p) {
     return (uint16_t)((p[0] << 8) | p[1]);
 }
@@ -272,6 +276,223 @@ static void test_ndp_options(void) {
         }
         close_core(&f);
     }
+}
+static void inject_na_with_invalid_form(struct fixture *f, const uint8_t *destination,
+                                        const uint8_t *ethernet_destination, uint8_t flags,
+                                        int zero_length_option, const uint8_t *source) {
+    uint8_t frame[88] = {0};
+    size_t icmp_length = zero_length_option ? 34 : 32;
+    const uint8_t changed_mac[6] = {2, 0, 0, 0, 0, 99};
+    ethernet(frame, ethernet_destination);
+    uint8_t *p = ipv6(frame, destination, 58, (uint16_t)icmp_length);
+    p[0] = 136;
+    p[4] = flags;
+    memcpy(frame + 22, source, 16);
+    p[24] = 2; /* Target link-layer address. */
+    p[25] = 1;
+    memcpy(p + 26, changed_mac, sizeof(changed_mac));
+    if (zero_length_option) {
+        p[32] = 254; /* Unknown options are skipped, but length zero is invalid. */
+        p[33] = 0;
+    }
+    w16(p + 2, checksum(frame + 14, p, icmp_length, 58));
+    CHECK(dp_core_input(f->core, frame, 14 + 40 + icmp_length) == DP_OK);
+}
+static void check_peer_cache_mac(struct fixture *f, const uint8_t *expected_mac) {
+    uint64_t endpoint;
+    uint16_t port;
+    CHECK(dp_udp_bind(f->core, 0, &endpoint, &port) == DP_OK);
+    f->count = 0;
+    CHECK(dp_udp_send(f->core, endpoint, peer_ip, 50000, (const uint8_t *)"x", 1) == DP_OK);
+    struct frame *sent = find(f, 17, -1, 0);
+    CHECK(sent != NULL);
+    CHECK(!memcmp(sent->bytes, expected_mac, 6));
+}
+static void test_ndp_na_rejects_solicited_multicast(void) {
+    struct fixture f;
+    ready_core(&f);
+    const uint8_t multicast_mac[6] = {0x33, 0x33, 0, 0, 0, 1};
+    inject_na_with_invalid_form(&f, all_nodes, multicast_mac, 0x60, 0, peer_ip);
+    check_peer_cache_mac(&f, peer_mac);
+    close_core(&f);
+}
+static void test_ndp_na_rejects_zero_length_trailing_option(void) {
+    struct fixture f;
+    ready_core(&f);
+    inject_na_with_invalid_form(&f, local_ip, local_mac, 0x60, 1, peer_ip);
+    check_peer_cache_mac(&f, peer_mac);
+    close_core(&f);
+}
+static void test_ndp_na_rejects_unspecified_source(void) {
+    struct fixture f;
+    ready_core(&f);
+    inject_na_with_invalid_form(&f, local_ip, local_mac, 0x60, 0, unspecified_ip);
+    check_peer_cache_mac(&f, peer_mac);
+    close_core(&f);
+}
+static void test_ndp_ns_rejects_zero_length_trailing_option(void) {
+    struct fixture f;
+    ready_core(&f);
+    uint8_t frame[96] = {0};
+    const uint8_t solicited_mac[6] = {0x33, 0x33, 0xff, 0, 0, 1};
+    ethernet(frame, solicited_mac);
+    uint8_t *p = ipv6(frame, solicited, 58, 42);
+    p[0] = 135;
+    memcpy(p + 8, local_ip, 16);
+    p[24] = 1; /* Valid source link-layer option. */
+    p[25] = 1;
+    memcpy(p + 26, peer_mac, 6);
+    p[32] = 254; /* A malformed option after the one the parser needs. */
+    p[33] = 0;
+    w16(p + 2, checksum(frame + 14, p, 42, 58));
+    CHECK(dp_core_input(f.core, frame, sizeof(frame)) == DP_OK);
+    CHECK(find(&f, 58, 136, 0) == NULL);
+    close_core(&f);
+}
+static void test_ndp_ns_unspecified_source_requires_solicited_destination(void) {
+    struct fixture f;
+    ready_core(&f);
+    uint8_t frame[78] = {0};
+    const uint8_t multicast_mac[6] = {0x33, 0x33, 0, 0, 0, 1};
+    ethernet(frame, multicast_mac);
+    uint8_t *p = ipv6(frame, all_nodes, 58, 24);
+    memcpy(frame + 22, unspecified_ip, 16);
+    p[0] = 135;
+    memcpy(p + 8, local_ip, 16);
+    w16(p + 2, checksum(frame + 14, p, 24, 58));
+    CHECK(dp_core_input(f.core, frame, sizeof(frame)) == DP_OK);
+    CHECK(find(&f, 58, 136, 0) == NULL);
+    close_core(&f);
+}
+static void test_ndp_ns_unspecified_source_rejects_source_ll_option(void) {
+    struct fixture f;
+    ready_core(&f);
+    uint8_t frame[86] = {0};
+    const uint8_t solicited_mac[6] = {0x33, 0x33, 0xff, 0, 0, 1};
+    ethernet(frame, solicited_mac);
+    uint8_t *p = ipv6(frame, solicited, 58, 32);
+    memcpy(frame + 22, unspecified_ip, 16);
+    p[0] = 135;
+    memcpy(p + 8, local_ip, 16);
+    p[24] = 1;
+    p[25] = 1;
+    memcpy(p + 26, peer_mac, 6);
+    w16(p + 2, checksum(frame + 14, p, 32, 58));
+    CHECK(dp_core_input(f.core, frame, sizeof(frame)) == DP_OK);
+    CHECK(find(&f, 58, 136, 0) == NULL);
+    close_core(&f);
+}
+static void send_ra(struct fixture *f, int zero_length_option) {
+    uint8_t frame[88] = {0};
+    const uint8_t multicast_mac[6] = {0x33, 0x33, 0, 0, 0, 1};
+    size_t icmp_length = zero_length_option ? 18 : 16;
+    ethernet(frame, multicast_mac);
+    uint8_t *p = ipv6(frame, all_nodes, 58, (uint16_t)icmp_length);
+    p[0] = 134;
+    w16(p + 6, 1800);
+    if (zero_length_option) {
+        p[16] = 254;
+        p[17] = 0;
+    }
+    w16(p + 2, checksum(frame + 14, p, icmp_length, 58));
+    CHECK(dp_core_input(f->core, frame, 14 + 40 + icmp_length) == DP_OK);
+}
+static void test_ndp_ra_rejects_zero_length_option_before_route_change(void) {
+    struct fixture f;
+    ready_core(&f);
+    send_ra(&f, 1);
+    uint64_t endpoint;
+    uint16_t port;
+    CHECK(dp_udp_bind(f.core, 0, &endpoint, &port) == DP_OK);
+    f.count = 0;
+    CHECK(dp_udp_send(f.core, endpoint, global_destination, 50000,
+                      (const uint8_t *)"x", 1) == DP_LINK_IO);
+    CHECK(find(&f, 17, -1, 0) == NULL);
+    close_core(&f);
+}
+static void send_valid_ra(struct fixture *f) {
+    uint8_t frame[94] = {0};
+    const uint8_t multicast_mac[6] = {0x33, 0x33, 0, 0, 0, 1};
+    const uint8_t router_mac[6] = {2, 0, 0, 0, 0, 2};
+    ethernet(frame, multicast_mac);
+    uint8_t *p = ipv6(frame, all_nodes, 58, 24);
+    p[0] = 134;
+    w16(p + 6, 1800);
+    p[16] = 1; /* Source link-layer address option. */
+    p[17] = 1;
+    memcpy(p + 18, router_mac, 6);
+    w16(p + 2, checksum(frame + 14, p, 24, 58));
+    CHECK(dp_core_input(f->core, frame, sizeof(frame)) == DP_OK);
+}
+static void send_redirect(struct fixture *f, const uint8_t *source, const uint8_t *target,
+                          const uint8_t *destination, int zero_length_option) {
+    uint8_t frame[96] = {0};
+    size_t icmp_length = zero_length_option ? 42 : 40;
+    ethernet(frame, local_mac);
+    uint8_t *p = ipv6(frame, local_ip, 58, (uint16_t)icmp_length);
+    memcpy(frame + 22, source, 16);
+    p[0] = 137;
+    memcpy(p + 8, target, 16);
+    memcpy(p + 24, destination, 16);
+    if (zero_length_option) {
+        p[40] = 254;
+        p[41] = 0;
+    }
+    w16(p + 2, checksum(frame + 14, p, icmp_length, 58));
+    CHECK(dp_core_input(f->core, frame, 14 + 40 + icmp_length) == DP_OK);
+}
+static void test_ndp_redirect_rejects_invalid_target(void) {
+    struct fixture f;
+    ready_core(&f);
+    send_valid_ra(&f);
+    uint64_t endpoint;
+    uint16_t port;
+    CHECK(dp_udp_bind(f.core, 0, &endpoint, &port) == DP_OK);
+    f.count = 0;
+    CHECK(dp_udp_send(f.core, endpoint, global_destination, 50000,
+                      (const uint8_t *)"a", 1) == DP_OK);
+    CHECK(find(&f, 17, -1, 0) != NULL);
+    f.count = 0;
+    send_redirect(&f, peer_ip, invalid_redirect_target, global_destination, 0);
+    CHECK(dp_udp_send(f.core, endpoint, global_destination, 50000,
+                      (const uint8_t *)"b", 1) == DP_OK);
+    CHECK(find(&f, 17, -1, 0) != NULL);
+    CHECK(find(&f, 58, 135, 0) == NULL);
+    close_core(&f);
+}
+static void test_ndp_redirect_rejects_non_router_source(void) {
+    struct fixture f;
+    ready_core(&f);
+    send_valid_ra(&f);
+    uint64_t endpoint;
+    uint16_t port;
+    CHECK(dp_udp_bind(f.core, 0, &endpoint, &port) == DP_OK);
+    CHECK(dp_udp_send(f.core, endpoint, global_destination, 50000,
+                      (const uint8_t *)"a", 1) == DP_OK);
+    f.count = 0;
+    send_redirect(&f, other_router, other_router, global_destination, 0);
+    CHECK(dp_udp_send(f.core, endpoint, global_destination, 50000,
+                      (const uint8_t *)"b", 1) == DP_OK);
+    CHECK(find(&f, 17, -1, 0) != NULL);
+    CHECK(find(&f, 58, 135, 0) == NULL);
+    close_core(&f);
+}
+static void test_ndp_redirect_rejects_zero_length_option(void) {
+    struct fixture f;
+    ready_core(&f);
+    send_valid_ra(&f);
+    uint64_t endpoint;
+    uint16_t port;
+    CHECK(dp_udp_bind(f.core, 0, &endpoint, &port) == DP_OK);
+    CHECK(dp_udp_send(f.core, endpoint, global_destination, 50000,
+                      (const uint8_t *)"a", 1) == DP_OK);
+    f.count = 0;
+    send_redirect(&f, peer_ip, other_router, global_destination, 1);
+    CHECK(dp_udp_send(f.core, endpoint, global_destination, 50000,
+                      (const uint8_t *)"b", 1) == DP_OK);
+    CHECK(find(&f, 17, -1, 0) != NULL);
+    CHECK(find(&f, 58, 135, 0) == NULL);
+    close_core(&f);
 }
 static void test_dad(void) {
     struct fixture f;
@@ -2467,6 +2688,26 @@ int main(int argc, char **argv) {
         test_fragments();
     else if (!strcmp(argv[1], "ndp_options"))
         test_ndp_options();
+    else if (!strcmp(argv[1], "ndp_na_solicited_multicast"))
+        test_ndp_na_rejects_solicited_multicast();
+    else if (!strcmp(argv[1], "ndp_na_zero_length_option"))
+        test_ndp_na_rejects_zero_length_trailing_option();
+    else if (!strcmp(argv[1], "ndp_na_unspecified_source"))
+        test_ndp_na_rejects_unspecified_source();
+    else if (!strcmp(argv[1], "ndp_ns_zero_length_option"))
+        test_ndp_ns_rejects_zero_length_trailing_option();
+    else if (!strcmp(argv[1], "ndp_ns_unspecified_destination"))
+        test_ndp_ns_unspecified_source_requires_solicited_destination();
+    else if (!strcmp(argv[1], "ndp_ns_unspecified_slla"))
+        test_ndp_ns_unspecified_source_rejects_source_ll_option();
+    else if (!strcmp(argv[1], "ndp_ra_zero_length_option"))
+        test_ndp_ra_rejects_zero_length_option_before_route_change();
+    else if (!strcmp(argv[1], "ndp_redirect_target"))
+        test_ndp_redirect_rejects_invalid_target();
+    else if (!strcmp(argv[1], "ndp_redirect_source"))
+        test_ndp_redirect_rejects_non_router_source();
+    else if (!strcmp(argv[1], "ndp_redirect_zero_length_option"))
+        test_ndp_redirect_rejects_zero_length_option();
     else if (!strcmp(argv[1], "pmtu"))
         test_pmtu();
     else if (!strcmp(argv[1], "udp_endpoint"))

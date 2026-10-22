@@ -14,7 +14,7 @@ BACKPORTS = {
     # Cumulative NDP chain, local cursor guard and adapted PMTU fix: BACKPORTS.md.
     "src/core/ipv6/nd6.c": (
         "c415888732a6b68e9276a6f50276bf1de524b0aa2403121b18c15b1bec3fe0b4",
-        "0117ecded27bf8382a1c977ec259b3a8cc8dc34aa07fa6ae452e58dcad4aa8ee",
+        "77dcd0cf78909203632185ca43f5fc5c3b6262022e1ff05f2f45751b86621eaf",
         "d08f4773edd0182b7910fc8f046eed82ffcd67c9",
     ),
     "src/core/ipv6/ip6_frag.c": (
@@ -39,6 +39,7 @@ LOCAL_POST_IMAGES = {
                                   "b38cc1cc2df8b90d77671326a24b58178f2183cf2b623103eb5b7ac318efb178"),
 }
 LOCAL_FIXES = {"src/core/tcp_in.c": "tcp-timestamp-unsigned-shift",
+               "src/core/ipv6/nd6.c": "ndp-entry-validation",
                "src/core/timeouts.c": "tcp-timer-allocation-failure",
                "src/include/lwip/timeouts.h": "tcp-timer-allocation-failure",
                **{name: "ipv6-separate-header-fragmentation" for name in
