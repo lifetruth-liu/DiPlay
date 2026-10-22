@@ -1489,3 +1489,23 @@ TEMP/diplay-bind-allocation-queue-ci.log；三个单元任务UP-TO-DATE，不记
 public tree及staged diff检查通过。本轮未重新运行JNI/设备测试，不将宿主矩阵当作
 Android libc、JNI或实际NCM/iPhone证据。上下文分配、更多TCP/接收/并发故障、独立
 安全评审、进程峰值及真机/长稳仍缺，R01与G2/G3及整体目标均未标完成。
+
+### 上下文calloc失败、全局所有权与重建
+
+新增测试专用core_allocation_failures。进程首次core calloc注入NULL，预置非零
+输出须清空并返回RESOURCE_LIMIT；随后正常创建成功，证明全局claimed未残留。
+完成一次初始化及销毁后，动态测量热创建的分配路径，当前普通/池检查构建均为1点。
+热创建失败同样不发布核心；netif_list/default为空，heap及所有MEMP pool回到基线。
+每轮还需重新创建、DAD/邻居准备、UDP绑定及捕获帧核对，再销毁验证资源。
+
+热创建基线保留了全局周期计时器，不把它们误记为逐点注入。冷启动内部定时器池
+尚未覆盖；本轮不声称完整上下文创建/R01失败矩阵。只增加测试、CMake场景和文档，
+未修改生产代码、vendor摘要、ABI或选择策略。
+
+Windows54/54、1.29s，单项0.02s：TEMP/diplay-core-allocation-final-host.log。
+Linux ASan/UBSan/池检查及默认LSan54/54、9.27s，单项0.06s：
+/tmp/diplay-core-allocation-final-sanitize.log。两边LastTest.log均确认冷calloc1次、
+热创建1点。完整九项CI exit0、2s、250任务12执行：TEMP/diplay-core-allocation-final-ci.log；
+三个单元任务UP-TO-DATE，不记重新执行。public tree及staged diff检查通过。
+本轮未启动模拟器或重跑JNI，不借用历史设备结果扩大当前验证范围。
+完整故障/安全矩阵、进程峰值、实际NCM/iPhone/ARM及性能长稳仍缺，整体目标继续。

@@ -1622,6 +1622,66 @@ static void test_udp_bind_allocation_failures(void) {
                shared_pool, (unsigned long)allocations);
     }
 }
+static dp_config allocation_core_config(struct fixture *f) {
+    memset(f, 0, sizeof(*f)); f->random = 1234567; f->ready = 1;
+    dp_config config = {0};
+    memcpy(config.mac, local_mac, 6); memcpy(config.ipv6, local_ip, 16);
+    config.mtu = 1500; config.opaque = f;
+    config.clock_ms = clock_ms; config.random32 = random32; config.output = output;
+    return config;
+}
+static void test_core_allocation_failures(void) {
+    struct fixture f;
+    dp_config config = allocation_core_config(&f);
+    f.core = (dp_core *)(uintptr_t)UINTPTR_MAX;
+    /* Fail the first process's context calloc before global lwIP initialization. */
+    allocation_fault.calls = 0; allocation_fault.calloc_calls = 0;
+    allocation_fault.fail_at = 1; allocation_fault.armed = 1;
+    dp_result result = dp_core_create(&config, &f.core);
+    allocation_fault.armed = 0;
+    CHECK(result == DP_RESOURCE_LIMIT && f.core == NULL && allocation_fault.calloc_calls == 1);
+    ready_core(&f); close_core(&f); /* The global claim must have been released. */
+
+    const uint32_t heap_before = lwip_stats.mem.used;
+    uint32_t pools_before[MEMP_MAX];
+    for (unsigned pool = 0; pool < MEMP_MAX; ++pool) pools_before[pool] = lwip_stats.memp[pool]->used;
+    size_t allocations = 0;
+    for (size_t fail_at = 0; fail_at <= allocations; ++fail_at) {
+        config = allocation_core_config(&f);
+        f.core = (dp_core *)(uintptr_t)UINTPTR_MAX;
+        allocation_fault.calls = 0; allocation_fault.calloc_calls = 0;
+        allocation_fault.fail_at = fail_at; allocation_fault.armed = 1;
+        result = dp_core_create(&config, &f.core);
+        allocation_fault.armed = 0;
+        if (!fail_at) {
+            CHECK(result == DP_OK && f.core && allocation_fault.calloc_calls == 1);
+            allocations = allocation_fault.calls;
+            CHECK(allocations > 0 && allocations <= 32);
+            close_core(&f);
+        } else {
+            int published = f.core != NULL;
+            if (result == DP_OK) close_core(&f);
+            if (result != DP_RESOURCE_LIMIT || published)
+                fprintf(stderr, "Core create failure index=%lu calls=%lu status=%d published=%d\n",
+                        (unsigned long)fail_at, (unsigned long)allocation_fault.calls, result, published);
+            CHECK(result == DP_RESOURCE_LIMIT && !published);
+        }
+        CHECK(netif_list == NULL && netif_default == NULL && lwip_stats.mem.used == heap_before);
+        for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == pools_before[pool]);
+        ready_core(&f);
+        uint64_t handle; uint16_t port;
+        CHECK(dp_udp_bind(f.core, 47000, &handle, &port) == DP_OK);
+        const uint8_t payload[] = {1, 2, 3};
+        CHECK(dp_udp_send(f.core, handle, peer_ip, 50000, payload, sizeof(payload)) == DP_OK);
+        check_complete_udp_output(&f, port, payload, sizeof(payload));
+        CHECK(dp_udp_close(f.core, handle) == DP_OK);
+        close_core(&f);
+        CHECK(lwip_stats.mem.used == heap_before);
+        for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == pools_before[pool]);
+    }
+    printf("Core create traversed 1 cold calloc and %lu warm allocation failure points\n",
+           (unsigned long)allocations);
+}
 #endif
 static void test_tx_failed(void) {
     struct fixture f;
@@ -1750,6 +1810,8 @@ int main(int argc, char **argv) {
         test_udp_allocation_failures();
     else if (!strcmp(argv[1], "udp_bind_allocation_failures"))
         test_udp_bind_allocation_failures();
+    else if (!strcmp(argv[1], "core_allocation_failures"))
+        test_core_allocation_failures();
 #endif
     else if (!strcmp(argv[1], "api"))
         test_api();

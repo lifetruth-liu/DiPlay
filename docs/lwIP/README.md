@@ -23,6 +23,7 @@
 | [公共TCP监听原型](tcp-listener-adapter.md) | 显式绑定、accept及独立子流所有权 | 监听器生命周期与后续会话适配 |
 | [显式lwIP会话原型](session-network-adapter.md) | 会话所有权、关闭、reuseAddress与echo隔离 | 两后端合同及后续业务接入前验证 |
 | [新端点内核peer验证](kernel-endpoint-peer.md) | 独立内核TCP/UDP、主动连接、慢消费和故障注入 | 原生端点互通与解析回归 |
+| [原生分配失败矩阵](native-allocation-failures.md) | 上下文/UDP绑定/发送的逐点注入及恢复 | R01定向验证与未覆盖边界 |
 | [UDP最大负载修复](udp-large-datagram-gap.md) | 16位pbuf边界、独立内核发现的重组问题与回归 | 大数据报收发及补丁维护 |
 
 ## 成功标准

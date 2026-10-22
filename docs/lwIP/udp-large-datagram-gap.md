@@ -138,3 +138,6 @@ R01验收，也不将宿主52项作为新一轮JNI/真机证据。产品源代�
 
 最终原生53/53及完整Android CI通过。该子集未在Android执行，未注入上下文malloc/
 calloc、JNI或所有并发路径，不宣称完整R01或真机门槛完成；产品源与ABI未变化。
+
+上下文calloc及热创建的后续定向验证见[native-allocation-failures.md](native-allocation-failures.md)，
+其中明确保留冷启动内部周期定时器分配未覆盖，不能由UDP绑定矩阵推断全部创建路径。

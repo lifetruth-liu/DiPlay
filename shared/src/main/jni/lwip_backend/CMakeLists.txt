@@ -98,3 +98,5 @@ add_test(NAME udp_allocation_failures COMMAND frame_allocation_tests udp_allocat
 set_tests_properties(udp_allocation_failures PROPERTIES TIMEOUT 60)
 add_test(NAME udp_bind_allocation_failures COMMAND frame_allocation_tests udp_bind_allocation_failures)
 set_tests_properties(udp_bind_allocation_failures PROPERTIES TIMEOUT 30)
+add_test(NAME core_allocation_failures COMMAND frame_allocation_tests core_allocation_failures)
+set_tests_properties(core_allocation_failures PROPERTIES TIMEOUT 30)
