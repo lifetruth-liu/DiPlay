@@ -58,12 +58,35 @@ static void valid(unsigned split) {
     free(head);
 }
 
+static void timestamp(unsigned split, uint32_t expected) {
+    u8_t option[12] = {LWIP_TCP_OPT_NOP, LWIP_TCP_OPT_NOP, LWIP_TCP_OPT_TS, LWIP_TCP_OPT_LEN_TS};
+    option[4] = (u8_t)(expected >> 24); option[5] = (u8_t)(expected >> 16);
+    option[6] = (u8_t)(expected >> 8); option[7] = (u8_t)expected;
+    unsigned first = split ? split : sizeof(option);
+    u8_t *head = malloc(TCP_HLEN + first);
+    u8_t *tail = split ? malloc(sizeof(option) - first) : NULL;
+    struct tcp_pcb pcb;
+    CHECK(head != NULL && (!split || tail != NULL));
+    memset(head, 0, TCP_HLEN + first); memset(&pcb, 0, sizeof(pcb));
+    memcpy(head + TCP_HLEN, option, first);
+    if (tail) memcpy(tail, option + first, sizeof(option) - first);
+    tcphdr = (struct tcp_hdr *)head; tcphdr_optlen = sizeof(option);
+    tcphdr_opt1len = first; tcphdr_opt2 = tail; flags = TCP_SYN;
+    tcp_parseopt(&pcb);
+    CHECK(pcb.ts_recent == expected && (pcb.flags & TF_TIMESTAMP));
+    flags = 0; pcb.ts_recent = 0; pcb.ts_lastacksent = 100; seqno = 100; tcplen = 1;
+    tcp_parseopt(&pcb); CHECK(pcb.ts_recent == expected);
+    free(tail); free(head);
+}
 int main(void) {
     for (unsigned split = 0; split < 4; ++split) {
         valid(split);
         truncated(split, LWIP_TCP_OPT_MSS);
         truncated(split, 254); /* Unknown option also needs a length byte. */
     }
+    const uint32_t values[] = {UINT32_C(0x0102038f), UINT32_C(0x80000000), UINT32_C(0xffffffff)};
+    for (unsigned i = 0; i < sizeof(values) / sizeof(values[0]); ++i)
+        for (unsigned split = 0; split < 12; ++split) timestamp(split, values[i]);
     puts("TCP exact-buffer and split-option tests passed");
     return 0;
 }

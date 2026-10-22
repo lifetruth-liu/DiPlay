@@ -3,12 +3,14 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 build="$(cd "${1:?expected native build directory}" && pwd)"
 mode="${2:-tap}"
+backend="${3:-echo}"
 [[ "$mode" == tap || "$mode" == veth ]] || { echo 'Expected tap or veth' >&2; exit 2; }
+[[ "$backend" == echo || "$backend" == endpoints ]] || { echo 'Expected echo or endpoints' >&2; exit 2; }
 [[ "$(uname -s)" == Linux && "$(id -u)" == 0 ]] || { echo 'Kernel interoperability requires Linux and root/CAP_NET_ADMIN' >&2; exit 1; }
 [[ -x "$build/lwip_kernel_echo" ]] || { echo 'Build lwip_kernel_echo first' >&2; exit 1; }
 namespace="$(readlink /proc/self/ns/net)"
 if [[ -z "${DIPLAY_LWIP_PARENT_NS:-}" ]]; then
-  exec unshare --net env DIPLAY_LWIP_PARENT_NS="$namespace" "$0" "$build" "$mode"
+  exec unshare --net env DIPLAY_LWIP_PARENT_NS="$namespace" "$0" "$build" "$mode" "$backend"
 fi
 [[ "$namespace" != "$DIPLAY_LWIP_PARENT_NS" ]] || { echo 'Refusing to modify the parent network namespace' >&2; exit 1; }
 pid=""
@@ -26,7 +28,9 @@ else
   [[ -c /dev/net/tun ]] || { echo 'Linux TAP device is unavailable' >&2; exit 1; }
   peer=dp-lwip0
 fi
-"$build/lwip_kernel_echo" "--$mode" dp-lwip0 > "$build/kernel-$mode.log" 2>&1 &
+options=("--$mode" dp-lwip0)
+if [[ "$backend" == endpoints ]]; then options+=(--endpoints); fi
+"$build/lwip_kernel_echo" "${options[@]}" > "$build/kernel-$mode.log" 2>&1 &
 pid=$!
 for ((attempt=0;attempt<100;attempt++)); do
   ip link show dev "$peer" >/dev/null 2>&1 && break
@@ -35,9 +39,19 @@ for ((attempt=0;attempt<100;attempt++)); do
 done
 ip link set "$peer" address 02:00:00:00:00:02 mtu 1500 up
 ip -6 addr add fe80::2/64 dev "$peer" nodad
-python3 "$root/scripts/lwip_kernel_client.py" "$peer"
+if [[ "$backend" == endpoints ]]; then
+  "$build/lwip_kernel_peer" "$peer" --endpoints
+  for ((attempt=0;attempt<100;attempt++)); do
+    grep -q '^endpoint-active: verified$' "$build/kernel-$mode.log" && break
+    kill -0 "$pid" 2>/dev/null || { cat "$build/kernel-$mode.log" >&2; exit 1; }
+    sleep 0.05
+  done
+  grep -q '^endpoint-active: verified$' "$build/kernel-$mode.log"
+else
+  python3 "$root/scripts/lwip_kernel_client.py" "$peer"
+fi
 kill "$pid"
 wait "$pid"
 pid=""
 cat "$build/kernel-$mode.log"
-echo "PASS Linux kernel IPv6 TCP/UDP via $mode (isolated namespace)"
+echo "PASS Linux kernel $backend IPv6 TCP/UDP via $mode (isolated namespace)"

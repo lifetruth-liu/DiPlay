@@ -1173,3 +1173,58 @@ public tree及staged diff检查通过。未取得独立评审完成结果，不�
 仍缺完整两后端参数化合同、全部分配/引用/竞态故障矩阵、独立kernel peer对新端点
 API验证、真实NCM/iPhone/ARM、性能长稳及生产通道/选择/回退集成。接口组合已接通，
 不将已覆盖路径扩大为全部会话合同验收；安全审计、G2/G3及整体目标仍未完成。
+
+### P3 新端点API的独立内核peer与timestamp修正（2026-10-22）
+
+基于51aa57af。lwip_kernel_echo新增--endpoints模式，使用公开TCP/UDP端点API的
+有界应用pump，不启动原始echo回调；独立kernel_peer不包含/链接lwIP或帧助手，
+新增内核9000服务验证native主动连接、16字节challenge、输出半关闭、回复及EOF。
+被动TCP/UDP及慢消费沿用原有独立内核客户端断言。应用缓存98664字节，编译限制
+128KiB；原有传输/观测对象另限512KiB。见[内核peer验证](kernel-endpoint-peer.md)。
+
+当前WSL root也被拒绝unshare且无/dev/net/tun，未绕过隔离或记作Linux入口通过。
+使用任务自有API28 x86_64 root模拟器，脚本验证qemu/root、新旧namespace不同后
+配置TAP/veth。占位服务先红测TCP Connection refused、exit1：
+TEMP/diplay-endpoint-kernel-red.log。实现后TAP基本互通通过；veth显示内核stage=accept、
+native requested=0，确认单次启动指令未交付：diplay-endpoint-kernel-veth-diagnostic.log。
+控制协议改显式READY ACK/有限重试并幂等保留同一候选，veth及十秒暂停恢复通过。
+
+Android ASan/UBSan真实内核输入进一步发现vendor tcp_in.c:2003 timestamp字节143
+左移24的signed-int UB，exit1：diplay-endpoint-kernel-asan-tap.log。新增真实parser
+高位值0x0102038f/0x80000000/0xffffffff、全部12字节split及SYN/ACK更新用例，在
+Linux UBSan同样red，49/50、exit8：WSL /tmp/diplay-endpoint-timestamp-red.log。
+修为移位前显式u32_t，不改字节序。原始vendor清单SHA保持7882cdb8...，314文件
+身份不变；精确累计post-image b121300a...并由校验器单列local_fixes，不冒充上游
+提交或CVE。BACKPORTS.md/UPSTREAM.md及审计记录同步，完整安全审计仍未通过。
+
+修复后Android ASan/UBSan及lwIP池检查通过以下独立内核场景：
+
+- TAP basic：TCP3×64KiB，UDP0/1/1200/4096/8192，主动连接及半关闭；
+  diplay-endpoint-kernel-asan-tap-fixed.log。
+- veth slow：十秒暂停发送者仍背压，1048576字节完整有序恢复，零窗口样本169；
+  diplay-endpoint-kernel-asan-slow-fixed.log。
+- TAP faults-1：admitted/drop/delay/reorder/duplicate=247/2/245/21/2；
+  diplay-endpoint-kernel-asan-faults1.log。
+- veth faults-5：259/12/247/13/3；diplay-endpoint-kernel-asan-faults5.log。
+- 旧echo TAP basic兼容回归：diplay-endpoint-kernel-asan-legacy.log。
+
+以上均exit0，独立peer符号检查无dp_core/dp_tcp/dp_udp/tcp_input/pbuf_alloc定义。
+Android明确detect_leaks=0，不声称LeakSanitizer扫描。Linux宿主ASan/UBSan/pool guards
+及默认LSan的50/50通过，5.50s：WSL /tmp/diplay-endpoint-timestamp-green.log；Windows
+MinGW50/50通过，3.02s：TEMP/diplay-endpoint-timestamp-windows.log。
+
+复查源码纠正此前会话记录的echo UDP端口：实际为6000，先前写7001有误。当前
+会话文档及设备用例改为绑定TCP7000/UDP6000，确实检查两个原型服务端口均空闲。
+此前TCP7000的隔离证据仍有效，不把旧UDP7001绑定结果当作UDP echo隔离直接证据。
+
+修复后的完整九项Android CI exit0，12s、250任务19执行：diplay-endpoint-kernel-final-ci.log。
+三模块单元任务均UP-TO-DATE；核对既有XML3373项（1789/1578/6）零失败/错误/跳过，
+不记为重新执行。最终API28 x86_64 JNI14/14，16s、exit0：
+diplay-endpoint-kernel-final-connected.log，XML零失败/错误/跳过；debug.checkjni=1，
+测试进程11059确认already on。APK四ABI/16KiB/NX/许可证及更新源摘要检查通过，SHA-256：
+ab5659a402e45e643b14c19a519372e6ff18caff2b9c27a3d722101e39726073。
+父namespace仍net:[4026531963]，无dp-lwip0/dp-peer0或遗留工具进程；shell语法、public
+tree及staged diff检查通过。未取得独立评审完成结果，不记作独立评审通过。
+
+这次原生API内核互通不替代Kotlin两后端完整合同；更多资源/关闭/畸形包矩阵、fuzz、
+真实NCM/iPhone/ARM、性能长稳及生产集成仍缺。安全审计、G2/G3和整体目标不标完成。

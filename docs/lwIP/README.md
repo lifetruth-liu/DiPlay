@@ -22,6 +22,7 @@
 | [公共TCP流原型](tcp-adapter.md) | 显式主动连接、读写/deadline/取消/关闭及keepalive | 原型宿主适配与后续两后端合同验收 |
 | [公共TCP监听原型](tcp-listener-adapter.md) | 显式绑定、accept及独立子流所有权 | 监听器生命周期与后续会话适配 |
 | [显式lwIP会话原型](session-network-adapter.md) | 会话所有权、关闭、reuseAddress与echo隔离 | 两后端合同及后续业务接入前验证 |
+| [新端点内核peer验证](kernel-endpoint-peer.md) | 独立内核TCP/UDP、主动连接、慢消费和故障注入 | 原生端点互通与解析回归 |
 
 ## 成功标准
 

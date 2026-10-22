@@ -1,16 +1,32 @@
-# Reviewed local backports
+# Reviewed local backports and corrections
 
 Base: lwIP 2.2.1, commit `77dcd25a72509eb83f72b033d219b1d40cd8eb95`.
 `UPSTREAM-SHA256.txt` remains the original release inventory. The verifier pins
 its digest and requires the original digest below to match that inventory before
 accepting exactly the reviewed post-image. No other vendor modification is allowed.
 
+## TCP timestamp unsigned shift (local correction, 2026-10-22)
+
+- File: `src/core/tcp_in.c`, cumulative with the TCP option reader backport below.
+- Previous post-image: `bb0062732bf843e8b19b55aa9ee8e17c35f36dd6bf35a1321307ce53a0fff717`.
+- Current post-image: `b121300a5e5a765903d2ff19a39cf54267ce0f11a07a701694f665ff3e406243`.
+- Promote the final timestamp byte to `u32_t` before shifting it by 24. Integer
+  promotion previously made this a signed `int` shift; values >= 128 overflowed
+  that type. No timestamp byte order, option length or buffer ownership changes.
+- This is a local correction, not attributed to an upstream commit or CVE. The
+  verifier reports it separately while retaining the upstream backport identity,
+  immutable original release manifest and exact cumulative post-image check.
+- Evidence: Android kernel-peer ASan/UBSan ingress failed at tcp_in.c:2003 with
+  byte 143; the real-parser test reproduces it on Linux UBSan. Values 0x0102038f,
+  0x80000000 and 0xffffffff cover every 12-byte option split, SYN and established
+  ACK updates. This does not constitute complete timestamp/PAWS security coverage.
+
 ## TCP option byte bounds
 
 - Official upstream commit: `3d896ba0a37ff3ce73270ca5e230707fe47f60e3`.
 - File: `src/core/tcp_in.c`.
 - Original SHA-256: `b4d1f0bf55dd782aa75f94069284bf99019aa8c42ee040c4e9e966ae8172b443`.
-- Post-image SHA-256: `bb0062732bf843e8b19b55aa9ee8e17c35f36dd6bf35a1321307ce53a0fff717`.
+- Reader-only post-image (before the local correction above): `bb0062732bf843e8b19b55aa9ee8e17c35f36dd6bf35a1321307ce53a0fff717`.
 - Change: the upstream four-line guard in `tcp_get_next_optbyte` returns EOL
   before accessing an option byte at or beyond the declared option length.
 - Regression: `tcp_option_tests.c` compiles the real `tcp_in.c` in a test-only

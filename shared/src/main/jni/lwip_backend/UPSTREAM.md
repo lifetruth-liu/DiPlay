@@ -1,7 +1,7 @@
 # lwIP upstream pin
 
 The pinned source is vendored and compiled into the prototype `libdiplay_lwip.so`.
-Only the explicit P2 prototype/test factory loads it; production sessions do not
+Only explicit prototype/session/test factories load it; production sessions do not
 select this backend yet.
 
 - Release: **2.2.1**.
@@ -20,6 +20,8 @@ select this backend yet.
   the NDP post-image also includes a local remaining-length guard for cursor advance.
   PMTU minimum validation is adapted from `d08f4773edd0182b7910fc8f046eed82ffcd67c9`,
   retaining full-width MTU saturation instead of the upstream low-16-bit mask.
+  A local unsigned timestamp-byte shift correction preserves the timestamp value
+  while eliminating signed-shift UB, with a separately reported exact post-image.
   see [backport record](BACKPORTS.md). On 2026-10-22 the ZIP detached signature was verified with
   fingerprint `746BEB8E56372EB695EA02E71D6B61C1B84299F5`, anchored to the maintainer's
   Savannah account key. GPG returned GOODSIG/VALIDSIG; owner trust remains undefined.

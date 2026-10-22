@@ -30,7 +30,7 @@ class NativePrototypeInstrumentationTest {
         try {
             // These are the prototype echo ports. Both must be free in a session core.
             val listener = network.listen(NetworkEndpoint(ip, 7000, "session"), reuseAddress = true)
-            val udp = network.bindUdp(NetworkEndpoint(ip, 7001, "session"))
+            val udp = network.bindUdp(NetworkEndpoint(ip, 6000, "session"))
             try { network.listen(listener.localEndpoint, reuseAddress = true); fail("duplicate listener") }
             catch (error: BackendFailure) { assertEquals(BackendFailure.Kind.ADDRESS_CONFLICT, error.kind) }
             val acceptError = AtomicReference<Throwable>(); val receiveError = AtomicReference<Throwable>()

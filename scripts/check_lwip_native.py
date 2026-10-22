@@ -8,7 +8,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1] / "shared/src/main/jni/lwip_backend"
 MANIFEST_HASH = "7882cdb8bc927ecd47a5b1e06b99f3190f245998e937fd0d043380c5e4a6f8c0"
-# Original release manifest stays immutable. Each reviewed backport permits one
+# Original release manifest stays immutable. Each reviewed cumulative correction permits one
 # exact post-image, never an arbitrary change to a listed source file.
 BACKPORTS = {
     # Cumulative NDP chain, local cursor guard and adapted PMTU fix: BACKPORTS.md.
@@ -24,14 +24,17 @@ BACKPORTS = {
     ),
     "src/core/tcp_in.c": (
         "b4d1f0bf55dd782aa75f94069284bf99019aa8c42ee040c4e9e966ae8172b443",
-        "bb0062732bf843e8b19b55aa9ee8e17c35f36dd6bf35a1321307ce53a0fff717",
+        "b121300a5e5a765903d2ff19a39cf54267ce0f11a07a701694f665ff3e406243",
         "3d896ba0a37ff3ce73270ca5e230707fe47f60e3",
     ),
 }
+LOCAL_FIXES = {"src/core/tcp_in.c": "tcp-timestamp-unsigned-shift"}
 ABIS = {"armeabi-v7a": (1, 40), "arm64-v8a": (2, 183), "x86": (1, 3), "x86_64": (2, 62)}
 
 
 def verify_source():
+    if not LOCAL_FIXES.keys() <= BACKPORTS.keys():
+        raise ValueError("local fixes require an exact reviewed post-image")
     manifest = (ROOT / "UPSTREAM-SHA256.txt").read_bytes()
     if hashlib.sha256(manifest).hexdigest() != MANIFEST_HASH:
         raise ValueError("upstream manifest changed: review the upstream pin and verifier together")
@@ -54,7 +57,7 @@ def verify_source():
         if path.is_symlink() or hashlib.sha256(path.read_bytes()).hexdigest() != expected[name]:
             raise ValueError("modified upstream source: " + name)
     return {"lwip": "2.2.1", "commit": "77dcd25a72509eb83f72b033d219b1d40cd8eb95", "files": len(actual),
-            "backports": sorted({entry[2] for entry in BACKPORTS.values()})}
+            "backports": sorted({entry[2] for entry in BACKPORTS.values()}), "local_fixes": LOCAL_FIXES}
 
 
 def inspect_elf(data, abi):

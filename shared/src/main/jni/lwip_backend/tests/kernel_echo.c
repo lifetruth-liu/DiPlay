@@ -2,6 +2,7 @@
 #define _DEFAULT_SOURCE
 #include "diplay_lwip.h"
 #include "echo_services.h"
+#include "endpoint_services.h"
 #include "lwip/priv/tcp_priv.h"
 #include "wire_faults.h"
 #include <arpa/inet.h>
@@ -195,18 +196,25 @@ static ssize_t receive(struct port *port, uint8_t *bytes, size_t length) {
     return n;
 }
 int main(int argc, char **argv) {
-    if ((argc != 3 && argc != 4) || (strcmp(argv[1], "--tap") && strcmp(argv[1], "--veth")) ||
-        (argc == 4 && strcmp(argv[3], "--faults-1") && strcmp(argv[3], "--faults-5"))) {
-        fprintf(stderr, "Usage: %s --tap|--veth interface [--faults-1|--faults-5]\n", argv[0]);
+    if (argc < 3 || argc > 5 || (strcmp(argv[1], "--tap") && strcmp(argv[1], "--veth"))) {
+        fprintf(stderr, "Usage: %s --tap|--veth interface [--endpoints] [--faults-1|--faults-5]\n", argv[0]);
         return 2;
+    }
+    int endpoints = 0, faults = 0;
+    for (int i = 3; i < argc; ++i) {
+        if (!strcmp(argv[i], "--endpoints") && !endpoints) endpoints = 1;
+        else if (!strcmp(argv[i], "--faults-1") && !faults) faults = 1;
+        else if (!strcmp(argv[i], "--faults-5") && !faults) faults = 5;
+        else return 2;
     }
     struct port *port = calloc(1, sizeof(*port));
     if (!port)
         return 1;
-    if (argc == 4)
-        port->tx.config = (wf_config){!strcmp(argv[3], "--faults-1") ? 100 : 20, 5, 10, 100};
+    if (faults)
+        port->tx.config = (wf_config){faults == 1 ? 100 : 20, 5, 10, 100};
     port->fd = port->control = port->random_fd = -1;
     dp_core *core = NULL;
+    endpoint_services *service = NULL;
     int result = 1;
     if (open_port(port, argv[2], !strcmp(argv[1], "--veth"))) {
         perror("open Ethernet port");
@@ -221,9 +229,12 @@ int main(int argc, char **argv) {
     config.clock_ms = clock_ms;
     config.random32 = random32;
     config.output = enqueue;
-    if (dp_core_create(&config, &core) != DP_OK ||
-        dp_core_execute(core, echo_services_start, NULL) != DP_OK)
+    if (dp_core_create(&config, &core) != DP_OK)
         goto cleanup;
+    if (endpoints) {
+        service = endpoint_services_create(core);
+        if (!service) goto cleanup;
+    } else if (dp_core_execute(core, echo_services_start, NULL) != DP_OK) goto cleanup;
     signal(SIGINT, stop);
     signal(SIGTERM, stop);
     uint64_t start = clock_ms(NULL);
@@ -255,6 +266,11 @@ int main(int argc, char **argv) {
         uint32_t timeout;
         if (dp_core_poll(core) != DP_OK || dp_core_next_timeout(core, &timeout) != DP_OK)
             goto cleanup;
+        if (service) {
+            int progress = endpoint_services_pump(core, service);
+            if (progress < 0) goto cleanup;
+            if (progress) timeout = 0;
+        }
         if (dp_core_execute(core, inspect_pressure, port) != DP_OK)
             goto cleanup;
         if (!ready && timeout > 100)
@@ -297,12 +313,17 @@ cleanup:
             port->tx.admitted, port->tx.dropped, port->tx.delayed, port->tx.reordered,
             port->tx.duplicates_sent);
     fprintf(stderr, "repeated_tcp_admissions=%" PRIu64 "\n", port->repeated_tcp_admissions);
-    if (argc == 4 && (!port->tx.dropped || !port->tx.delayed || !port->tx.reordered ||
+    if (faults && (!port->tx.dropped || !port->tx.delayed || !port->tx.reordered ||
                       !port->tx.duplicates_sent))
         result = 1;
     fprintf(stderr, "max_refused=%u sndbuf_at_max_refused=%u zero_window_samples=%u\n",
             port->max_refused, port->sndbuf_at_max_refused, port->zero_window_samples);
     if (core) {
+        if (service) {
+            fprintf(stderr, "endpoint-active: %s\n", endpoint_services_verified(service) ? "verified" : "incomplete");
+            if (!endpoint_services_verified(service)) result = 1;
+            if (endpoint_services_destroy(core, service)) result = 1;
+        }
         dp_stats stats;
         if (dp_core_get_stats(core, &stats) == DP_OK)
             fprintf(stderr, "rx=%" PRIu64 " tx=%" PRIu64 " not_ready=%" PRIu64 " heap_peak=%u\n",

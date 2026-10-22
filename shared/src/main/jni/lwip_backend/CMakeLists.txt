@@ -74,7 +74,7 @@ foreach(scenario ndp ndp_options dad tcp tcp_large_refused tcp_endpoint tcp_back
   set_tests_properties(${scenario} PROPERTIES TIMEOUT 15)
 endforeach()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR ANDROID)
-  add_executable(lwip_kernel_echo tests/kernel_echo.c tests/echo_services.c)
+  add_executable(lwip_kernel_echo tests/kernel_echo.c tests/echo_services.c tests/endpoint_services.c)
   target_link_libraries(lwip_kernel_echo PRIVATE diplay_core wire_faults)
   target_compile_options(lwip_kernel_echo PRIVATE -Wall -Wextra -Werror)
   add_executable(lwip_namespace_exec tests/namespace_exec.c)

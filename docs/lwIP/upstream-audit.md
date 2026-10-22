@@ -3,6 +3,9 @@
 日期：2026-10-22。候选：DiPlay `d58c2f15`，lwIP 2.2.1，
 `77dcd25a72509eb83f72b033d219b1d40cd8eb95`。结论：发布ZIP签名验证通过；
 安全审计**未通过**。TCP选项边界、IPv6空重组清理、NDP依赖链及PMTU最小值检查已回补；NDP定向覆盖和更完整协议验证尚未闭环。
+独立内核peer的UBSan另发现TCP timestamp有符号移位，已做本地unsigned转换及高位/
+split真实解析器回归，详见[新端点内核验证](kernel-endpoint-peer.md)和BACKPORTS.md。
+该项不被归为上游提交或CVE，不改变完整安全审计未通过的结论。
 不据未编译应用模块或既有绿色测试宣称该版本没有漏洞。
 
 ## 工件身份与签名

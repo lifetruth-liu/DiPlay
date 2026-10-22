@@ -261,18 +261,8 @@ done:
     close(fd);
     return result;
 }
-int main(int argc, char **argv) {
-    if (argc < 2 || argc > 3 ||
-        (argc == 3 && strcmp(argv[2], "--slow") && strcmp(argv[2], "--tcp-only"))) {
-        fprintf(stderr, "Usage: %s interface [--slow|--tcp-only]\n", argv[0]);
-        return 2;
-    }
-    unsigned scope = if_nametoindex(argv[1]);
-    if (!scope) {
-        perror("interface index");
-        return 1;
-    }
-    if (argc == 3 && !strcmp(argv[2], "--slow"))
+static int run_cases(unsigned scope, const char *scenario) {
+    if (!strcmp(scenario, "--slow"))
         return slow_reader(scope);
     unsigned char payload[65536];
     for (size_t i = 0; i < sizeof(payload); i++)
@@ -280,7 +270,7 @@ int main(int argc, char **argv) {
     for (int repeat = 0; repeat < 3; repeat++)
         if (tcp_case(scope, payload, sizeof(payload)))
             return 1;
-    if (argc == 3) {
+    if (!strcmp(scenario, "--tcp-only")) {
         puts("PASS independent kernel TCP (3 x 64 KiB)");
         return 0;
     }
@@ -288,4 +278,105 @@ int main(int argc, char **argv) {
         return 1;
     puts("PASS independent kernel TCP (3 x 64 KiB), UDP (empty/MTU/fragmented)");
     return 0;
+}
+static int active_server(unsigned scope, int ready) {
+    const char *stage = "listen";
+    int server = socket(AF_INET6, SOCK_STREAM | SOCK_CLOEXEC, 0), fd = -1, result = 1;
+    if (server < 0) return 1;
+    struct timeval timeout = {10, 0};
+    struct sockaddr_in6 address = {0};
+    address.sin6_family = AF_INET6; address.sin6_scope_id = scope; address.sin6_port = htons(9000);
+    inet_pton(AF_INET6, "fe80::2", &address.sin6_addr);
+    if (setsockopt(server, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) ||
+        setsockopt(server, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) ||
+        bind(server, (struct sockaddr *)&address, sizeof(address)) || listen(server, 1)) goto done;
+    if (write(ready, "R", 1) != 1) goto done;
+    close(ready); ready = -1;
+    stage = "accept";
+    socklen_t length = sizeof(address);
+    do { fd = accept(server, (struct sockaddr *)&address, &length); } while (fd < 0 && errno == EINTR);
+    struct in6_addr expected_address; inet_pton(AF_INET6, "fe80::1", &expected_address);
+    if (fd < 0 || address.sin6_family != AF_INET6 || !address.sin6_port ||
+        memcmp(&address.sin6_addr, &expected_address, sizeof(expected_address))) goto done;
+    const char expected[] = "DiPlay-active-v1"; char bytes[sizeof(expected) - 1], extra;
+    stage = "read challenge";
+    size_t received = 0, sent = 0;
+    while (received < sizeof(bytes)) {
+        ssize_t n = recv(fd, bytes + received, sizeof(bytes) - received, 0);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) goto done;
+        received += (size_t)n;
+    }
+    if (memcmp(bytes, expected, sizeof(bytes))) goto done;
+    ssize_t eof;
+    stage = "read FIN";
+    do { eof = recv(fd, &extra, 1, 0); } while (eof < 0 && errno == EINTR);
+    if (eof != 0) goto done; /* Native output half-close leaves its receive side open. */
+    stage = "write reply";
+    while (sent < sizeof(bytes)) {
+        ssize_t n = send(fd, bytes + sent, sizeof(bytes) - sent, MSG_NOSIGNAL);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) goto done;
+        sent += (size_t)n;
+    }
+    if (shutdown(fd, SHUT_WR)) goto done;
+    result = 0;
+done:
+    if (result) fprintf(stderr, "independent active TCP server failed stage=%s errno=%d\n", stage, errno);
+    if (ready >= 0) close(ready);
+    if (fd >= 0) close(fd);
+    close(server); return result;
+}
+static int endpoint_cases(unsigned scope, const char *scenario) {
+    int pipefd[2]; if (pipe(pipefd)) return 1;
+    fflush(NULL);
+    pid_t child = fork();
+    if (child < 0) { close(pipefd[0]); close(pipefd[1]); return 1; }
+    if (!child) { close(pipefd[0]); _exit(active_server(scope, pipefd[1])); }
+    close(pipefd[1]);
+    struct pollfd ready = {pipefd[0], POLLIN, 0}; char marker;
+    int result = 1, status;
+    if (poll(&ready, 1, 10000) <= 0 || read(pipefd[0], &marker, 1) != 1 || marker != 'R') goto done;
+    int control = open_peer(SOCK_DGRAM, scope, 6002, 0);
+    if (control < 0) goto done;
+    struct timeval retry = {0, 250000}; int acknowledged = 0;
+    if (setsockopt(control, SOL_SOCKET, SO_RCVTIMEO, &retry, sizeof(retry))) { close(control); goto done; }
+    for (int i = 0; i < 32; ++i) {
+        ssize_t sent;
+        do { sent = send(control, "CONNECT9000", 11, MSG_NOSIGNAL); } while (sent < 0 && errno == EINTR);
+        if (sent != 11) break;
+        char reply[6]; ssize_t received;
+        do { received = recv(control, reply, sizeof(reply), 0); } while (received < 0 && errno == EINTR);
+        if (received == 5 && !memcmp(reply, "READY", 5)) { acknowledged = 1; break; }
+        if (received >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) break;
+    }
+    close(control);
+    if (!acknowledged) { fprintf(stderr, "endpoint control handshake failed\n"); goto done; }
+    if (run_cases(scope, scenario)) goto done;
+    for (int i = 0; i < 2000; ++i) {
+        pid_t reaped = waitpid(child, &status, WNOHANG);
+        if (reaped == child) { child = -1; result = WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : 1; break; }
+        if (reaped < 0 && errno != EINTR) break;
+        struct timespec tick = {0, 10000000}; nanosleep(&tick, NULL);
+    }
+    if (!result) puts("PASS independent kernel accepted native active connect, data and half-close");
+done:
+    close(pipefd[0]);
+    if (child > 0) { kill(child, SIGKILL); while (waitpid(child, NULL, 0) < 0 && errno == EINTR) {} }
+    return result;
+}
+int main(int argc, char **argv) {
+    if (argc < 2 || argc > 3) return 2;
+    const char *scenario = argc == 3 ? argv[2] : "basic";
+    int endpoints = !strncmp(scenario, "--endpoints", 11);
+    if (endpoints) {
+        scenario += 11;
+        if (!*scenario) scenario = "basic";
+        else if (!strcmp(scenario, "-slow")) scenario = "--slow";
+        else if (!strcmp(scenario, "-tcp-only")) scenario = "--tcp-only";
+        else return 2;
+    } else if (strcmp(scenario, "basic") && strcmp(scenario, "--slow") && strcmp(scenario, "--tcp-only")) return 2;
+    unsigned scope = if_nametoindex(argv[1]);
+    if (!scope) { perror("interface index"); return 1; }
+    return endpoints ? endpoint_cases(scope, scenario) : run_cases(scope, scenario);
 }

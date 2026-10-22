@@ -2000,7 +2000,7 @@ tcp_parseopt(struct tcp_pcb *pcb)
           tsval = tcp_get_next_optbyte();
           tsval |= (tcp_get_next_optbyte() << 8);
           tsval |= (tcp_get_next_optbyte() << 16);
-          tsval |= (tcp_get_next_optbyte() << 24);
+          tsval |= ((u32_t)tcp_get_next_optbyte() << 24);
           if (flags & TCP_SYN) {
             pcb->ts_recent = lwip_ntohl(tsval);
             /* Enable sending timestamps in every segment now that we know

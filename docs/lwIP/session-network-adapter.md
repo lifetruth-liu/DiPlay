@@ -10,7 +10,7 @@
 start接管传入runner并等待启动；启动失败关闭runner、保留结构化错误。native工厂
 先校验/防御复制MAC、IPv6和MTU，再构造runner，在其创建线程生成NativePrototypeCore。
 该核心以echoServices=false准备，只补时钟/熵，不调用prepareEcho，避免占用原型的
-TCP7000/UDP7001及额外PCB。原型nativeEcho和既有create默认仍启用echo服务。
+TCP7000/UDP6000及额外PCB。原型nativeEcho和既有create默认仍启用echo服务。
 
 close先禁止新建端点，再关闭runner。队列取消所有等待者和候选，context销毁屏障
 清理所有已登记端点及协议关闭项；不从业务线程调用native释放。重复close可继续
