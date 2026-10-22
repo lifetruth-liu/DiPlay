@@ -5,12 +5,29 @@ Base: lwIP 2.2.1, commit `77dcd25a72509eb83f72b033d219b1d40cd8eb95`.
 its digest and requires the original digest below to match that inventory before
 accepting exactly the reviewed post-image. No other vendor modification is allowed.
 
+## Reassembly extension-header restart (local correction, 2026-10-22)
+
+- File: `src/core/ipv6/ip6.c`, cumulative with the large-payload correction below.
+- Previous post-image: `2c9d7c76fd3d5c990d2967cd2ae8f9e240054e115892085e974c0ce8f191ecd6`.
+- Current post-image: `38bf7badfed81fdd58543f18c344966214aaa4235fed1d8d72a0f34019d8ce90`.
+- After successful reassembly, restart parsing at the base header. A leading
+  Hop-by-Hop header remains first and must not be rejected by the mid-chain HBH
+  check. Explicitly reject Fragment Header -> HBH before reassembly, including
+  atomic fragments; restarting must not make this illegal order acceptable.
+- Regression: one/two pre-fragment extension headers (HBH/Destination Options),
+  ordered/reversed fragments, normal/separate-base-header/max/overflow lengths,
+  continued delivery and zero retained pbufs after acceptance/drop. Four negative
+  Fragment -> HBH vectors keep the complete UDP header in the first fragment so
+  rejection cannot be credited to an unrelated first-pbuf header-size check.
+- This is local, not an upstream commit/CVE claim or independent security review.
+
 ## Full IPv6 UDP payload fragmentation/reassembly (local correction, 2026-10-22)
 
 - Local implementation, not an upstream commit or CVE fix. It retains the pbuf
   u16 overflow guard and the 65527-byte public UDP validation limit.
 - `src/core/ipv6/ip6.c`: original
-  `b46f5bcc0d086552502bd0db36198a9a804f22efcb97683bc968e20099025dec`, current
+  `b46f5bcc0d086552502bd0db36198a9a804f22efcb97683bc968e20099025dec`, post-image before
+  the extension-header correction above:
   `2c9d7c76fd3d5c990d2967cd2ae8f9e240054e115892085e974c0ce8f191ecd6`.
 - `src/core/ipv6/ip6_frag.c`: cumulative with the existing fragment backport;
   previous post-image `6d3783d2fcbe1187eac34a6b732436447288b9740b6ec9a8d69002acb08680f3`,

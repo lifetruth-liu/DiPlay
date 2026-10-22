@@ -1346,6 +1346,98 @@ static void test_udp_endpoint_fragments(void) {
         test_udp_endpoint_fragments_case(sizes[i], 1);
     }
 }
+static void extension_fragment(struct fixture *f, const uint8_t *datagram, size_t offset,
+                               size_t length, int more, unsigned extensions, uint8_t first,
+                               uint8_t fragment_next) {
+    uint8_t frame[1514];
+    CHECK(extensions <= 2 && length <= 1200);
+    ethernet(frame, local_mac);
+    uint8_t *p = ipv6(frame, local_ip, first, (uint16_t)(extensions * 8 + 8 + length));
+    for (unsigned i = 0; i < extensions; ++i) p[i * 8] = i + 1 < extensions ? 60 : 44;
+    p += extensions * 8;
+    p[0] = fragment_next; w16(p + 2, (uint16_t)(offset | (more ? 1 : 0))); w32(p + 4, 731);
+    memcpy(p + 8, datagram + offset, length);
+    CHECK(dp_core_input(f->core, frame, 62 + extensions * 8 + length) == DP_OK);
+}
+static void test_udp_extension_fragments(void) {
+    for (unsigned extensions = 1; extensions <= 2; ++extensions) {
+        const size_t sizes[] = {64, 65487 - extensions * 8, 65488 - extensions * 8,
+                                65527 - extensions * 8, 65528 - extensions * 8};
+        for (unsigned first_kind = 0; first_kind < 2; ++first_kind) {
+            for (unsigned ordered = 0; ordered < 2; ++ordered) {
+                for (size_t vector = 0; vector < sizeof(sizes) / sizeof(sizes[0]); ++vector) {
+                    struct fixture f;
+                    ready_core(&f);
+                    uint64_t handle; uint16_t port;
+                    CHECK(dp_udp_bind(f.core, 0, &handle, &port) == DP_OK);
+                    uint8_t datagram[65535] = {0}, received[65527], pseudo[40] = {0};
+                    const size_t length = sizes[vector] + 8;
+                    w16(datagram, 50000); w16(datagram + 2, port); w16(datagram + 4, (uint16_t)length);
+                    for (size_t n = 8; n < length; ++n) datagram[n] = (uint8_t)(n ^ (n >> 8));
+                    memcpy(pseudo + 8, peer_ip, 16); memcpy(pseudo + 24, local_ip, 16);
+                    w16(datagram + 6, checksum(pseudo, datagram, length, 17));
+                    const size_t pieces = (length + 1199) / 1200;
+                    for (size_t n = 0; n < pieces; ++n) {
+                        size_t at = (ordered ? n : pieces - n - 1) * 1200;
+                        size_t count = length - at < 1200 ? length - at : 1200;
+                        extension_fragment(&f, datagram, at, count, at + count < length,
+                                           extensions, first_kind ? 60 : 0, 17);
+                    }
+                    dp_udp_datagram info;
+                    int valid = sizes[vector] + extensions * 8 <= 65527;
+                    dp_result status = dp_udp_receive(f.core, handle, received, sizeof(received), &info);
+                    if (status != (valid ? DP_OK : DP_WOULD_BLOCK))
+                        fprintf(stderr, "extensions=%u first=%u ordered=%u payload=%lu status=%d\n",
+                                extensions, first_kind ? 60u : 0u, ordered, (unsigned long)sizes[vector], status);
+                    CHECK(status == (valid ? DP_OK : DP_WOULD_BLOCK));
+                    if (valid) {
+                        CHECK(info.original_length == sizes[vector] && info.copied_length == sizes[vector]);
+                        CHECK(info.source_port == 50000 && !memcmp(info.source, peer_ip, 16));
+                        CHECK(!memcmp(received, datagram + 8, sizes[vector]));
+                    }
+                    /* Accepted or dropped, the context must stay usable and release all fragments. */
+                    w16(datagram + 4, 9); w16(datagram + 6, 0); datagram[8] = 42;
+                    w16(datagram + 6, checksum(pseudo, datagram, 9, 17));
+                    extension_fragment(&f, datagram, 0, 9, 0, extensions, first_kind ? 60 : 0, 17);
+                    CHECK(dp_udp_receive(f.core, handle, received, sizeof(received), &info) == DP_OK);
+                    CHECK(info.original_length == 1 && received[0] == 42);
+                    dp_stats stats;
+                    CHECK(dp_core_get_stats(f.core, &stats) == DP_OK);
+                    CHECK(stats.failure == DP_OK && stats.pbuf_used == 0);
+                    CHECK(dp_udp_close(f.core, handle) == DP_OK);
+                    close_core(&f);
+                }
+            }
+        }
+    }
+    for (unsigned atomic = 0; atomic < 2; ++atomic) {
+        for (unsigned ordered = 0; ordered < 2; ++ordered) {
+            struct fixture f;
+            ready_core(&f);
+            uint64_t handle; uint16_t port;
+            CHECK(dp_udp_bind(f.core, 0, &handle, &port) == DP_OK);
+            uint8_t datagram[17] = {17}, pseudo[40] = {0}, target[8];
+            w16(datagram + 8, 50000); w16(datagram + 10, port); w16(datagram + 12, 9);
+            datagram[16] = 42;
+            memcpy(pseudo + 8, peer_ip, 16); memcpy(pseudo + 24, local_ip, 16);
+            w16(datagram + 14, checksum(pseudo, datagram + 8, 9, 17));
+            if (atomic) extension_fragment(&f, datagram, 0, 17, 0, 0, 44, 0);
+            else {
+                for (unsigned n = 0; n < 2; ++n) {
+                    unsigned part = ordered ? n : 1 - n;
+                    extension_fragment(&f, datagram, part * 16, part ? 1 : 16, !part, 0, 44, 0);
+                }
+            }
+            dp_udp_datagram info;
+            CHECK(dp_udp_receive(f.core, handle, target, sizeof(target), &info) == DP_WOULD_BLOCK);
+            dp_stats stats;
+            CHECK(dp_core_get_stats(f.core, &stats) == DP_OK);
+            CHECK(stats.failure == DP_OK && stats.pbuf_used == 0);
+            CHECK(dp_udp_close(f.core, handle) == DP_OK);
+            close_core(&f);
+        }
+    }
+}
 static void test_tx_failed(void) {
     struct fixture f;
     open_core(&f, 1);
@@ -1466,6 +1558,8 @@ int main(int argc, char **argv) {
         test_udp_endpoint();
     else if (!strcmp(argv[1], "udp_endpoint_fragments"))
         test_udp_endpoint_fragments();
+    else if (!strcmp(argv[1], "udp_extension_fragments"))
+        test_udp_extension_fragments();
     else if (!strcmp(argv[1], "api"))
         test_api();
     else if (!strcmp(argv[1], "thread"))

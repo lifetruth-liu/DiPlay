@@ -78,3 +78,23 @@ ABI不变。补丁来源与三个精确post-image见原生BACKPORTS.md，未将�
   TEMP/diplay-udp-large-kernel-tap.log。
 - 完整九项CI、APK四ABI/16KiB/NX/源清单与许可证检查通过；整体执行记录见
   execution-status.md。真机、完整分配故障/扩展头矩阵及独立安全评审仍缺。
+
+## 扩展头重组后续回归
+
+补充40个向量：一/两个前置扩展头、HBH/Destination Options、顺序/逆序分片、
+普通长度/基础头分离边界/最大合法长度/扩展后超过65535。每项核对数据或拒绝，
+随后继续接收正常报文，并确认无残留pbuf。另4项负例覆盖Fragment→HBH的atomic/
+重组、顺序/逆序，确保完整UDP头在首片中，不能因UDP头跨pbuf而假装顺序检查有效。
+
+红测发现合法前置HBH在重组后被mid-chain检查误拒绝。成功重组从基础头重新开始
+解析后，该HBH仍为第一个头；修正为重新进入解析循环。单纯重启会让Fragment后
+非法HBH通过，故进入重组前明确拒绝fragment next-header为HBH，atomic同样拒绝。
+没有放宽未知选项处理、增加内存预算或改变公共ABI。当前ip6.c累计post-image及
+历史值记录于BACKPORTS.md，不将本地改动标为上游提交或独立安全评审通过。
+
+Windows及Linux ASan/UBSan/默认LSan原生51/51；JNI36/36；关闭断言的附加构建
+也通过该矩阵（沿用已有unused-parameter warning降级旗标）。独立内核peer通过
+IPV6_HOPOPTS生成真实HBH，TAP/veth endpoints和旧echo均完成普通8组及HBH8组
+UDP往返；HBH最大payload为65519，为其8字节头保留空间。该socket选项要求工具
+的CAP_NET_RAW，现有root namespace harness满足，产品不新增权限或raw socket。
+Android工具使用ASan/UBSan、detect_leaks=0；不据此声称LSan或全面扩展头审计。

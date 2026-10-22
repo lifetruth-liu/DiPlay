@@ -1404,3 +1404,42 @@ UDP负载超过16位pbuf长度。没有降低65527输入上限、扩大预算或
 父namespace仍net:[4026531963]，dp-lwip0/dp-peer0不存在；public tree及staged diff
 检查通过。完整分配/扩展头故障矩阵、独立安全评审、进程峰值、实际NCM/iPhone/ARM
 及性能/长稳仍缺，生产选择未切换，G2/G3与整体目标保持未完成。
+
+### 扩展头重组定向矩阵与解析循环修复
+
+新增原生udp_extension_fragments场景，内部40个向量：一/两个前置扩展头、HBH/
+Destination Options及串联、顺序/逆序分片，覆盖普通长度、独立基础头边界、最大
+合法payload及扩展后总长度超限；接受/丢弃后继续接收正常报文且pbuf归零。
+
+红测TEMP/diplay-extension-red.log：extensions=1 first=HBH ordered=0 payload=65479
+被误拒绝。重组后既然回到基础头，合法前置HBH仍是第一个，不能再走中途HBH拒绝。
+增加解析循环continue后合法矩阵通过；进一步负例发现单纯continue会放过真正
+Fragment→HBH顺序。最初8/9字节分片负例因UDP头跨pbuf被拒绝，不能证明顺序检查；
+改为16/1确保完整UDP头在首片，TEMP/diplay-extension-negative-red.log明确红测。
+最终在Fragment分支进入重组前显式拒绝next=HBH，同时保留atomic拒绝。新增4个
+atomic/重组、顺序/逆序负例。没有将该中间修复引入的问题描述成基线已知CVE。
+
+本地ip6.c累计SHA从2c9d7c76fd3d5c990d2967cd2ae8f9e240054e115892085e974c0ce8f191ecd6
+更新为38bf7badfed81fdd58543f18c344966214aaa4235fed1d8d72a0f34019d8ce90；CRLF与
+原始manifest不变，精确post-image验证器及BACKPORTS.md同步。其他vendor文件未变，
+公共C ABI1/JNI ABI6、资源预算与生产选择不变。
+
+验证：
+
+- Windows原生51/51，1.17s：TEMP/diplay-extension-final-host.log。
+- Linux ASan/UBSan及默认LSan51/51，5.27s：/tmp/diplay-extension-sanitize.log。
+- JNI36/36，49s、零失败/错误/跳过：TEMP/diplay-extension-connected.log。API28
+  x86_64自建AVD、RUNNING_UNLOCKED，无实际USB/iPhone；测试APK SHA-256：
+  b15b55ebe4274322237e9b60443734bf48ec0e8465c97a85ac487819c2c4e829。
+- 独立内核peer使用IPV6_HOPOPTS，普通UDP8组及HBH8组共16次往返；TAP/veth端点
+  及旧echo通过：TEMP/diplay-extension-kernel-tap.log、diplay-extension-kernel-veth.log、
+  diplay-extension-kernel-echo.log。HBH最大payload65519，保留8字节扩展头预算。
+  Android工具ASan/UBSan启用、detect_leaks=0，不宣称LSan扫描。
+- 无断言附加变体通过该场景：TEMP/diplay-extension-noassert.log，沿用
+  -DLWIP_NOASSERT=1 -Wno-error=unused-parameter，不宣称原始无断言-Werror全通过。
+- 完整九项CI exit0、3s、250任务15执行：TEMP/diplay-extension-final-ci.log；单元
+  任务均UP-TO-DATE，不记重新执行。APK四ABI/16KiB/NX/许可/源摘要检查通过，mobile
+  SHA-256：d6ad6eda16b327980ea3de672d872f9be4f76bfd627a495fa7a6f2146fc5c56c。
+
+public tree及staged diff检查通过。未知选项动作、更多路由/畸形长度、分配故障矩阵、
+独立安全评审、进程峰值、实际NCM/iPhone/ARM和性能长稳仍缺，G2/G3和整体目标未完成。

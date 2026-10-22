@@ -30,7 +30,7 @@ BACKPORTS = {
 }
 LOCAL_POST_IMAGES = {
     "src/core/ipv6/ip6.c": ("b46f5bcc0d086552502bd0db36198a9a804f22efcb97683bc968e20099025dec",
-                           "2c9d7c76fd3d5c990d2967cd2ae8f9e240054e115892085e974c0ce8f191ecd6"),
+                           "38bf7badfed81fdd58543f18c344966214aaa4235fed1d8d72a0f34019d8ce90"),
     "src/include/lwip/ip6_frag.h": ("0dcea4a7600b856877e7fb4943b20690aa9e2b69414b4b2273c7e9e0a25f74a3",
                                   "b38cc1cc2df8b90d77671326a24b58178f2183cf2b623103eb5b7ac318efb178"),
 }

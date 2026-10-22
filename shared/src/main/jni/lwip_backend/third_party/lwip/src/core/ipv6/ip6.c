@@ -968,6 +968,9 @@ netif_found:
 
       /* Get next header type. */
       nexth = &IP6_FRAG_NEXTH(frag_hdr);
+      if (*nexth == IP6_NEXTH_HOPBYHOP) {
+        goto ip6_hopbyhop_not_first;
+      }
 
       /* Fragment Header length. */
       hlen = 8;
@@ -1021,6 +1024,8 @@ netif_found:
         if (separate_reass_header == NULL) {
           pbuf_remove_header(p, IP6_HLEN);
         }
+        /* Restart at the base header: a leading HBH header is still first. */
+        continue;
 
 #else /* LWIP_IPV6_REASS */
         /* free (drop) packet pbufs */
@@ -1038,6 +1043,7 @@ netif_found:
     }
 
     if (*nexth == IP6_NEXTH_HOPBYHOP) {
+ip6_hopbyhop_not_first:
       /* Hop-by-Hop header comes only as a first option */
       icmp6_param_problem(p, ICMP6_PP_HEADER, nexth);
       LWIP_DEBUGF(IP6_DEBUG, ("ip6_input: packet with Hop-by-Hop options header dropped (only valid as a first option)\n"));

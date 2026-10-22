@@ -56,6 +56,11 @@ adb -s emulator-5580 shell sh /data/local/tmp/diplay-endpoints/test_lwip_android
 有界wire queue，故障场景仅做TCP，UDP不承诺可靠重传。独立主动连接和半关闭仍需
 同时通过。退出时终止/等待本次工具，netns释放；不修改父namespace。
 
+basic后续增加内核IPV6_HOPOPTS向量：普通UDP0/1/1200/4096/8192/65487/65488/65527，
+HBH UDP相同前七组及最大65519，共16次往返。八字节HBH从IPv6 payload预算扣除。
+测试工具需CAP_NET_RAW设置该socket选项，已在现有root隔离namespace harness中
+运行；产品应用不需要该权限。peer不包含或链接lwIP/测试帧编解码器。
+
 ASan/UBSan构建另用目录、配置时添加`-DDIPLAY_SANITIZERS=ON`，复制对应NDK的
 libclang_rt.asan-x86_64-android.so并设置LD_LIBRARY_PATH，再运行同一脚本。例如：
 

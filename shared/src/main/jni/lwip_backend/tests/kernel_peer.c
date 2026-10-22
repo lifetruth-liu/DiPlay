@@ -110,13 +110,19 @@ done:
     close(fd);
     return result;
 }
-static int udp_cases(unsigned scope, const unsigned char *payload) {
+static int udp_cases(unsigned scope, const unsigned char *payload, int hop_options) {
     int fd = open_peer(SOCK_DGRAM, scope, 6000, 0);
     if (fd < 0) {
         perror("UDP connect");
         return 1;
     }
-    const size_t sizes[] = {0, 1, 1200, 4096, 8192, 65487, 65488, 65527};
+    if (hop_options) {
+        const unsigned char options[8] = {0}; /* Eight-byte HBH header containing Pad1 options. */
+        if (setsockopt(fd, IPPROTO_IPV6, IPV6_HOPOPTS, options, sizeof(options))) {
+            perror("IPV6_HOPOPTS"); close(fd); return 1;
+        }
+    }
+    const size_t sizes[] = {0, 1, 1200, 4096, 8192, 65487, 65488, hop_options ? 65519u : 65527u};
     int result = 1;
     for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
         ssize_t n;
@@ -274,9 +280,9 @@ static int run_cases(unsigned scope, const char *scenario) {
         puts("PASS independent kernel TCP (3 x 64 KiB)");
         return 0;
     }
-    if (udp_cases(scope, payload))
+    if (udp_cases(scope, payload, 0) || udp_cases(scope, payload, 1))
         return 1;
-    puts("PASS independent kernel TCP (3 x 64 KiB), UDP (empty/MTU/fragmented)");
+    puts("PASS independent kernel TCP (3 x 64 KiB), UDP (empty/MTU/fragmented/HBH)");
     return 0;
 }
 static int active_server(unsigned scope, int ready) {
