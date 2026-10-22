@@ -23,6 +23,60 @@ import org.junit.runners.Parameterized
 
 @RunWith(Parameterized::class)
 class TcpSessionDeviceContractTest(private val backend: String) {
+    @Test fun tenSecondReceivePauseBackpressuresThenRecoversAllBytes() {
+        peer(stallWrites = true, digestResponse = true).use { peer ->
+            val executor = Executors.newSingleThreadExecutor()
+            val completed = AtomicInteger()
+            val deadline = peer.network.clock.nowMillis() + 90000
+            val firstWrite = CountDownLatch(1)
+            try {
+                val sending = executor.submit<ByteArray> {
+                    val digest = java.security.MessageDigest.getInstance("SHA-256")
+                    val chunk = ByteArray(32768)
+                    repeat(256) { index ->
+                        for (offset in chunk.indices) chunk[offset] = (index * 17 + offset * 31).toByte()
+                        digest.update(chunk)
+                        peer.stream.write(chunk, deadlineMillis = deadline)
+                        completed.incrementAndGet()
+                        firstWrite.countDown()
+                    }
+                    peer.stream.shutdownOutput()
+                    java.nio.ByteBuffer.allocate(40).putLong(256L * chunk.size).put(digest.digest()).array()
+                }
+                assertTrue("Sender did not make initial write progress", firstWrite.await(3, TimeUnit.SECONDS))
+                val pauseEnd = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+                var previous = -1; var stableSince = System.nanoTime()
+                while (System.nanoTime() < pauseEnd) {
+                    assertFalse("All writes completed while the peer was paused", sending.isDone)
+                    val count = completed.get()
+                    if (count != previous) { previous = count; stableSince = System.nanoTime() }
+                    peer.checkBudget()
+                    Thread.sleep(50)
+                }
+                assertTrue("Write progress did not stall", System.nanoTime() - stableSince >= TimeUnit.MILLISECONDS.toNanos(500))
+                assertTrue(completed.get() < 256)
+                peer.resumeWrites()
+                val recoveryEnd = System.nanoTime() + TimeUnit.SECONDS.toNanos(60)
+                while (!sending.isDone && System.nanoTime() < recoveryEnd) {
+                    peer.checkBudget()
+                    Thread.sleep(50)
+                }
+                val expected = sending.get(1, TimeUnit.SECONDS)
+                val received = ByteArrayOutputStream()
+                val bytes = ByteArray(17)
+                while (true) {
+                    val count = peer.stream.read(bytes, deadlineMillis = deadline)
+                    if (count == -1) break
+                    check(count > 0 && received.size() + count <= 40)
+                    received.write(bytes, 0, count)
+                    peer.checkBudget()
+                }
+                assertArrayEquals(expected, received.toByteArray())
+                peer.verify()
+            } finally { peer.stream.close(); executor.shutdownNow() }
+        }
+    }
+
     @Test fun closeCancelsBackpressuredWriterAndRejectsOverlappingWrite() {
         peer(stallWrites = true).use { peer ->
             val executor = Executors.newSingleThreadExecutor()
@@ -203,12 +257,14 @@ class TcpSessionDeviceContractTest(private val backend: String) {
         val network: SessionNetwork
         val stream: TcpStream
         fun verify()
+        fun resumeWrites() { error("Peer is not resumable") }
+        fun checkBudget() {}
     }
 
-    private fun peer(resetAfterData: Boolean = false, stallWrites: Boolean = false): Peer =
-        if (backend == "system") systemPeer(resetAfterData, stallWrites) else nativePeer(resetAfterData, stallWrites)
+    private fun peer(resetAfterData: Boolean = false, stallWrites: Boolean = false, digestResponse: Boolean = false): Peer =
+        if (backend == "system") systemPeer(resetAfterData, stallWrites, digestResponse) else nativePeer(resetAfterData, stallWrites, digestResponse)
 
-    private fun systemPeer(resetAfterData: Boolean, stallWrites: Boolean): Peer {
+    private fun systemPeer(resetAfterData: Boolean, stallWrites: Boolean, digestResponse: Boolean): Peer {
         val server = ServerSocket(0, 1, InetAddress.getByName("::1"))
         if (stallWrites) server.receiveBufferSize = 4096
         val network = SystemSessionNetwork("tcp-contract")
@@ -224,7 +280,7 @@ class TcpSessionDeviceContractTest(private val backend: String) {
                     if (stallWrites) {
                         paused.countDown()
                         check(release.await(30, TimeUnit.SECONDS))
-                        return@use
+                        if (!digestResponse) return@use
                     }
                     if (resetAfterData) {
                         check(socket.getInputStream().read() == 1)
@@ -232,14 +288,17 @@ class TcpSessionDeviceContractTest(private val backend: String) {
                         return@use
                     }
                     val bytes = ByteArrayOutputStream()
+                    val digest = java.security.MessageDigest.getInstance("SHA-256")
+                    var total = 0L
                     val chunk = ByteArray(997)
                     while (true) {
                         val count = socket.getInputStream().read(chunk)
                         if (count == -1) break
-                        check(bytes.size() + count <= 131072)
-                        bytes.write(chunk, 0, count)
+                        total += count
+                        check(total <= if (digestResponse) 8388608 else 131072)
+                        if (digestResponse) digest.update(chunk, 0, count) else bytes.write(chunk, 0, count)
                     }
-                    socket.getOutputStream().write(bytes.toByteArray())
+                    socket.getOutputStream().write(if (digestResponse) java.nio.ByteBuffer.allocate(40).putLong(total).put(digest.digest()).array() else bytes.toByteArray())
                     socket.shutdownOutput()
                 }
             } catch (failure: Throwable) { error.set(failure) }
@@ -250,6 +309,7 @@ class TcpSessionDeviceContractTest(private val backend: String) {
             return object : Peer {
                 override val network = network
                 override val stream = stream
+                override fun resumeWrites() { release.countDown() }
                 override fun verify() { worker.join(3000); assertFalse(worker.isAlive); error.get()?.let { throw AssertionError(it) } }
                 override fun close() {
                     try { network.close(); server.close(); accepted.get()?.close() }
@@ -259,8 +319,8 @@ class TcpSessionDeviceContractTest(private val backend: String) {
         } catch (failure: Throwable) { network.close(); server.close(); accepted.get()?.close(); release.countDown(); worker.join(3000); throw failure }
     }
 
-    private fun nativePeer(resetAfterData: Boolean, stallWrites: Boolean): Peer {
-        val wire = TcpWirePeer(resetAfterData, stallWrites)
+    private fun nativePeer(resetAfterData: Boolean, stallWrites: Boolean, digestResponse: Boolean): Peer {
+        val wire = TcpWirePeer(resetAfterData, stallWrites, digestResponse)
         val base = coreCommandClock()
         val offset = AtomicLong()
         val clock = MonotonicClock { base.nowMillis() + offset.get() }
@@ -274,6 +334,16 @@ class TcpSessionDeviceContractTest(private val backend: String) {
             return object : Peer {
                 override val network = network
                 override val stream = stream
+                override fun resumeWrites() { wire.paused.set(false) }
+                override fun checkBudget() {
+                    val snapshot = runner.snapshot()
+                    assertNull(snapshot.failure)
+                    assertTrue(snapshot.rxQueuedBytes <= LwipPrototype.RX_QUEUE_BYTES)
+                    assertTrue(snapshot.txQueuedBytes <= LwipPrototype.TX_QUEUE_BYTES)
+                    assertTrue(snapshot.rxQueuedFrames <= LwipPrototype.RX_QUEUE_FRAMES)
+                    assertTrue(snapshot.txQueuedFrames <= LwipPrototype.TX_QUEUE_FRAMES)
+                    assertTrue(snapshot.commandCount <= 128 && snapshot.commandBytes <= 256 * 1024)
+                }
                 override fun verify() { wire.checkFailure(); assertNull(runner.snapshot().failure) }
                 override fun close() = network.close()
             }
@@ -285,7 +355,8 @@ class TcpSessionDeviceContractTest(private val backend: String) {
     }
 
     /** Test-only, stop-and-wait echo after FIN. No native API or fake core calls. */
-    private class TcpWirePeer(private val resetAfterData: Boolean, private val stallWrites: Boolean) : EthernetFramePort {
+    private class TcpWirePeer(private val resetAfterData: Boolean, stallWrites: Boolean, private val digestResponse: Boolean) : EthernetFramePort {
+        val paused = AtomicBoolean(stallWrites)
         val mac = byteArrayOf(2, 0, 0, 0, 0, 1)
         val ip = ByteArray(16).also { it[0] = 0xfe.toByte(); it[1] = 0x80.toByte(); it[15] = 1 }
         val peerIp = ip.copyOf().also { it[15] = 2 }
@@ -311,7 +382,15 @@ class TcpSessionDeviceContractTest(private val backend: String) {
             var localPort = 0; var localNext = 0L; var peerNext = 7000L
             var acknowledged = 7000L; var finished = false; var sentFin = false; var sent = 0
             val received = ByteArrayOutputStream()
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+            var total = 0L
+            var response: ByteArray? = null
+            var windowClosed = paused.get()
             while (!closed.get()) {
+                if (windowClosed && !paused.get() && localPort != 0) {
+                    windowClosed = false
+                    emit(tcp(localPort, 16, peerNext, localNext))
+                }
                 val frame = output.poll(100, TimeUnit.MILLISECONDS) ?: continue
                 if (trace.size < 20) trace.add("out proto=${frame.getOrNull(20)} size=${frame.size} type=${frame.getOrNull(54)} flags=${frame.getOrNull(67)}")
                 if (frame.size >= 78 && frame[20] == 58.toByte() && frame[54] == 135.toByte() &&
@@ -338,18 +417,23 @@ class TcpSessionDeviceContractTest(private val backend: String) {
                 }
                 if (flags and 16 != 0) acknowledged = maxOf(acknowledged, ack)
                 if (seq == localNext && (data.isNotEmpty() || flags and 1 != 0)) {
-                    if (stallWrites) { emit(tcp(localPort, 16, peerNext, localNext)); continue }
+                    if (paused.get()) { emit(tcp(localPort, 16, peerNext, localNext)); continue }
                     if (resetAfterData && data.isNotEmpty()) {
                         emit(tcp(localPort, 20, peerNext, seq + data.size))
                         return
                     }
-                    check(received.size() + data.size <= 131072)
-                    received.write(data); localNext += data.size
-                    if (flags and 1 != 0) { localNext++; finished = true }
+                    total += data.size
+                    check(total <= if (digestResponse) 8388608 else 131072)
+                    if (digestResponse) digest.update(data) else received.write(data)
+                    localNext += data.size
+                    if (flags and 1 != 0) {
+                        localNext++; finished = true
+                        response = if (digestResponse) java.nio.ByteBuffer.allocate(40).putLong(total).put(digest.digest()).array() else received.toByteArray()
+                    }
                     emit(tcp(localPort, 16, peerNext, localNext))
                 }
                 if (finished && acknowledged == peerNext && !sentFin) {
-                    val bytes = received.toByteArray()
+                    val bytes = checkNotNull(response)
                     if (sent < bytes.size) {
                         val count = minOf(1400, bytes.size - sent)
                         emit(tcp(localPort, 24, peerNext, localNext, bytes.copyOfRange(sent, sent + count)))
@@ -363,7 +447,7 @@ class TcpSessionDeviceContractTest(private val backend: String) {
         private fun tcp(port: Int, flags: Int, sequence: Long, acknowledgment: Long, bytes: ByteArray = byteArrayOf()) = packet(6, 20 + bytes.size).also {
             put16(it, 54, 9000); put16(it, 56, port)
             repeat(4) { n -> it[58 + n] = (sequence ushr (24 - n * 8)).toByte(); it[62 + n] = (acknowledgment ushr (24 - n * 8)).toByte() }
-            it[66] = 0x50; it[67] = flags.toByte(); put16(it, 68, if (stallWrites) 0 else 32768)
+            it[66] = 0x50; it[67] = flags.toByte(); put16(it, 68, if (paused.get()) 0 else 32768)
             bytes.copyInto(it, 74); checksum(it, 6, 70)
         }
         private fun packet(protocol: Int, length: Int) = ByteArray(54 + length).also {

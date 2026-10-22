@@ -1340,3 +1340,22 @@ exit0、41s：TEMP/diplay-write-connected.log。测试APK SHA-256：
 任务UP-TO-DATE，不记重新执行。public tree及staged diff检查通过。
 此次覆盖T04的写取消及短期背压观察；十秒暂停后完整恢复及内存预算尚未验证，不
 标T05完成。故障矩阵、真实NCM/iPhone/ARM及安全/性能门槛仍缺，整体目标继续。
+
+### 共同十秒暂停与完整恢复
+
+新增tenSecondReceivePauseBackpressuresThenRecoversAllBytes。系统peer暂停read，
+JNI peer通告零窗口；发送者复用32KiB缓冲共256块，首次write完成后才计十秒暂停。
+暂停末完成计数至少500ms不变且writer未完成，再恢复读取/发送正窗口ACK。全部
+8MiB写完并shutdownOutput后，peer以固定40字节返回实际接收长度和增量SHA-256，
+与发送者核对后EOF；不在夹具保留8MiB负载。JNI暂停及恢复过程每50ms抽样已有
+snapshot，检查命令128项/256KiB、RX128帧/128KiB、TX128帧/192KiB边界与无runner
+故障；响应读取时也检查。未测系统内核缓冲或原生/进程完整峰值，不标整个T05完成。
+
+首轮36/36，添加首次write起点门闩后36/36，恢复阶段也抽样的最终36/36，均exit0。
+最终TEMP/diplay-recovery-budget-connected.log，47s，XML零失败/错误/跳过；自建
+API28 x86_64 AVD、RUNNING_UNLOCKED，无真实USB/iPhone。测试APK SHA-256：
+c09ed14b3eaf2ae6d99c7eb46e062c8f13e921ce7fcd7cd152b4bc66f45b979b。
+完整九项CI exit0、12s、250任务14执行：TEMP/diplay-recovery-final-ci.log，三模块
+单元任务UP-TO-DATE，不记重新执行。public tree及staged diff检查通过。
+本轮仅测试夹具/文档变化，生产后端不变；完整内存峰值、故障矩阵、真实NCM/iPhone/
+ARM与安全/性能门槛仍缺，整体目标和G2/G3保持未完成。
