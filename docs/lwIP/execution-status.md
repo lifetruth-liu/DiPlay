@@ -1243,3 +1243,17 @@ exit0：TEMP/diplay-device-contract-connected.log。未在本轮重新设置/确
 不追加该项证据。完整九项Android CI exit0，12s、250任务14执行：
 TEMP/diplay-device-contract-final-ci.log；三个单元任务均UP-TO-DATE，不记作重新执行。
 public tree及diff检查通过。本轮只增加测试和覆盖记录，生产选择保持原状。
+
+### 两后端共同 UDP 流量合同
+
+SessionNetworkDeviceContractTest增加第四项参数化用例。系统侧用真实IPv6 UDP
+socket peer，JNI侧用确定性Ethernet peer经过真实LwipSessionNetwork及JNI/core。
+共同断言接收0/1/1200字节、完整/短/零容量缓冲、source及original/copied长度、
+未写缓冲不变、截断后下一报文边界；发送0/1/1200字节并拒绝65528字节。JNI捕获
+真实multicast输出帧，验证IPv6/端口、负载和UDP校验和，不依赖邻居缓存。
+
+API28 x86_64设备22/22（公共8项、既有14项）零失败/错误/跳过，exit0、11s：
+TEMP/diplay-udp-contract-final-connected.log。完整九项CI通过：
+TEMP/diplay-udp-contract-final-ci.log；单元任务均UP-TO-DATE，不记重新执行。
+public tree及diff检查通过。本轮仅测试/文档变化，不宣称CheckJNI新证据或独立
+kernel peer验证；UDP分片/上限、共同TCP/背压合同、故障矩阵及真机门槛仍缺。

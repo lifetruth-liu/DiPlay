@@ -43,12 +43,16 @@ Android显式native会话可绑定原型echo端口，验证服务隔离、真实
 会话关闭唤醒等待者；既有完整TCP/UDP帧路径继续回归。
 
 SessionNetworkDeviceContractTest在Android上对系统socket和真实JNI会话运行相同的
-三项参数化合同：临时监听端口分配/冲突/关闭重绑，跨link拒绝及非法/到期deadline，
+四项参数化合同：临时监听端口分配/冲突/关闭重绑，跨link拒绝及非法/到期deadline，
 会话关闭取消accept/UDP receive并拒绝新端点。lwIP使用断开的EthernetFramePort，
 不伪造JNI或core，但这组用例没有网络peer。并发用例覆盖关闭与调用起始的竞争，
-不声称精确证明每个等待者关闭前已进入原生阻塞状态。
+不声称精确证明每个等待者关闭前已进入原生阻塞状态。第四项UDP共同断言使用独立
+夹具：系统侧IPv6内核socket，JNI侧确定性以太帧peer。接收覆盖0/1/1200字节、
+短缓冲及零容量缓冲、源地址/端口、原始/复制长度、缓冲未写部分及截断后下一报文；
+发送覆盖0/1/1200字节及65528字节拒绝。JNI发送到IPv6 multicast以避免依赖NDP，
+捕获真实输出帧验证端口、IPv6地址、负载及UDP校验和；不将此夹具当作独立kernel互通。
 
 独立kernel peer对原生端点API的验证见kernel-endpoint-peer.md。尚未完成全部两后端
-参数化合同（尤其共同的TCP/UDP传输及背压夹具）、所有分配/引用/竞态故障矩阵、
+参数化合同（尤其共同的TCP传输及背压夹具、UDP分片/上限），所有分配/引用/竞态故障矩阵、
 真实NCM/iPhone/ARM及性能长稳验收。此层完成接口组合，不代表全部
 会话行为、业务集成或G2/G3已经验收。
