@@ -1531,3 +1531,22 @@ Linux ASan/UBSan/池检查及默认LSan55/55、9.16s，单项0.13s：
 UP-TO-DATE，不记重新执行。public tree及staged diff检查通过；本轮未运行新JNI/
 设备测试。没有其他活动连接时的监听矩阵，不代表PCB回收其他连接、全部accept/
 connect/发送/冷定时器及并发故障；独立安全评审、峰值和真机/长稳仍缺，目标继续。
+
+### TCP接受最终ACK分配失败与原监听器保留
+
+新增tcp_accept_allocation_failures。SYN/SYN-ACK正常完成后，动态测得最终ACK处理
+输入pbuf与接受记录calloc两处分配，分别注入瞬时/持续失败。两模式的正常控制
+各交付1个可读stream；两处分配失败各造成1次输入RESOURCE_LIMIT和1次未交付接受，
+dp_tcp_accept均WOULD_BLOCK、输出清零，无错误句柄。输入OOM保留的半开连接最终
+由监听器关闭回收，未把正常待清理协议状态误判为立即泄漏。
+
+关闭前，原监听器须接受不同源端口的新客户端并读取数据；关闭并通过500ms受控
+poll退休按需TCP计时器后，heap、活动/监听PCB及全部MEMP pool回到原基线；再同
+端口重绑、握手、accept和读数据。产品、vendor、ABI及选择策略均未改变。
+
+Windows56/56、1.34s，单项0.02s：TEMP/diplay-accept-allocation-final-host.log。
+Linux ASan/UBSan/池检查及默认LSan56/56、9.46s，单项0.09s：
+/tmp/diplay-accept-allocation-final-sanitize.log。完整九项CI通过：
+TEMP/diplay-accept-allocation-final-ci.log；三模块单元任务UP-TO-DATE，不记重新执行。
+public tree及staged diff检查通过。本轮仅宿主测试和文档，无新JNI/设备证据；SYN/
+定时器分配、其他TCP/接收/并发故障、独立安全审查、峰值与真机/长稳仍缺，目标继续。
