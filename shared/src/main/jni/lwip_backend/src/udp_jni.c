@@ -80,3 +80,22 @@ JNIEXPORT jint JNICALL JNI_NAME(udpClose)(JNIEnv *env, jobject self, jlong conte
     if ((*env)->ExceptionCheck(env)) return DP_INTERNAL;
     return dp_proto_udp_close((uint64_t)context, (uint64_t)endpoint);
 }
+JNIEXPORT jint JNICALL JNI_NAME(udpSetQueueMaxAge)(JNIEnv *env, jobject self, jlong context, jlong endpoint, jlong millis) {
+    (void)self;
+    if ((*env)->ExceptionCheck(env)) return DP_INTERNAL;
+    if (millis < 0 || (uint64_t)millis > UINT32_MAX) return DP_INVALID_ARGUMENT;
+    return dp_proto_udp_set_queue_max_age((uint64_t)context, (uint64_t)endpoint, (uint32_t)millis);
+}
+JNIEXPORT jint JNICALL JNI_NAME(udpExpiredCount)(JNIEnv *env, jobject self, jlong context, jlong endpoint, jlongArray result) {
+    (void)self;
+    jsize size;
+    dp_result s = array_size(env, result, &size);
+    if (s != DP_OK) return s;
+    if (size != 1) return DP_INVALID_ARGUMENT;
+    uint64_t expired = 0;
+    s = dp_proto_udp_expired_count((uint64_t)context, (uint64_t)endpoint, &expired);
+    if (s != DP_OK) return s;
+    jlong value = (jlong)expired;
+    (*env)->SetLongArrayRegion(env, result, 0, 1, &value);
+    return (*env)->ExceptionCheck(env) ? DP_INTERNAL : DP_OK;
+}

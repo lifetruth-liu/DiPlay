@@ -244,7 +244,7 @@ class NativePrototypeInstrumentationTest {
 
     @Test fun tcpJniAcceptReadWriteAndHalfCloseValidateBeforeConsuming() {
         LwipNativeBindings.ensureLoaded()
-        assertEquals(6, LwipNativeBindings.abiVersion())
+        assertEquals(7, LwipNativeBindings.abiVersion())
         val h = LwipNativeBindings.create(mac, ip, 1500, 100, ByteArray(1024).also { SecureRandom().nextBytes(it) })
         assertTrue(h > 0)
         try {
@@ -410,7 +410,7 @@ class NativePrototypeInstrumentationTest {
     }
     @Test fun nativeUdpBindingsPreserveDatagramsAndRejectStaleTokens() {
         LwipNativeBindings.ensureLoaded()
-        assertEquals(6, LwipNativeBindings.abiVersion())
+        assertEquals(7, LwipNativeBindings.abiVersion())
         val entropy = ByteArray(1024).also { SecureRandom().nextBytes(it) }
         val context = LwipNativeBindings.create(mac, ip, 1500, 100, entropy)
         assertTrue(context > 0)
@@ -475,12 +475,38 @@ class NativePrototypeInstrumentationTest {
             val sent = drainRaw().first { it[20] == 17.toByte() }
             assertEquals(port, read16(sent, 54))
             assertArrayEquals(byteArrayOf(111, 107), sent.copyOfRange(62, sent.size))
+            val expired = longArrayOf(99)
+            assertEquals(-1, LwipNativeBindings.udpExpiredCount(context, endpoint, LongArray(0)))
+            assertEquals(0, LwipNativeBindings.udpExpiredCount(context, endpoint, expired))
+            assertEquals(0L, expired[0])
+            assertEquals(0, LwipNativeBindings.udpSetQueueMaxAge(context, endpoint, 0xffff_ffffL))
+            assertEquals(0, LwipNativeBindings.udpSetQueueMaxAge(context, endpoint, 100))
+            assertEquals(-1, LwipNativeBindings.udpSetQueueMaxAge(context, endpoint, -1))
+            assertEquals(-1, LwipNativeBindings.udpSetQueueMaxAge(context, endpoint, 0x1_0000_0000L))
+            incoming(byteArrayOf(1))
+            assertEquals(0, LwipNativeBindings.supply(context, 4199, null))
+            incoming(byteArrayOf(2))
+            assertEquals(0, LwipNativeBindings.supply(context, 4200, null))
+            val fresh = ByteArray(1)
+            assertEquals(0, LwipNativeBindings.udpReceive(context, endpoint, fresh, source, metadata))
+            assertArrayEquals(byteArrayOf(2), fresh)
+            assertEquals(0, LwipNativeBindings.udpExpiredCount(context, endpoint, expired))
+            assertEquals(1L, expired[0])
             val wrongThread = AtomicInteger()
-            val worker = Thread { wrongThread.set(LwipNativeBindings.udpClose(context, endpoint)) }
+            val wrongClose = AtomicInteger()
+            val worker = Thread {
+                wrongThread.set(LwipNativeBindings.udpSetQueueMaxAge(context, endpoint, 1))
+                wrongClose.set(LwipNativeBindings.udpClose(context, endpoint))
+            }
             worker.start(); worker.join(2000)
             assertFalse(worker.isAlive); assertEquals(-3, wrongThread.get())
+            assertEquals(-3, wrongClose.get())
             assertEquals(-1, LwipNativeBindings.udpClose(context, context))
             assertEquals(0, LwipNativeBindings.udpClose(context, endpoint))
+            expired[0] = 99
+            assertEquals(-1, LwipNativeBindings.udpExpiredCount(context, endpoint, expired))
+            assertEquals(99L, expired[0])
+            assertEquals(-1, LwipNativeBindings.udpSetQueueMaxAge(context, endpoint, 1))
             assertEquals(-1, LwipNativeBindings.udpClose(context, endpoint))
             assertEquals(0, LwipNativeBindings.udpBind(context, port, bound))
             lastEndpoint = bound[0]

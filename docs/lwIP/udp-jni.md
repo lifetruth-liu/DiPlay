@@ -1,6 +1,6 @@
 # P3 UDP JNI桥
 
-UDP桥最初随JNI ABI 2接入，本文描述其原始接口。当前整体JNI ABI为6，Kotlin与
+UDP桥最初随JNI ABI 2接入，本文描述其原始接口。当前整体JNI ABI为7，Kotlin与
 native加载检查必须一致，见[TCP JNI桥](tcp-jni.md)；native-only核心C ABI仍为1。
 公共Kotlin UdpEndpoint及deadline/取消随后已接入显式原型，见[UDP适配](udp-adapter.md)。
 后续显式SessionNetwork工厂见session-network-adapter.md；生产后端选择仍未接入，
@@ -9,6 +9,11 @@ native加载检查必须一致，见[TCP JNI桥](tcp-jni.md)；native-only核心
 所有UDP方法带上下文token和端点token。上下文查找验证创建线程/代数后，才访问
 native核心或复制区；端点查找再次验证UDP类型和该核心注册表。Java不接收指针。
 关闭上下文会经注册表回收仍打开的UDP资源，旧代数不能访问新上下文。
+
+ABI 7新增udpSetQueueMaxAge(context, endpoint, millis)及udpExpiredCount(context,
+endpoint, LongArray(1))，连接原生按端点排队年龄预算。millis范围0..UINT32_MAX，
+负值/越界及统计数组形状不符在操作前拒绝。统计仅成功时复制结果，失败保留调用方
+数组；接口遵循上下文线程/代数边界。尚未接入公共端点配置及真实媒体通道。
 
 - udpBind使用调用者的两项LongArray返回端点token和实际端口。结果形状及端口先校验；
   Java发布结果出错时用native close撤销端点，不在异常挂起时继续访问Java对象。

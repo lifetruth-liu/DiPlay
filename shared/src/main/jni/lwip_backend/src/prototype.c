@@ -269,6 +269,18 @@ dp_result dp_proto_udp_close(uint64_t h, uint64_t endpoint) {
     dp_result s = lookup(h, &p, 1);
     return s == DP_OK ? dp_udp_close(p->core, endpoint) : s;
 }
+dp_result dp_proto_udp_set_queue_max_age(uint64_t h, uint64_t endpoint, uint32_t max_age) {
+    struct prototype *p;
+    dp_result s = lookup(h, &p, 0);
+    return s == DP_OK ? finish(p, dp_udp_set_queue_max_age(p->core, endpoint, max_age)) : s;
+}
+dp_result dp_proto_udp_expired_count(uint64_t h, uint64_t endpoint, uint64_t *expired) {
+    if (!expired) return DP_INVALID_ARGUMENT;
+    *expired = 0;
+    struct prototype *p;
+    dp_result s = lookup(h, &p, 0);
+    return s == DP_OK ? finish(p, dp_udp_get_expired_count(p->core, endpoint, expired)) : s;
+}
 int32_t dp_proto_entropy_remaining(uint64_t h) {
     struct prototype *p;
     dp_result s = lookup(h, &p, 0);

@@ -1657,3 +1657,26 @@ UP-TO-DATE，不记新执行。四ABI APK及源码校验通过：TEMP/diplay-udp
 APK SHA-256 0a4dd2dfb1d9bc1bd5a55fb70a556f2cea74097f9acb1f22db0143044e018559。
 public tree及diff检查通过。没有新设备/JNI运行/内核证据；策略尚未接通JNI、
 公共API及媒体通道配置，完整R04、真机及整体目标仍未完成。
+
+### UDP排队年龄的原型token桥与JNI ABI 7
+
+新增原型dp_proto_udp_set_queue_max_age/expired_count，保持上下文token代数、
+owner线程及核心错误边界；新增JNI udpSetQueueMaxAge/udpExpiredCount，年龄
+Long参数限0..UINT32_MAX，统计LongArray必须1项，失败不发布Java输出。整体JNI
+ABI升7并同步加载器/设备断言；C ABI仍1、公共C结构体及vendor摘要不变。
+
+先加原型测试与声明，TEMP/diplay-udp-age-bridge-red.log记录缺失实现链接失败；
+随后实现token桥和JNI。宿主63/63、1.78s：TEMP/diplay-udp-age-bridge-host.log；
+Linux ASan/UBSan/池检查及默认LSan63/63、54.91s：
+/tmp/diplay-udp-age-bridge-sanitize.log。Android API28 x86_64完整JNI36/36通过，
+81s：TEMP/diplay-udp-age-bridge-jni.log。最后保留原跨线程close断言并追加年龄
+配置跨线程拒绝后，定向重跑1/1、17s：TEMP/diplay-udp-age-bridge-jni-final.log。
+真实JNI覆盖旧包过期/新包可读、越界配置不影响原预算、数组形状、线程和旧token；
+debug.checkjni属性为空，不将本次记录成已显式启用CheckJNI的验收。
+
+九项CI通过、8m31s、47执行/203缓存：TEMP/diplay-udp-age-bridge-ci.log；shared
+1790及common1578项重新执行，零失败/错误；home6项为UP-TO-DATE，合计XML3374。
+四ABI APK/源码校验：TEMP/diplay-udp-age-bridge-apk-final.log；APK SHA-256：
+7c5dd5a16375a4275c944a7fcaca806876c49ff2bd1e11f7b7724cc122f2e763。
+public tree及diff检查通过。仅运行自建AVD，无新NCM/iPhone/ARM或内核证据。
+仍需接通类型化公共接口和媒体通道配置；生产选择不变，完整R04和整体目标继续。

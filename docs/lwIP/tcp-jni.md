@@ -1,8 +1,8 @@
-# P3 TCP JNI桥（当前ABI 6）
+# P3 TCP JNI桥（当前ABI 7）
 
 在既有context/UDP桥上新增TCP桥，整体JNI ABI升级到3，Kotlin加载器与native
 abiVersion同步校验。后续新增[优雅关闭](tcp-graceful-close.md)将整体ABI升级4，
-新增PCB keepalive配置后整体ABI升级5，后续新增绑定选项升级6，当前加载器与native均要求6。native-only核心C ABI仍为1。原始接口由核心创建线程串行调用，
+新增PCB keepalive配置后整体ABI升级5，后续新增绑定选项升级6，UDP排队年龄接口升级7，当前加载器与native均要求7。native-only核心C ABI仍为1。原始接口由核心创建线程串行调用，
 不自行创建线程或提供阻塞/deadline语义；已有[类型化宿主核心接口](tcp-core.md)，
 已有[显式公共TcpStream主动连接适配](tcp-adapter.md)、[监听适配](tcp-listener-adapter.md)
 和[会话适配](session-network-adapter.md)，生产选择尚未接入。

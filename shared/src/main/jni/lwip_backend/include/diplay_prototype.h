@@ -35,6 +35,8 @@ DP_API dp_result dp_proto_udp_send(uint64_t context, uint64_t endpoint, const ui
                                    const uint8_t *payload, size_t length);
 DP_API dp_result dp_proto_udp_receive(uint64_t context, uint64_t endpoint, uint8_t *target, size_t capacity, dp_udp_datagram *info);
 DP_API dp_result dp_proto_udp_close(uint64_t context, uint64_t endpoint);
+DP_API dp_result dp_proto_udp_set_queue_max_age(uint64_t, uint64_t, uint32_t);
+DP_API dp_result dp_proto_udp_expired_count(uint64_t, uint64_t, uint64_t *);
 DP_API dp_result dp_proto_tcp_listen(uint64_t, uint16_t, unsigned, uint64_t *, uint16_t *);
 DP_API dp_result dp_proto_tcp_listen_with_options(uint64_t, uint16_t, unsigned, int, uint64_t *, uint16_t *);
 DP_API dp_result dp_proto_tcp_accept(uint64_t, uint64_t, uint64_t *, dp_tcp_info *);

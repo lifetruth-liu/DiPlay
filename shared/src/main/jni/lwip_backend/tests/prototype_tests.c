@@ -29,10 +29,18 @@ static void udp_lifecycle(void) {
     uint16_t port = 0;
     CHECK(dp_proto_udp_bind(context, 0, &endpoint, &port) == DP_OK);
     CHECK(endpoint && port);
+    CHECK(dp_proto_udp_set_queue_max_age(context, endpoint, 100) == DP_OK);
+    uint64_t expired = UINT64_MAX;
+    CHECK(dp_proto_udp_expired_count(context, endpoint, &expired) == DP_OK && expired == 0);
+    CHECK(dp_proto_udp_expired_count(context, endpoint, NULL) == DP_INVALID_ARGUMENT);
+    CHECK(dp_proto_udp_set_queue_max_age(context, context, 100) == DP_INVALID_ARGUMENT);
     dp_udp_datagram info;
     CHECK(dp_proto_udp_receive(context, endpoint, NULL, 0, &info) == DP_WOULD_BLOCK);
     CHECK(dp_proto_udp_close(context, context) == DP_INVALID_ARGUMENT);
     CHECK(dp_proto_udp_close(context, endpoint) == DP_OK);
+    expired = UINT64_MAX;
+    CHECK(dp_proto_udp_expired_count(context, endpoint, &expired) == DP_INVALID_ARGUMENT && expired == 0);
+    CHECK(dp_proto_udp_set_queue_max_age(context, endpoint, 100) == DP_INVALID_ARGUMENT);
     uint64_t stale_endpoint = endpoint, stale_context = context;
     CHECK(dp_proto_udp_bind(context, port, &endpoint, &port) == DP_OK && endpoint != stale_endpoint);
     CHECK(dp_proto_udp_close(context, stale_endpoint) == DP_INVALID_ARGUMENT);
