@@ -1257,3 +1257,22 @@ TEMP/diplay-udp-contract-final-connected.log。完整九项CI通过：
 TEMP/diplay-udp-contract-final-ci.log；单元任务均UP-TO-DATE，不记重新执行。
 public tree及diff检查通过。本轮仅测试/文档变化，不宣称CheckJNI新证据或独立
 kernel peer验证；UDP分片/上限、共同TCP/背压合同、故障矩阵及真机门槛仍缺。
+
+### 两后端共同 TCP 字节与半关闭合同
+
+新增TcpSessionDeviceContractTest：相同断言分别经过系统IPv6 socket及真实JNI会话。
+发送固定种子65537字节，分1/32769/32767写入并使用非零offset；shutdownOutput后
+读取peer响应，覆盖1字节/随机容量read、完整字节序列及SHA-256、EOF重复读取。
+JNI peer只通过EthernetFramePort收发合法TCP帧，队列各64帧、收集数据上限128KiB，
+FIN后逐段确认回显，无fake core或直接原生端点调用。该夹具不证明丢包恢复、窗口
+压力、同时读写或独立协议实现的互通；独立kernel证据仍参见kernel-endpoint-peer.md。
+
+首次模拟器启动有运行但ADB离线，目标进程后来确认已退出/控制台端口关闭，才以
+no-snapshot-load重新启动。测试代码编译通过；首次设备24项中JNI握手3秒超时，
+其余23项通过：TEMP/diplay-tcp-contract-connected.log。增加peer异常传播诊断和
+显式header位移括号后，diagnostic、repeat、最终版三次均24/24；不能确认哪项与
+首次超时相关，不宣称已定位或修复其根因。最终版明确要求首个read容量为1。
+最终TEMP/diplay-tcp-contract-final-connected.log，exit0、23s，XML零失败/错误/跳过。
+九项完整CI exit0：TEMP/diplay-tcp-contract-final-ci.log；单元任务均UP-TO-DATE，
+不记作重新执行。public tree及staged diff检查通过。本轮仅测试/文档，生产选择不变。
+仍缺共同TCP并发/背压/异常关闭、故障矩阵及真机证据，G2/G3及整体目标保持未完成。

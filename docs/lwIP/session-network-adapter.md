@@ -53,6 +53,14 @@ SessionNetworkDeviceContractTest在Android上对系统socket和真实JNI会话�
 捕获真实输出帧验证端口、IPv6地址、负载及UDP校验和；不将此夹具当作独立kernel互通。
 
 独立kernel peer对原生端点API的验证见kernel-endpoint-peer.md。尚未完成全部两后端
-参数化合同（尤其共同的TCP传输及背压夹具、UDP分片/上限），所有分配/引用/竞态故障矩阵、
+参数化合同（尤其共同TCP背压/并发收发/异常关闭、UDP分片/上限），所有分配/引用/竞态故障矩阵、
 真实NCM/iPhone/ARM及性能长稳验收。此层完成接口组合，不代表全部
 会话行为、业务集成或G2/G3已经验收。
+
+TcpSessionDeviceContractTest补充两后端共同TCP字节/半关闭合同：65537字节固定种子
+内容，1/32769/32767字节写调用、非零offset、1字节及随机容量read、完整字节及
+SHA-256核对、shutdownOutput后继续读取响应、重复EOF。系统侧为IPv6内核socket
+peer；JNI侧为有界Ethernet peer，真实握手后收集数据，收到FIN才分段回送并FIN。
+回送为逐段确认，不测试丢包/重传、窗口压力或并发读写；不替代原生独立内核peer。
+最终设备24/24通过；首轮JNI连接出现一次3秒deadline超时，诊断/复跑及最终版均通过，
+尚未确认首次超时根因，不将这几次通过视为长稳证明。
