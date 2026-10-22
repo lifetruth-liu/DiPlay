@@ -122,6 +122,8 @@ dp_result dp_core_destroy(dp_core **pointer) {
     core->link_ready = 0;
     netif_set_link_down(&core->netif);
     dp_endpoint_clear(&core->endpoints);
+    LWIP_ASSERT("TCP endpoint ownership remains at destroy", core->tcp_rx_bytes == 0 &&
+                core->tcp_stream_count == 0 && core->tcp_listener_count == 0);
     /* One context owns every PCB. Remove callback reachability before abort/free. */
     while (tcp_active_pcbs || tcp_tw_pcbs || tcp_bound_pcbs) {
         struct tcp_pcb *pcb =

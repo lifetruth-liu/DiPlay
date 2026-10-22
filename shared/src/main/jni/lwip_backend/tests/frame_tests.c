@@ -1,5 +1,6 @@
 #include "diplay_lwip.h"
 #include "diplay_endpoints.h"
+#include "diplay_tcp.h"
 #include "echo_services.h"
 /* Keep lwIP byte-order aliases out of the Windows SDK declarations below. */
 #define LWIP_DONT_PROVIDE_BYTEORDER_FUNCTIONS
@@ -235,13 +236,13 @@ static void test_dad(void) {
     CHECK(address_state(&f) == DP_ADDRESS_DUPLICATE);
     close_core(&f);
 }
-static void send_tcp_bytes(struct fixture *f, uint8_t flags, uint32_t sequence, uint32_t ack,
+static void send_tcp_port(struct fixture *f, uint16_t port, uint8_t flags, uint32_t sequence, uint32_t ack,
                            const void *data, size_t n) {
     uint8_t frame[1514];
     CHECK(n <= 1440);
     ethernet(frame, local_mac);
     uint8_t *p = ipv6(frame, local_ip, 6, (uint16_t)(20 + n));
-    w16(p, 50000);
+    w16(p, port);
     w16(p + 2, 7000);
     w32(p + 4, sequence);
     w32(p + 8, ack);
@@ -251,6 +252,10 @@ static void send_tcp_bytes(struct fixture *f, uint8_t flags, uint32_t sequence, 
     memcpy(p + 20, data, n);
     w16(p + 16, checksum(frame + 14, p, 20 + n, 6));
     CHECK(dp_core_input(f->core, frame, 74 + n) == DP_OK);
+}
+static void send_tcp_bytes(struct fixture *f, uint8_t flags, uint32_t sequence, uint32_t ack,
+                           const void *data, size_t n) {
+    send_tcp_port(f, 50000, flags, sequence, ack, data, n);
 }
 static void send_tcp(struct fixture *f, uint8_t flags, uint32_t sequence, uint32_t ack,
                      const char *data) {
@@ -273,6 +278,166 @@ static void collect_echo(struct fixture *f, uint32_t server, const uint8_t *expe
         memset(seen + offset, 1, length);
     }
     f->count = 0;
+}
+static uint32_t establish(struct fixture *f, uint16_t port) {
+    f->count = 0;
+    send_tcp_port(f, port, 2, 1000, 0, "", 0);
+    struct frame *syn = find(f, 6, -1, 0);
+    CHECK(syn && (syn->bytes[67] & 0x12) == 0x12);
+    uint32_t sequence = u32(syn->bytes + 58);
+    f->count = 0;
+    send_tcp_port(f, port, 16, 1001, sequence + 1, "", 0);
+    return sequence;
+}
+static uint64_t accept_stream(struct fixture *f, uint64_t listener) {
+    uint64_t stream = 0;
+    dp_tcp_info info;
+    CHECK(dp_tcp_accept(f->core, listener, &stream, &info) == DP_OK && stream);
+    CHECK(!memcmp(info.local, local_ip, 16) && !memcmp(info.remote, peer_ip, 16));
+    CHECK(info.local_port == 7000 && info.remote_port >= 50000);
+    return stream;
+}
+static void test_tcp_endpoint(void) {
+    struct fixture f;
+    ready_core(&f);
+    uint64_t listener, stream = 99;
+    uint16_t port;
+    dp_tcp_info info;
+    CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK && port == 7000);
+    CHECK(dp_tcp_accept(f.core, listener, &stream, &info) == DP_WOULD_BLOCK && stream == 0);
+    uint32_t server = establish(&f, 50000);
+    send_tcp(&f, 24, 1001, server + 1, "hello");
+    stream = accept_stream(&f, listener);
+    uint8_t bytes[8]; size_t count = 99;
+    CHECK(dp_tcp_read(f.core, stream, NULL, 0, &count) == DP_OK && count == 0);
+    CHECK(dp_tcp_read(f.core, stream, bytes, 2, &count) == DP_OK && count == 2 && !memcmp(bytes, "he", 2));
+    send_tcp(&f, 17, 1006, server + 1, "");
+    CHECK(dp_tcp_read(f.core, stream, bytes, sizeof(bytes), &count) == DP_OK && count == 3 && !memcmp(bytes, "llo", 3));
+    CHECK(dp_tcp_read(f.core, stream, bytes, sizeof(bytes), &count) == DP_PEER_CLOSED && count == 0);
+    CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+    CHECK(dp_tcp_read(f.core, stream, bytes, 1, &count) == DP_PEER_CLOSED);
+    CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+    CHECK(dp_tcp_close(f.core, stream) == DP_INVALID_ARGUMENT);
+    CHECK(dp_tcp_read(f.core, stream, bytes, 1, &count) == DP_INVALID_ARGUMENT);
+    CHECK(dp_tcp_listen(f.core, 7000, 1, &listener, &port) == DP_OK);
+    server = establish(&f, 50001);
+    stream = accept_stream(&f, listener);
+    send_tcp_port(&f, 50001, 20, 1001, server + 1, "", 0);
+    CHECK(dp_tcp_read(f.core, stream, bytes, 1, &count) == DP_PEER_RESET);
+    CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+    server = establish(&f, 50002); /* An unclaimed, data-bearing connection belongs to the listener. */
+    send_tcp_port(&f, 50002, 24, 1001, server + 1, "held", 4);
+    CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+    dp_stats stats;
+    CHECK(dp_core_get_stats(f.core, &stats) == DP_OK && stats.tcp_active == 0 && stats.heap_used == 0 && stats.pbuf_used == 0);
+    close_core(&f);
+}
+static uint16_t last_window(struct fixture *f) {
+    uint16_t window = 65535;
+    int found = 0;
+    for (size_t i = 0; i < f->count; ++i) if (f->frames[i].bytes[20] == 6 && f->frames[i].length >= 74) {
+        window = u16(f->frames[i].bytes + 68); found = 1;
+    }
+    CHECK(found);
+    f->count = 0;
+    return window;
+}
+static void test_tcp_backpressure(void) {
+    struct fixture f;
+    ready_core(&f);
+    uint64_t listener; uint16_t port;
+    CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK);
+    uint32_t server = establish(&f, 50000);
+    uint64_t stream = accept_stream(&f, listener);
+    uint8_t payload[65535], target[65535];
+    for (size_t i = 0; i < sizeof(payload); ++i) payload[i] = (uint8_t)(i ^ (i >> 8));
+    for (size_t i = 0; i < sizeof(payload); i += 1440) {
+        size_t length = sizeof(payload) - i < 1440 ? sizeof(payload) - i : 1440;
+        send_tcp_bytes(&f, 24, 1001 + (uint32_t)i, server + 1, payload + i, length);
+    }
+    advance(&f, 250);
+    CHECK(last_window(&f) == 0);
+    advance(&f, 10000); /* No receive credit is released merely by polling timers. */
+    f.count = 0;
+    size_t copied;
+    CHECK(dp_tcp_read(f.core, stream, target, 32768, &copied) == DP_OK && copied == 32768);
+    CHECK(last_window(&f) >= 32768);
+    CHECK(dp_tcp_read(f.core, stream, target + 32768, sizeof(target) - 32768, &copied) == DP_OK && copied == sizeof(target) - 32768);
+    CHECK(!memcmp(target, payload, sizeof(payload)));
+    CHECK(dp_tcp_read(f.core, stream, target, 1, &copied) == DP_WOULD_BLOCK && copied == 0);
+    f.count = 0;
+    close_core(&f); /* Held and already consumed chains must both leave zero pool usage. */
+    open_core(&f, 0);
+    dp_stats stats; CHECK(dp_core_get_stats(f.core, &stats) == DP_OK && stats.pbuf_used == 0 && stats.heap_used == 0);
+    close_core(&f);
+}
+static void test_tcp_endpoint_limits(void) {
+    struct fixture f;
+    open_core(&f, 0); /* Listeners must be preparable before USB readiness and DAD. */
+    uint64_t listeners[16], stream = 99, extra = 99; uint16_t port = 99;
+    CHECK(dp_tcp_listen(f.core, 0, 0, &extra, &port) == DP_INVALID_ARGUMENT && extra == 0 && port == 0);
+    for (unsigned i = 0; i < 16; ++i) CHECK(dp_tcp_listen(f.core, 0, 1, &listeners[i], &port) == DP_OK && port);
+    CHECK(dp_tcp_listen(f.core, 0, 1, &extra, &port) == DP_RESOURCE_LIMIT && extra == 0 && port == 0);
+    CHECK(dp_tcp_close(f.core, listeners[0]) == DP_INVALID_ARGUMENT);
+    for (unsigned i = 0; i < 16; ++i) CHECK(dp_tcp_listener_close(f.core, listeners[i]) == DP_OK);
+    close_core(&f);
+    ready_core(&f);
+    CHECK(dp_tcp_listen(f.core, 7000, 32, &listeners[0], &port) == DP_OK);
+    for (unsigned i = 0; i < 32; ++i) establish(&f, (uint16_t)(50000 + i));
+    f.count = 0;
+    send_tcp_port(&f, 50032, 2, 1000, 0, "", 0);
+    uint64_t streams[32];
+    for (unsigned i = 0; i < 32; ++i) streams[i] = accept_stream(&f, listeners[0]);
+    dp_tcp_info info;
+    CHECK(dp_tcp_accept(f.core, listeners[0], &stream, &info) == DP_WOULD_BLOCK && stream == 0);
+    uint8_t byte; size_t count;
+    for (unsigned i = 0; i < 32; ++i) CHECK(dp_tcp_read(f.core, streams[i], &byte, 1, &count) == DP_WOULD_BLOCK);
+    f.count = 0;
+    for (unsigned i = 0; i < 32; ++i) CHECK(dp_tcp_close(f.core, streams[i]) == DP_OK);
+    CHECK(dp_tcp_listener_close(f.core, listeners[0]) == DP_OK);
+    CHECK(dp_tcp_listen(f.core, 7000, 1, &extra, &port) == DP_OK && extra != listeners[0]);
+    f.count = 0; send_tcp(&f, 2, 1000, 0, ""); /* Close during SYN_RCVD, before raw accept. */
+    CHECK(dp_tcp_listener_close(f.core, extra) == DP_OK);
+    dp_stats stats; CHECK(dp_core_get_stats(f.core, &stats) == DP_OK && stats.tcp_active == 0 && stats.tcp_listeners == 0 && stats.heap_used == 0);
+    close_core(&f);
+}
+static void test_tcp_endpoint_lifecycle(void) {
+    uint64_t previous = 0;
+    for (unsigned cycle = 0; cycle < 8; ++cycle) {
+        struct fixture f;
+        ready_core(&f);
+        uint64_t listener, stream = 0; uint16_t port;
+        dp_tcp_info info; size_t copied; uint8_t bytes[3];
+        CHECK(dp_tcp_listen(f.core, 7000, 1, &listener, &port) == DP_OK);
+        if (previous) CHECK(dp_tcp_read(f.core, previous, bytes, 1, &copied) == DP_INVALID_ARGUMENT);
+        dp_stats baseline, stats;
+        CHECK(dp_core_get_stats(f.core, &baseline) == DP_OK);
+        uint32_t server = establish(&f, 50000);
+        send_tcp_port(&f, 50000, 24, 1001, server + 1, "abc", 3);
+        send_tcp_port(&f, 50000, 20, 1004, server + 1, "", 0);
+        CHECK(dp_tcp_accept(f.core, listener, &stream, &info) == DP_WOULD_BLOCK && stream == 0);
+        CHECK(dp_core_get_stats(f.core, &stats) == DP_OK && stats.heap_used == baseline.heap_used && stats.pbuf_used == 0 && stats.tcp_active == 0);
+        server = establish(&f, 50001);
+        stream = accept_stream(&f, listener);
+        send_tcp_port(&f, 50001, 24, 1001, server + 1, "xyz", 3);
+        send_tcp_port(&f, 50001, 20, 1004, server + 1, "", 0);
+        CHECK(dp_tcp_read(f.core, stream, bytes, 2, &copied) == DP_OK && copied == 2 && !memcmp(bytes, "xy", 2));
+        CHECK(dp_tcp_read(f.core, stream, bytes, 3, &copied) == DP_OK && copied == 1 && bytes[0] == 'z');
+        CHECK(dp_tcp_read(f.core, stream, bytes, 3, &copied) == DP_PEER_RESET);
+        previous = stream;
+        CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+        establish(&f, 50002);
+        f.count = 0;
+        send_tcp_port(&f, 50003, 2, 1000, 0, "", 0);
+        CHECK(find(&f, 6, -1, 0) == NULL); /* Full delayed-accept backlog rejects a new SYN. */
+        stream = accept_stream(&f, listener);
+        establish(&f, 50003); /* Application accept restored the backlog slot. */
+        CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+        CHECK(dp_tcp_read(f.core, stream, bytes, 1, &copied) == DP_WOULD_BLOCK);
+        CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+        CHECK(dp_core_get_stats(f.core, &stats) == DP_OK && stats.heap_used == 0 && stats.pbuf_used == 0 && stats.tcp_active == 0);
+        close_core(&f);
+    }
 }
 static void test_tcp_large_refused(void) {
     struct fixture f;
@@ -746,6 +911,14 @@ int main(int argc, char **argv) {
         test_tcp();
     else if (!strcmp(argv[1], "tcp_large_refused"))
         test_tcp_large_refused();
+    else if (!strcmp(argv[1], "tcp_endpoint"))
+        test_tcp_endpoint();
+    else if (!strcmp(argv[1], "tcp_backpressure"))
+        test_tcp_backpressure();
+    else if (!strcmp(argv[1], "tcp_endpoint_limits"))
+        test_tcp_endpoint_limits();
+    else if (!strcmp(argv[1], "tcp_endpoint_lifecycle"))
+        test_tcp_endpoint_lifecycle();
     else if (!strcmp(argv[1], "udp"))
         test_udp();
     else if (!strcmp(argv[1], "lifecycle"))

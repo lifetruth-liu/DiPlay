@@ -834,3 +834,38 @@ AVD路径DeviceMonitor仍有bad sub-command告警，测试正常完成并核对X
 05a7398d3ef919c7c4fef8072f62e842067bb2484e1159479e915258f758e90d。
 公开树及staged diff检查通过。C代码未修改，未重跑native宿主sanitizer套件。
 未取得独立评审完成结果，不记作独立评审通过。上述日志均位于任务主机TEMP目录。
+
+### P3 native TCP监听/接收与窗口背压（2026-10-22）
+
+基于c3262aea。新增diplay_tcp.h/tcp_endpoint.c，提供核心线程非阻塞listen/accept/
+read及本地abort关闭；DP_PEER_CLOSED/RESET区分FIN和RST。真实IPv6及端口元数据
+沿用generation注册表；未领取子连接归listener，领取后独立注册，释放不递归进入
+注册表。接收保留有界pbuf，不在回调或poll中tcp_recved；read释放已消费前缀后才
+恢复这些字节的窗口。libc元数据加入原有分配统计，core销毁检查TCP接管计数归零。
+细节及尚未覆盖范围见[native TCP接收](native-tcp-receive.md)。
+
+新增前三项真实帧测试在DP_INTERNAL占位实现上全部red，旧33项通过，exit8：
+WSL /tmp/diplay-tcp-rx-red.log。实现后36项green，再补8轮生命周期与启动前监听，
+最终Linux ASan/UBSan/pool guards、Windows MinGW各37/37。
+日志WSL /tmp/diplay-tcp-rx-final-host.log、TEMP/diplay-tcp-rx-final-windows.log。
+窗口用例填满65535字节后核对实际ACK窗口为0，注入时间前进10秒不自动恢复；
+读取32768字节后窗口重新开放，最终65535字节完整且顺序一致。
+另测16监听/32连接耗尽、原连接仍可用、未领取数据/RST回收、SYN_RCVD关闭、
+FIN/RST前缓存及旧generation拒绝。Android API28 x86_64独立frame_tests四项PASS；
+补充未就绪监听后重新运行tcp_endpoint_limits也PASS，不依赖root/NCM。
+Android原生构建日志TEMP/diplay-tcp-rx-android-build.log。
+
+生产候选九项Android CI exit0、40s、250任务17执行：diplay-tcp-rx-ci.log。
+只扩展宿主测试的未就绪用例后，最终九项CI再次exit0、3s、250任务12执行：
+diplay-tcp-rx-final-ci.log。JVM源码未修改，单元任务UP-TO-DATE，核对既有XML共3345项
+（shared1761/common1578/home6），零失败、错误、跳过，不声称这3345项都重新执行。
+JNI/UDP设备回归7/7，零失败、错误、跳过，10s：diplay-tcp-rx-connected.log。
+任务自有模拟器debug.checkjni=1，进程4435日志确认already on；DeviceMonitor的AVD
+路径告警未影响测试完成。四ABI均确认五项dp_tcp_*动态导出；APK四ABI/16KiB/NX/
+许可证与原始源码摘要检查通过，SHA-256：
+8c1c0d8455a07552ddac422a2cd2daf96cfd12ca3050b209913217b99cb467d4。
+
+尚无TCP write/connect、优雅关闭/shutdownOutput、TCP JNI及公共TcpStream；本批
+abort原语不代表TcpOptions默认关闭语义完成。未取得完整公共两后端合同、真机
+NCM/iPhone/ARM或全部长稳/窗口矩阵证据，G2/G3仍未通过；整体目标保持未完成。
+未取得独立评审完成结果，不记作独立评审通过。

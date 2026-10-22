@@ -7,6 +7,8 @@ struct dp_core {
     dp_endpoint_registry endpoints;
     uint32_t endpoint_allocated, endpoint_peak;
     struct dp_udp_pool *udp_pool;
+    uint32_t tcp_rx_bytes;
+    uint16_t tcp_stream_count, tcp_listener_count;
     dp_config config;
     struct netif netif;
     uint64_t initial_clock, last_clock;

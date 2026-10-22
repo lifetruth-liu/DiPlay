@@ -23,7 +23,9 @@ typedef enum {
     DP_CLOCK_REVERSED = -8,
     DP_LINK_IO = -9,
     DP_ADDRESS_IN_USE = -10,
-    DP_WOULD_BLOCK = -11
+    DP_WOULD_BLOCK = -11,
+    DP_PEER_CLOSED = -12,
+    DP_PEER_RESET = -13
 } dp_result;
 typedef enum { DP_TX_FAILED = -1, DP_TX_NOT_READY = 0, DP_TX_ACCEPTED = 1 } dp_tx_result;
 typedef enum {
