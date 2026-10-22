@@ -2,7 +2,8 @@
 
 在既有context/UDP桥上新增TCP桥，整体JNI ABI升级到3，Kotlin加载器与native
 abiVersion同步校验。native-only核心C ABI仍为1。原始接口由核心创建线程串行调用，
-不自行创建线程或提供阻塞/deadline语义；公共TcpStream/SessionNetwork尚未接入。
+不自行创建线程或提供阻塞/deadline语义；已有[类型化宿主核心接口](tcp-core.md)，
+公共TcpStream/SessionNetwork尚未接入。
 
 | 方法 | 输出/语义 |
 | --- | --- |

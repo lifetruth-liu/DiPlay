@@ -4,8 +4,8 @@ import android.os.SystemClock
 import com.shilapi.xcertplay.network.backend.BackendFailure
 import java.security.SecureRandom
 
-/** Explicit P2 echo core on a virtual netif; not the production SessionNetwork implementation. */
-internal class NativePrototypeCore private constructor(private val clockMillis: () -> Long, private val address: ByteArray) : LwipUdpCore {
+/** Explicit prototype core on a virtual netif; not the production SessionNetwork implementation. */
+internal class NativePrototypeCore private constructor(private val clockMillis: () -> Long, private val address: ByteArray) : LwipUdpCore, LwipTcpCore {
     data class Stats(
         val queuedFrames: Int, val entropyWords: Int, val configuredBytes: Int,
         val heapUsed: Int, val pbufUsed: Int, val tcpListeners: Int, val udpEndpoints: Int,
@@ -89,6 +89,94 @@ internal class NativePrototypeCore private constructor(private val clockMillis: 
     override fun udpClose(token: Long) = nativeCall {
         supply(); checkResult(LwipNativeBindings.udpClose(handle, token))
     }
+    override fun tcpListen(port: Int, backlog: Int): LwipTcpCore.Listener = nativeCall {
+        require(port in 0..65535 && backlog in 1..32)
+        supply()
+        val result = LongArray(2)
+        checkResult(LwipNativeBindings.tcpListen(handle, port, backlog, result))
+        try {
+            check(result[0] > 0 && result[1] in 1L..65535L) { "Invalid TCP listener metadata" }
+            LwipTcpCore.Listener(result[0], result[1].toInt())
+        } catch (error: Throwable) {
+            if (result[0] > 0) LwipNativeBindings.tcpListenerClose(handle, result[0])
+            throw error
+        }
+    }
+    override fun tcpAccept(listener: Long): CoreAttempt<LwipTcpCore.Accepted> = nativeCall {
+        supply()
+        val result = LongArray(1)
+        val local = ByteArray(16); val remote = ByteArray(16); val ports = IntArray(2)
+        val status = LwipNativeBindings.tcpAccept(handle, listener, result, local, remote, ports)
+        if (status == -11) return@nativeCall CoreAttempt.Pending
+        checkResult(status)
+        try {
+            check(result[0] > 0) { "Invalid TCP stream token" }
+            CoreAttempt.Ready(LwipTcpCore.Accepted(result[0], tcpPeer(local, remote, ports)))
+        } catch (error: Throwable) {
+            if (result[0] > 0) LwipNativeBindings.tcpClose(handle, result[0])
+            throw error
+        }
+    }
+    override fun tcpConnect(address: ByteArray, port: Int): CoreAttempt<Long> = nativeCall {
+        require(address.size == 16 && port in 1..65535)
+        supply()
+        val result = LongArray(1)
+        val status = LwipNativeBindings.tcpConnect(handle, address, port, result)
+        if (status == -11) return@nativeCall CoreAttempt.Pending
+        checkResult(status)
+        try {
+            check(result[0] > 0) { "Invalid TCP candidate token" }
+            CoreAttempt.Ready(result[0])
+        } catch (error: Throwable) {
+            if (result[0] > 0) LwipNativeBindings.tcpClose(handle, result[0])
+            throw error
+        }
+    }
+    override fun tcpConnectStatus(token: Long): CoreAttempt<LwipTcpCore.Peer> = nativeCall {
+        supply()
+        val local = ByteArray(16); val remote = ByteArray(16); val ports = IntArray(2)
+        val status = LwipNativeBindings.tcpConnectStatus(handle, token, local, remote, ports)
+        if (status == -11) return@nativeCall CoreAttempt.Pending
+        checkResult(status)
+        CoreAttempt.Ready(tcpPeer(local, remote, ports))
+    }
+    private fun tcpPeer(local: ByteArray, remote: ByteArray, ports: IntArray): LwipTcpCore.Peer {
+        check(ports.all { it in 1..65535 }) { "Invalid TCP address metadata" }
+        return LwipTcpCore.Peer(local, ports[0], remote, ports[1])
+    }
+    override fun tcpRead(token: Long, bytes: ByteArray, offset: Int, length: Int): CoreAttempt<Int> =
+        tcpTransfer(token, bytes, offset, length, writing = false)
+    override fun tcpWrite(token: Long, bytes: ByteArray, offset: Int, length: Int): CoreAttempt<Int> =
+        tcpTransfer(token, bytes, offset, length, writing = true)
+    private fun tcpTransfer(token: Long, bytes: ByteArray, offset: Int, length: Int, writing: Boolean): CoreAttempt<Int> = nativeCall {
+        require(offset >= 0 && length >= 0 && length <= bytes.size && offset <= bytes.size - length)
+        supply()
+        val count = IntArray(1)
+        val status = if (writing) LwipNativeBindings.tcpWrite(handle, token, bytes, offset, length, count)
+            else LwipNativeBindings.tcpRead(handle, token, bytes, offset, length, count)
+        check(count[0] in 0..minOf(length, 65527)) { "Invalid TCP transfer count" }
+        if (status == -11) {
+            check(count[0] == 0) { "Pending TCP operation consumed data" }
+            CoreAttempt.Pending
+        } else if (!writing && status == -12) {
+            check(count[0] == 0) { "EOF TCP operation consumed data" }
+            CoreAttempt.Ready(-1)
+        } else {
+            checkResult(status)
+            CoreAttempt.Ready(count[0])
+        }
+    }
+    override fun tcpShutdownOutput(token: Long): CoreAttempt<Unit> = nativeCall {
+        supply(); udpAttempt(LwipNativeBindings.tcpShutdownOutput(handle, token))
+    }
+    // Cleanup must remain available after supply/clock/entropy has failed. The C bridge quiesces
+    // failed contexts before aborting; refreshing their clock here would prevent resource release.
+    override fun tcpClose(token: Long) = nativeCall {
+        checkOwner(); checkResult(LwipNativeBindings.tcpClose(handle, token))
+    }
+    override fun tcpListenerClose(token: Long) = nativeCall {
+        checkOwner(); checkResult(LwipNativeBindings.tcpListenerClose(handle, token))
+    }
     override fun close() = nativeCall {
         if (Thread.currentThread() !== owner) throw BackendFailure(BackendFailure.Kind.INTERNAL)
         if (handle != 0L) {
@@ -121,6 +209,8 @@ internal class NativePrototypeCore private constructor(private val clockMillis: 
                 -2 -> BackendFailure.Kind.RESOURCE_LIMIT
                 -5, -10 -> BackendFailure.Kind.ADDRESS_CONFLICT
                 -9 -> BackendFailure.Kind.USB_IO
+                -12 -> BackendFailure.Kind.PEER_CLOSED
+                -13 -> BackendFailure.Kind.PEER_RESET
                 else -> if (initializing) BackendFailure.Kind.BACKEND_INIT else BackendFailure.Kind.INTERNAL
             }
             throw BackendFailure(kind, IllegalStateException("lwIP status $status"))

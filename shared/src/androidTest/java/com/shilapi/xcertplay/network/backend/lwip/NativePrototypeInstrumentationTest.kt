@@ -18,6 +18,59 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class NativePrototypeInstrumentationTest {
+    @Test fun typedTcpCorePreservesPendingEofResetAndFailedContextCleanup() {
+        var now = 100L
+        val core = NativePrototypeCore.create(mac, ip, 1500) { now }
+        try {
+            val tcp: LwipTcpCore = core
+            val peer = ip.copyOf().also { it[15] = 2 }
+            assertEquals(CoreAttempt.Pending, tcp.tcpConnect(peer, 9000))
+            val listener = tcp.tcpListen(7001, 2)
+            assertEquals(7001, listener.port)
+            assertEquals(CoreAttempt.Pending, tcp.tcpAccept(listener.token))
+            core.setLinkReady(true)
+            repeat(16) { now += 250; core.poll() }; drain(core)
+            val ns = packet(58, 32).also {
+                it[21] = 255.toByte(); it[54] = 135.toByte(); ip.copyInto(it, 62)
+                it[78] = 1; it[79] = 1; peerMac.copyInto(it, 80); checksum(it, 58, 56)
+            }
+            core.input(ns); drain(core)
+            core.input(tcpPacket(50000, 7001, 2, 1000, 0))
+            val syn = drain(core).first { it[20] == 6.toByte() }; val server = read32(syn, 58)
+            core.input(tcpPacket(50000, 7001, 16, 1001, server + 1))
+            val accepted = (tcp.tcpAccept(listener.token) as CoreAttempt.Ready).value
+            assertArrayEquals(ip, accepted.peer.localAddress)
+            assertArrayEquals(peer, accepted.peer.remoteAddress)
+            assertEquals(50000, accepted.peer.remotePort)
+            val token = accepted.token; val target = ByteArray(5) { 9 }
+            assertEquals(CoreAttempt.Pending, tcp.tcpRead(token, target, 0, 5))
+            core.input(tcpPacket(50000, 7001, 25, 1001, server + 1, "abc".toByteArray()))
+            assertEquals(CoreAttempt.Ready(3), tcp.tcpRead(token, target, 1, 3))
+            assertArrayEquals(byteArrayOf(9, 97, 98, 99, 9), target)
+            assertEquals(CoreAttempt.Ready(-1), tcp.tcpRead(token, target, 0, 5))
+            assertEquals(CoreAttempt.Ready(0), tcp.tcpRead(token, target, 0, 0))
+            assertEquals(CoreAttempt.Ready(Unit), tcp.tcpShutdownOutput(token))
+            try { tcp.tcpWrite(token, target, 0, 1); fail("closed output") }
+            catch (error: BackendFailure) { assertEquals(BackendFailure.Kind.PEER_CLOSED, error.kind) }
+            tcp.tcpClose(token)
+            val active = (tcp.tcpConnect(peer, 9000) as CoreAttempt.Ready).value
+            assertEquals(CoreAttempt.Pending, tcp.tcpConnectStatus(active))
+            val outgoing = drain(core).last { it[20] == 6.toByte() && it[67].toInt() and 2 != 0 }
+            val port = read16(outgoing, 54); val seq = read32(outgoing, 58)
+            core.input(tcpPacket(9000, port, 18, 7000, seq + 1))
+            val connected = (tcp.tcpConnectStatus(active) as CoreAttempt.Ready).value
+            assertEquals(port, connected.localPort); assertEquals(9000, connected.remotePort)
+            assertEquals(CoreAttempt.Ready(32768), tcp.tcpWrite(active, ByteArray(100000), 0, 100000))
+            assertEquals(CoreAttempt.Pending, tcp.tcpWrite(active, target, 0, 1))
+            core.input(tcpPacket(9000, port, 20, 7001, seq + 1))
+            try { tcp.tcpRead(active, target, 0, 1); fail("peer reset") }
+            catch (error: BackendFailure) { assertEquals(BackendFailure.Kind.PEER_RESET, error.kind) }
+            now--
+            try { core.poll(); fail("clock regression") } catch (_: BackendFailure) { }
+            tcp.tcpClose(active); tcp.tcpListenerClose(listener.token)
+        } finally { core.close() }
+    }
+
     @Test fun tcpJniAcceptReadWriteAndHalfCloseValidateBeforeConsuming() {
         LwipNativeBindings.ensureLoaded()
         assertEquals(3, LwipNativeBindings.abiVersion())

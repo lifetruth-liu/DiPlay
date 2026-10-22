@@ -977,3 +977,35 @@ public tree及staged diff检查通过。未取得独立评审完成结果，不�
 尚无Java输出发布异常的运行时注入，不把检查代码和正常CheckJNI视为全部异常
 路径证据。TCP公共适配、完整SessionNetwork/优雅关闭/两后端契约、实际NCM/iPhone/
 ARM与长稳仍未完成，G2/G3未通过。
+
+### P3 TCP类型化宿主核心（2026-10-22）
+
+基于a8b1caa5。新增LwipTcpCore，NativePrototypeCore实现listen/accept/connect/
+status/read/write/shutdown_output/两类close，向宿主命令返回类型化端点信息及
+CoreAttempt。connect候选与握手完成分开；Pending不阻塞核心；read缓冲耗尽后将
+PEER_CLOSED映射EOF(-1)，PEER_RESET及写关闭映射结构化错误；write仍报告已接受
+前缀而非公共全量写入。详见[TCP宿主核心接口](tcp-core.md)。
+
+创建/接受成功但Kotlin结果构造失败时回收未交付token。普通调用补时钟/熵，TCP关闭
+跳过supply，使失败context仍能释放资源；创建线程/context有效性检查仍保留。
+不改变原始close的abort语义，不宣称公共默认优雅关闭、liveness或deadline完成。
+
+新增模拟器集成用例在缺实现时ClassCastException真实red，exit1、58s：
+TEMP/diplay-tcp-core-red.log。接通后10/10通过，exit0、12s：diplay-tcp-core-green.log。
+通过完整IPv6/TCP帧验证空accept、未就绪connect、地址/端口、先读缓冲再EOF、
+零长度读、输出关闭后的PEER_CLOSED、主动握手查询、100000字节请求短写32768、
+发送缓冲满Pending、RST与时钟倒退后仍可关闭stream/listener。
+
+最终九项Android CI exit0，7m12s、250任务46执行：diplay-tcp-core-ci.log；shared/
+common单元任务本轮执行，home为UP-TO-DATE。核对XML共3345项（shared1761/common1578/
+home6），零失败/错误/跳过；不将home旧结果记为重新执行。
+最终API28 x86_64模拟器10/10，15s、exit0：diplay-tcp-core-final-connected.log，
+XML零失败/错误/跳过；debug.checkjni=1，测试进程5137确认already on。
+APK四ABI/16KiB/NX/许可证与源摘要检查通过，SHA-256：
+8c17927a9a37f895a5c0e20df140c3267c91205982762d0271909de800dccf8b。
+原生C未修改，未重跑宿主45项；不以旧结果当作本轮重新执行。public tree及staged
+diff检查通过。未取得独立评审完成结果，不记作独立评审通过。
+
+Kotlin结果分配失败与全部JNI异常路径尚无动态注入；公共TcpStream/TcpListener/
+SessionNetwork、完整两后端契约、默认优雅关闭、实际NCM/iPhone/ARM及长稳仍待完成。
+没有设备或基线报告，G2/G3不变，整体目标仍未完成。
