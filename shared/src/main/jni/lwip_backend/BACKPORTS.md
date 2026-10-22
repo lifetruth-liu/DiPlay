@@ -54,7 +54,7 @@ accepting exactly the reviewed post-image. No other vendor modification is allow
 - File: `src/core/ipv6/nd6.c`.
 - Original SHA-256: `c415888732a6b68e9276a6f50276bf1de524b0aa2403121b18c15b1bec3fe0b4`.
 - Upstream-chain post-image SHA-256: `ae81f842253339b37a749f4683b5a5be3d3d41eed27065e2fad4893b8d060b0c`.
-- Final post-image SHA-256: `73aef9287f9afbc1a40ed08094b0c7b925733c1fc16a623f47bbb924d07f56fe`.
+- Post-image with local cursor guard (before PMTU change below): `73aef9287f9afbc1a40ed08094b0c7b925733c1fc16a623f47bbb924d07f56fe`.
 - Provenance: the original file matches the pinned tag after newline normalization.
   The official file at the chain's final commit differs from that tag by exactly
   these four commits. Original CRLF representation is preserved. The verifier
@@ -76,5 +76,22 @@ accepting exactly the reviewed post-image. No other vendor modification is allow
   six bytes available in an eight-byte option when hardware length is eight.
   The guard is local; it must not be attributed to the upstream commits above.
 
-NDP directed coverage and PMTU audit findings remain
+## IPv6 minimum PMTU validation
+
+- Based on upstream `d08f4773edd0182b7910fc8f046eed82ffcd67c9`.
+- Same file: `src/core/ipv6/nd6.c`; final SHA-256 including all NDP changes above:
+  `0117ecded27bf8382a1c977ec259b3a8cc8dc34aa07fa6ae452e58dcad4aa8ee`.
+- Adaptation: apply the upstream lower-bound rejection at 1280, while preserving
+  the original full 32-bit decoded MTU and saturation at 65535. Do not apply the
+  upstream low-16-bit mask, which would interpret larger values modulo 65536.
+  The verifier uses this latest upstream commit to identify the cumulative
+  nd6.c post-image; the local deviations remain explicitly recorded here.
+- Regression: real Ethernet/IPv6 Packet Too Big quoting a packet actually emitted
+  by the UDP echo service. Assert destination-cache MTU and subsequent echo for
+  advertisements 1, 0, 1279, 1280, 1400, 65535, 65536 and UINT32_MAX. Original
+  release fails the lower-bound expectation; adapted fix passes.
+- This tests value handling and continued UDP delivery, not authentication of
+  every quoted packet, large TCP transfer recovery or all RFC PMTU behaviors.
+
+NDP directed coverage and broader protocol audit findings remain
 open; it does not establish full upstream security approval or device gates.

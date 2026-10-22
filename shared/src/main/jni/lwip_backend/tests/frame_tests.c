@@ -1,5 +1,9 @@
 #include "diplay_lwip.h"
 #include "echo_services.h"
+/* Keep lwIP byte-order aliases out of the Windows SDK declarations below. */
+#define LWIP_DONT_PROVIDE_BYTEORDER_FUNCTIONS
+#include "lwip/nd6.h"
+#include "lwip/netif.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -361,6 +365,44 @@ static void test_udp(void) {
     CHECK(find(&f, 58, 1, 0));
     close_core(&f);
 }
+static int read_peer_mtu(void *arg) {
+    ip6_addr_t address;
+    IP6_ADDR(&address, PP_HTONL(0xfe800000), 0, 0, PP_HTONL(2));
+    ip6_addr_assign_zone(&address, IP6_UNICAST, netif_list);
+    *(uint16_t *)arg = nd6_get_destination_mtu(&address, netif_list);
+    return 0;
+}
+static void test_pmtu(void) {
+    const uint32_t advertised[] = {1, 0, 1279, 1280, 1400, 65535, 65536, 0xffffffff};
+    for (size_t i = 0; i < sizeof(advertised) / sizeof(advertised[0]); ++i) {
+        struct fixture f;
+        ready_core(&f);
+        CHECK(dp_core_execute(f.core, echo_services_start, NULL) == DP_OK);
+        send_udp(&f, 6000, "before");
+        struct frame *echo = find(&f, 17, -1, 0);
+        CHECK(echo != NULL);
+        uint8_t quote[40];
+        memcpy(quote, echo->bytes + 14, sizeof(quote));
+        f.count = 0;
+        uint8_t frame[102];
+        ethernet(frame, local_mac);
+        uint8_t *icmp = ipv6(frame, local_ip, 58, 48);
+        icmp[0] = 2;
+        w32(icmp + 4, advertised[i]);
+        memcpy(icmp + 8, quote, sizeof(quote));
+        w16(icmp + 2, checksum(frame + 14, icmp, 48, 58));
+        CHECK(dp_core_input(f.core, frame, sizeof(frame)) == DP_OK);
+        uint16_t mtu = 0;
+        CHECK(dp_core_execute(f.core, read_peer_mtu, &mtu) == DP_OK);
+        uint16_t expected = advertised[i] < 1280 ? 1500 :
+            (advertised[i] > 65535 ? 65535 : (uint16_t)advertised[i]);
+        CHECK(mtu == expected);
+        send_udp(&f, 6000, "after");
+        echo = find(&f, 17, -1, 0);
+        CHECK(echo && !memcmp(echo->bytes + 62, "after", 5));
+        close_core(&f);
+    }
+}
 static void test_lifecycle(void) {
     for (int i = 0; i < 100; i++) {
         struct fixture f;
@@ -567,6 +609,8 @@ int main(int argc, char **argv) {
         test_fragments();
     else if (!strcmp(argv[1], "ndp_options"))
         test_ndp_options();
+    else if (!strcmp(argv[1], "pmtu"))
+        test_pmtu();
     else if (!strcmp(argv[1], "api"))
         test_api();
     else if (!strcmp(argv[1], "thread"))

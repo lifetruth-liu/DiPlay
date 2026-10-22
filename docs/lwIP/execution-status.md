@@ -562,3 +562,29 @@ rx317/tx212/not_ready0、heap_peak36008；该结果不是NCM/iPhone或ARM验收�
 只读审查提出offset问题后其审查回合未正常完成，不记作审查通过；本地完成了上述
 red/green验证。NA/Redirect/RA完整入口定向覆盖仍待补齐，PMTU仍未回补，安全审计
 继续未通过。真机G0/G1与ARM门槛不变；生产未启用lwIP后端。
+
+### PMTU最小值与后续发包（2026-10-22）
+
+基于3661abd5，适配上游d08f4773最小MTU检查，保留原32位读取和65535钳制；
+不采用低16位mask，避免把较大值按65536取模。累计nd6.c原始/最终digest及本地差异
+记录在BACKPORTS.md，原始发布manifest不变。
+
+真实帧测试先从UDP echo取得实际发出的IPv6头，再作为ICMP6 Packet Too Big引用头。
+逐项检查1/0/1279/1280/1400/65535/65536/UINT32_MAX更新后的destination cache MTU，
+并验证后续UDP echo。原版缓存接受过小值，独立ctest red exit1；修复后通过。
+日志WSL /tmp/diplay-pmtu-red.log、diplay-pmtu-final-host.log。
+该用例不声称覆盖全部引用包匹配或TCP大流量恢复。
+
+Linux ASan/UBSan/pool guards和Windows MinGW各30/30；完整性Python测试7/7。
+Windows第一次编译因新增lwIP头的htonl宏影响Windows SDK声明失败，核对头文件后在
+测试文件定义LWIP_DONT_PROVIDE_BYTEORDER_FUNCTIONS，复测30/30；产品配置未改。
+完整九项Android CI exit0、8s，250任务17执行，TEMP/diplay-pmtu-ci.log。
+JNI connected 5/5、零失败/错误/跳过，12s、exit0：diplay-pmtu-connected.log。
+四ABI APK ELF/ZIP 16KiB、NX、许可证/源码检查通过，APK SHA-256：
+15de03f85542e51c0cf2cd874615fba1fbfbddadf1b0205e32e092b71d69b38e。
+
+重建Android内核工具后，任务自有API28 x86_64模拟器独立netns的TAP basic通过TCP
+3×64KiB、UDP空包/MTU/分片，exit0：diplay-pmtu-kernel-tap.log。
+rx271/tx226/not_ready0、heap_peak36008；不是NCM/iPhone或ARM验收。
+只读复核回合未完成，不记作通过；实现diff和测试结果已由主代理核对。
+NDP其余定向入口、完整端点/会话集成及真机验收继续待完成，整体方案尚未完成。

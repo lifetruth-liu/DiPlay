@@ -39,7 +39,7 @@ class NativeVerifierTest(unittest.TestCase):
         self.assertEqual(
             ["3d896ba0a37ff3ce73270ca5e230707fe47f60e3",
              "56b29f8bcfaefe2974dca67bde16cc7c391feaeb",
-             "7d1327e51407440350c5687d65dfa78de0f8f961"],
+             "d08f4773edd0182b7910fc8f046eed82ffcd67c9"],
             verify_source()["backports"],
         )
 

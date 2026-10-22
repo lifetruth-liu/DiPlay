@@ -951,8 +951,13 @@ nd6_input(struct pbuf *p, struct netif *inp)
       return;
     }
 
-    /* Change the Path MTU. */
     pmtu = lwip_htonl(icmp6hdr->data);
+    if (pmtu < IP6_MIN_MTU_LENGTH) {
+      /* MTU too small */
+      pbuf_free(p);
+      return;
+    }
+    /* Change the Path MTU, preserving the full-width value until clamping. */
     destination_cache[dest_idx].pmtu = (u16_t)LWIP_MIN(pmtu, 0xFFFF);
 
     break; /* ICMP6_TYPE_PTB */

@@ -18,13 +18,15 @@ select this backend yet.
   and IPv6 empty reassembly cleanup `56b29f8bcfaefe2974dca67bde16cc7c391feaeb`,
   plus the four-commit NDP chain ending `7d1327e51407440350c5687d65dfa78de0f8f961`;
   the NDP post-image also includes a local remaining-length guard for cursor advance.
+  PMTU minimum validation is adapted from `d08f4773edd0182b7910fc8f046eed82ffcd67c9`,
+  retaining full-width MTU saturation instead of the upstream low-16-bit mask.
   see [backport record](BACKPORTS.md). On 2026-10-22 the ZIP detached signature was verified with
   fingerprint `746BEB8E56372EB695EA02E71D6B61C1B84299F5`, anchored to the maintainer's
   Savannah account key. GPG returned GOODSIG/VALIDSIG; owner trust remains undefined.
   The annotated Git tag itself is unsigned. Signature SHA-256:
   `e934e3c4d0fd4b6ac213db43d163707942184df6df8784c0f084ed5d95532a18`.
 - Security review is **not passed**: NDP/PMTU paths still have relevant post-release fixes requiring regression
-  tests; PMTU still needs a backport. TCP option bounds and IPv6 empty reassembly cleanup are
+  tests and broader protocol coverage. PMTU value validation, TCP option bounds and IPv6 empty reassembly cleanup are
   backported with targeted regressions, not a complete security assessment.
   See [audit snapshot](../../../../../docs/lwIP/upstream-audit.md) for the exact
   upstream review head, configuration applicability and open work.
