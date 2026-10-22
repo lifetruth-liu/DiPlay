@@ -1,7 +1,7 @@
 # P3 native TCP监听与接收
 
 `include/diplay_tcp.h`提供核心线程上的非阻塞listen、accept、read、write、输出半关闭
-和本地abort关闭。这是一段TCP端点实现：尚无主动connect、完整优雅关闭策略、
+和本地abort关闭，亦支持下面的非阻塞主动连接。这是一段TCP端点实现：尚无完整优雅关闭策略、
 TCP JNI或公共TcpStream/SessionNetwork适配，不能作为完整TCP合同验收。
 现有生产后端与Java/JNI ABI未改变；新增C API及错误值是兼容的扩展。
 
@@ -65,3 +65,22 @@ TIME_WAIT由协议栈在计时器/分配器中释放或复用，不保证err回�
 仍得到ACK，注入121秒后创建新连接，再读旧缓存和关闭旧handle，不影响新连接。
 tcp_write_io区分未就绪、已复制后的输出暂不可用与致命失败；tcp_shutdown_pressure
 用固定TCP段池耗尽验证延后FIN、资源恢复，以及压力期间取消。均不耗尽物理内存。
+
+主动连接由connect begin和connect_status两步组成。begin要求链路就绪且DAD已完成，
+否则WOULD_BLOCK且handle为0，不保留候选。成功begin返回拥有型generation token，
+表示SYN已入栈；并不表示握手成功。之后必须查询同一token，不能反复begin。
+connect_status在握手中返回WOULD_BLOCK，成功后报告实际本地临时端口、真实远端
+IPv6/端口。对端紧接着正常FIN不抹掉已完成事件，接管的数据仍可读取；RST或协议
+重试耗尽报告PEER_RESET。后者不是公共deadline的TIMEOUT，deadline仍由后续适配层处理。
+
+候选与已领取stream共用32个应用记录上限和固定TCP PCB池，使用同一列表/回调/
+接收缓存/关闭路径。候选未完成时write和shutdown_output返回WOULD_BLOCK，不提前
+排入应用数据。创建失败、SYN分配失败、致命输出错误都回滚注册和PCB，不发布token；
+暂时输出不可用则保留同一候选，由TCP重传。close立即取消候选，全core销毁也会回收。
+仅接受非零端口的IPv6单播目标，绑定虚拟netif并让栈分配本地临时端口。
+
+tcp_connect验证就绪/DAD、握手、双方收发、实际地址端口和紧接的FIN；
+tcp_connect_cancel验证拒绝RST、取消后的迟到SYN-ACK不完成新候选、generation及
+上下文销毁。tcp_connect_limits覆盖参数、SYN固定池分配失败回滚、32候选容量和
+致命输出回滚。tcp_connect_retry覆盖输出恢复后的原SYN重传及注入时间下的协议
+握手超时。四项同时在Android x86_64原生进程执行，不是完整公共connect取消竞态验收。

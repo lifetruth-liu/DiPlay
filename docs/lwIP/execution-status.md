@@ -906,3 +906,34 @@ SHA-256：1999d3ee65f7a75e86f1a3029536c503fb684977f9466816b23258d627d6d347。
 此批不等同于完整优雅close策略，仍缺主动connect、TCP JNI、公共TcpStream/
 SessionNetwork及完整两后端契约；独立内核peer、实际NCM/iPhone/ARM与长稳门槛
 仍未完成，G2/G3未通过。未取得独立评审完成结果，不记作独立评审通过。
+
+### P3 native TCP主动连接（2026-10-22）
+
+基于585be2be。新增connect begin/connect_status，候选与已连接端点共用generation
+注册、32条记录/PCB上限和原有回调/接收/关闭。链路或DAD未就绪时返回WOULD_BLOCK、
+无token；SYN入栈才发布候选，之后只查询同一token，握手完成后报告实际本地/远端
+IPv6和端口。候选阶段write/shutdown_output不接受数据。正常紧接FIN仍保留已完成
+握手事件，RST及协议重试耗尽报告PEER_RESET；公共deadline的TIMEOUT映射仍待适配。
+SYN分配失败、注册失败、致命输出失败回滚PCB/元数据/注册，不隐藏未交付候选；
+暂时输出不可用保留原候选重传。取消和全上下文销毁均回收候选。
+
+三项占位用例真实red、旧41项通过，exit8：WSL /tmp/diplay-tcp-connect-red.log。
+实现后44项green，再补固定段池分配失败、迟到SYN-ACK、恢复重传和协议超时。
+最终Linux ASan/UBSan/pool guards、Windows MinGW各45/45，日志：
+WSL /tmp/diplay-tcp-connect-final-host.log、TEMP/diplay-tcp-connect-final-windows.log。
+SYN/SYN-ACK/RST真实帧覆盖双方收发、地址端口、未就绪/DAD、握手中取消、旧token、
+重建、32候选耗尽、固定TCP_SEG池故障和致命输出即时回滚；不耗尽物理内存。
+Android API28 x86_64独立frame_tests的tcp_connect/tcp_connect_cancel/
+tcp_connect_limits/tcp_connect_retry全部PASS；构建日志TEMP/diplay-tcp-connect-android-build.log。
+
+九项Android CI exit0，10s，250任务17执行：diplay-tcp-connect-ci.log。
+JVM源码未修改，单元任务UP-TO-DATE；核对既有XML3345项（shared1761/common1578/home6）
+零失败/错误/跳过，不记为全量重新执行。JNI/UDP回归7/7，17s、exit0：
+diplay-tcp-connect-connected.log，XML零失败/错误/跳过。自有模拟器debug.checkjni=1，
+测试进程3721确认already on，既有AVD路径告警未影响测试。四ABI均确认九项dp_tcp_*
+导出；APK四ABI/16KiB/NX/许可证与源摘要检查通过，SHA-256：
+c45c6c49084d1db1abb14c93b9b0a6fed128f970a3f5105099c4187cccef91b3。
+
+仍缺TCP JNI、公共TcpStream/SessionNetwork、完整优雅关闭策略、独立内核peer对新
+端点API的验证与完整两后端契约。实际NCM/iPhone/ARM、长稳及G2/G3仍未完成，整体
+目标不标完成。未取得独立评审完成结果，不记作独立评审通过。

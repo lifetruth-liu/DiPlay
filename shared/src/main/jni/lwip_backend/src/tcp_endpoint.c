@@ -13,7 +13,7 @@ struct tcp_stream {
     struct pbuf *rx;
     dp_tcp_info info;
     dp_result error;
-    int eof, output_closed;
+    int eof, output_closed, connected;
 };
 struct tcp_listener {
     dp_core *owner;
@@ -91,6 +91,20 @@ static err_t received(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t erro
     else stream->rx = p;
     return ERR_OK; /* Receive credit is deliberately not restored until an application read. */
 }
+static void address_info(struct tcp_stream *stream) {
+    struct tcp_pcb *pcb = stream->pcb;
+    memcpy(stream->info.local, ip_2_ip6(&pcb->local_ip)->addr, 16);
+    memcpy(stream->info.remote, ip_2_ip6(&pcb->remote_ip)->addr, 16);
+    stream->info.local_port = pcb->local_port; stream->info.remote_port = pcb->remote_port;
+}
+static err_t connected(void *arg, struct tcp_pcb *pcb, err_t error) {
+    struct tcp_stream *stream = arg;
+    LWIP_ASSERT("connected PCB changed ownership", pcb == stream->pcb);
+    if (error != ERR_OK) { stream->error = DP_INTERNAL; return ERR_OK; }
+    address_info(stream);
+    stream->connected = 1;
+    return ERR_OK;
+}
 static err_t accepted(void *arg, struct tcp_pcb *pcb, err_t error) {
     struct tcp_listener *listener = arg;
     dp_core *core = listener->owner;
@@ -101,9 +115,8 @@ static err_t accepted(void *arg, struct tcp_pcb *pcb, err_t error) {
     if (!stream) { tcp_abort(pcb); return ERR_ABRT; }
     stream->owner = core; stream->pcb = pcb; stream->listener = listener;
     stream->next = core->tcp_streams; core->tcp_streams = stream;
-    memcpy(stream->info.local, ip_2_ip6(&pcb->local_ip)->addr, 16);
-    memcpy(stream->info.remote, ip_2_ip6(&pcb->remote_ip)->addr, 16);
-    stream->info.local_port = pcb->local_port; stream->info.remote_port = pcb->remote_port;
+    address_info(stream);
+    stream->connected = 1;
     core->tcp_stream_count++; allocated(core, sizeof(*stream));
     tcp_arg(pcb, stream); tcp_recv(pcb, received); tcp_err(pcb, failed);
     tcp_nagle_disable(pcb); ip_set_option(pcb, SOF_KEEPALIVE);
@@ -215,6 +228,67 @@ static dp_result close_handle(dp_core *core, uint64_t handle, dp_endpoint_kind k
     status = dp_endpoint_remove(&core->endpoints, handle, kind);
     return leave(core, status);
 }
+dp_result dp_tcp_connect(dp_core *core, const uint8_t address[16], uint16_t port, uint64_t *handle) {
+    if (handle) *handle = 0;
+    if (!address || !port || !handle) return DP_INVALID_ARGUMENT;
+    uint8_t nonzero = 0;
+    for (unsigned i = 0; i < 16; ++i) nonzero |= address[i];
+    if (!nonzero || address[0] == 255) return DP_INVALID_ARGUMENT;
+    dp_result status = dp_enter(core, 0);
+    if (status != DP_OK) return status;
+    if (!core->link_ready || !ip6_addr_isvalid(netif_ip6_addr_state(&core->netif, 0)))
+        return leave(core, DP_WOULD_BLOCK);
+    if (core->tcp_stream_count >= MEMP_NUM_TCP_PCB) return leave(core, DP_RESOURCE_LIMIT);
+    struct tcp_stream *stream = calloc(1, sizeof(*stream));
+    if (!stream) return leave(core, DP_RESOURCE_LIMIT);
+    stream->owner = core;
+    stream->next = core->tcp_streams; core->tcp_streams = stream;
+    core->tcp_stream_count++; allocated(core, sizeof(*stream));
+    stream->pcb = tcp_new_ip_type(IPADDR_TYPE_V6);
+    if (!stream->pcb) { release_stream(stream); return leave(core, DP_RESOURCE_LIMIT); }
+    tcp_arg(stream->pcb, stream); tcp_recv(stream->pcb, received); tcp_err(stream->pcb, failed);
+    tcp_nagle_disable(stream->pcb); ip_set_option(stream->pcb, SOF_KEEPALIVE);
+    tcp_bind_netif(stream->pcb, &core->netif);
+    ip_addr_t local, remote;
+    ip_addr_copy_from_ip6(local, *netif_ip6_addr(&core->netif, 0));
+    ip_addr_set_zero_ip6(&remote);
+    memcpy(ip_2_ip6(&remote)->addr, address, 16);
+    ip6_addr_assign_zone(ip_2_ip6(&remote), IP6_UNICAST, &core->netif);
+    err_t error = tcp_bind(stream->pcb, &local, 0);
+    if (error != ERR_OK) {
+        release_stream(stream);
+        return leave(core, error == ERR_USE ? DP_ADDRESS_IN_USE : DP_RESOURCE_LIMIT);
+    }
+    uint64_t candidate = 0;
+    status = dp_endpoint_register(&core->endpoints, DP_ENDPOINT_TCP, stream, release_stream, &candidate);
+    if (status != DP_OK) { release_stream(stream); return leave(core, status); }
+    error = tcp_connect(stream->pcb, &remote, port, connected);
+    if (error != ERR_OK || core->failure != DP_OK) {
+        status = core->failure != DP_OK ? core->failure :
+                 (error == ERR_MEM || error == ERR_BUF ? DP_RESOURCE_LIMIT :
+                  (error == ERR_USE ? DP_ADDRESS_IN_USE : DP_LINK_IO));
+        dp_endpoint_remove(&core->endpoints, candidate, DP_ENDPOINT_TCP);
+        return leave(core, status);
+    }
+    status = leave(core, DP_OK);
+    if (status != DP_OK) { dp_tcp_close(core, candidate); return status; }
+    *handle = candidate;
+    return DP_OK;
+}
+dp_result dp_tcp_connect_status(dp_core *core, uint64_t handle, dp_tcp_info *info) {
+    if (!info) return DP_INVALID_ARGUMENT;
+    memset(info, 0, sizeof(*info));
+    dp_result status = dp_enter(core, 0);
+    if (status != DP_OK) return status;
+    void *value = NULL;
+    status = dp_endpoint_lookup(&core->endpoints, handle, DP_ENDPOINT_TCP, &value);
+    if (status != DP_OK) return leave(core, status);
+    struct tcp_stream *stream = value;
+    if (stream->error != DP_OK) return leave(core, stream->error);
+    if (!stream->connected) return leave(core, DP_WOULD_BLOCK);
+    *info = stream->info;
+    return leave(core, DP_OK);
+}
 dp_result dp_tcp_write(dp_core *core, uint64_t handle, const uint8_t *bytes, size_t length, size_t *copied) {
     if (copied) *copied = 0;
     if (!copied || (!bytes && length)) return DP_INVALID_ARGUMENT;
@@ -225,6 +299,7 @@ dp_result dp_tcp_write(dp_core *core, uint64_t handle, const uint8_t *bytes, siz
     if (status != DP_OK) return leave(core, status);
     struct tcp_stream *stream = value;
     if (stream->error != DP_OK) return leave(core, stream->error);
+    if (!stream->connected) return leave(core, DP_WOULD_BLOCK);
     if (stream->output_closed || !stream->pcb) return leave(core, DP_PEER_CLOSED);
     if (!length) return leave(core, DP_OK);
     if (!core->link_ready) return leave(core, DP_WOULD_BLOCK);
@@ -250,6 +325,7 @@ dp_result dp_tcp_shutdown_output(dp_core *core, uint64_t handle) {
     struct tcp_stream *stream = value;
     if (stream->output_closed) return leave(core, DP_OK);
     if (stream->error != DP_OK) return leave(core, stream->error);
+    if (!stream->connected) return leave(core, DP_WOULD_BLOCK);
     if (!stream->pcb) return leave(core, DP_PEER_CLOSED);
     err_t error = tcp_shutdown(stream->pcb, 0, 1);
     if (error != ERR_OK) return leave(core, error == ERR_MEM ? DP_WOULD_BLOCK : DP_PEER_CLOSED);

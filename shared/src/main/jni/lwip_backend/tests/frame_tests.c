@@ -237,14 +237,14 @@ static void test_dad(void) {
     CHECK(address_state(&f) == DP_ADDRESS_DUPLICATE);
     close_core(&f);
 }
-static void send_tcp_port(struct fixture *f, uint16_t port, uint8_t flags, uint32_t sequence, uint32_t ack,
+static void send_tcp_pair(struct fixture *f, uint16_t port, uint16_t destination, uint8_t flags, uint32_t sequence, uint32_t ack,
                            const void *data, size_t n) {
     uint8_t frame[1514];
     CHECK(n <= 1440);
     ethernet(frame, local_mac);
     uint8_t *p = ipv6(frame, local_ip, 6, (uint16_t)(20 + n));
     w16(p, port);
-    w16(p + 2, 7000);
+    w16(p + 2, destination);
     w32(p + 4, sequence);
     w32(p + 8, ack);
     p[12] = 0x50;
@@ -253,6 +253,10 @@ static void send_tcp_port(struct fixture *f, uint16_t port, uint8_t flags, uint3
     memcpy(p + 20, data, n);
     w16(p + 16, checksum(frame + 14, p, 20 + n, 6));
     CHECK(dp_core_input(f->core, frame, 74 + n) == DP_OK);
+}
+static void send_tcp_port(struct fixture *f, uint16_t port, uint8_t flags, uint32_t sequence, uint32_t ack,
+                          const void *data, size_t n) {
+    send_tcp_pair(f, port, 7000, flags, sequence, ack, data, n);
 }
 static void send_tcp_bytes(struct fixture *f, uint8_t flags, uint32_t sequence, uint32_t ack,
                            const void *data, size_t n) {
@@ -606,6 +610,139 @@ static void test_tcp_shutdown_pressure(void) {
         CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
         close_core(&f);
     }
+}
+static uint32_t connect_begin(struct fixture *f, uint64_t *stream, uint16_t *local_port) {
+    f->count = 0;
+    CHECK(dp_tcp_connect(f->core, peer_ip, 9000, stream) == DP_OK && *stream);
+    struct frame *syn = find(f, 6, -1, 0);
+    CHECK(syn && (syn->bytes[67] & 0x12) == 2);
+    CHECK(!memcmp(syn->bytes + 22, local_ip, 16) && !memcmp(syn->bytes + 38, peer_ip, 16));
+    CHECK(u16(syn->bytes + 56) == 9000);
+    *local_port = u16(syn->bytes + 54);
+    CHECK(*local_port != 0);
+    return u32(syn->bytes + 58);
+}
+static void test_tcp_connect(void) {
+    struct fixture f; open_core(&f, 0);
+    uint64_t stream = 99; uint16_t local_port;
+    CHECK(dp_tcp_connect(f.core, peer_ip, 9000, &stream) == DP_WOULD_BLOCK && stream == 0);
+    CHECK(dp_core_set_link_ready(f.core, 1) == DP_OK);
+    CHECK(dp_tcp_connect(f.core, peer_ip, 9000, &stream) == DP_WOULD_BLOCK && stream == 0);
+    dp_stats stats; CHECK(dp_core_get_stats(f.core, &stats) == DP_OK && stats.heap_used == 0 && stats.tcp_active == 0);
+    close_core(&f); ready_core(&f);
+    uint32_t sequence = connect_begin(&f, &stream, &local_port);
+    dp_tcp_info info;
+    memset(&info, 99, sizeof(info));
+    CHECK(dp_tcp_connect_status(f.core, stream, &info) == DP_WOULD_BLOCK && info.local_port == 0 && info.remote_port == 0);
+    uint8_t bytes[8]; size_t copied;
+    CHECK(dp_tcp_write(f.core, stream, (const uint8_t *)"early", 5, &copied) == DP_WOULD_BLOCK && copied == 0);
+    CHECK(dp_tcp_shutdown_output(f.core, stream) == DP_WOULD_BLOCK);
+    f.count = 0;
+    send_tcp_pair(&f, 9000, local_port, 18, 7000, sequence + 1, "", 0);
+    CHECK(dp_tcp_connect_status(f.core, stream, &info) == DP_OK);
+    CHECK(info.local_port == local_port && info.remote_port == 9000);
+    CHECK(!memcmp(info.local, local_ip, 16) && !memcmp(info.remote, peer_ip, 16));
+    f.count = 0;
+    CHECK(dp_tcp_write(f.core, stream, (const uint8_t *)"hi", 2, &copied) == DP_OK && copied == 2);
+    uint8_t seen[2] = {0};
+    collect_echo(&f, sequence, (const uint8_t *)"hi", seen, 2);
+    CHECK(seen[0] && seen[1]);
+    send_tcp_pair(&f, 9000, local_port, 25, 7001, sequence + 3, "reply", 5);
+    CHECK(dp_tcp_connect_status(f.core, stream, &info) == DP_OK); /* Completed before peer EOF. */
+    CHECK(dp_tcp_read(f.core, stream, bytes, sizeof(bytes), &copied) == DP_OK && copied == 5 && !memcmp(bytes, "reply", 5));
+    CHECK(dp_tcp_read(f.core, stream, bytes, 1, &copied) == DP_PEER_CLOSED);
+    CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+    CHECK(dp_core_get_stats(f.core, &stats) == DP_OK && stats.heap_used == 0 && stats.pbuf_used == 0);
+    close_core(&f);
+}
+static void test_tcp_connect_cancel(void) {
+    struct fixture f; ready_core(&f);
+    uint64_t stream; uint16_t port; dp_tcp_info info;
+    uint32_t sequence = connect_begin(&f, &stream, &port);
+    send_tcp_pair(&f, 9000, port, 20, 0, sequence + 1, "", 0);
+    CHECK(dp_tcp_connect_status(f.core, stream, &info) == DP_PEER_RESET);
+    CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+    sequence = connect_begin(&f, &stream, &port);
+    uint64_t stale = stream;
+    uint16_t cancelled_port = port;
+    uint32_t cancelled_sequence = sequence;
+    CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+    send_tcp_pair(&f, 9000, port, 18, 7000, sequence + 1, "", 0);
+    CHECK(dp_tcp_connect_status(f.core, stale, &info) == DP_INVALID_ARGUMENT);
+    sequence = connect_begin(&f, &stream, &port);
+    CHECK(stream != stale && dp_tcp_connect_status(f.core, stream, &info) == DP_WOULD_BLOCK);
+    send_tcp_pair(&f, 9000, cancelled_port, 18, 7000, cancelled_sequence + 1, "", 0);
+    CHECK(dp_tcp_connect_status(f.core, stream, &info) == DP_WOULD_BLOCK);
+    send_tcp_pair(&f, 9000, port, 18, 7000, sequence + 1, "", 0);
+    CHECK(dp_tcp_connect_status(f.core, stream, &info) == DP_OK);
+    CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+    connect_begin(&f, &stale, &port);
+    close_core(&f); /* Pending SYN belongs to the context when never explicitly cancelled. */
+    ready_core(&f);
+    connect_begin(&f, &stream, &port);
+    CHECK(dp_tcp_connect_status(f.core, stale, &info) == DP_INVALID_ARGUMENT);
+    CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+    close_core(&f);
+}
+static void test_tcp_connect_limits(void) {
+    struct fixture f; ready_core(&f);
+    uint64_t streams[32], extra = 99; uint16_t port; dp_tcp_info info;
+    uint8_t invalid[16] = {0};
+    CHECK(dp_tcp_connect(f.core, invalid, 9000, &extra) == DP_INVALID_ARGUMENT && extra == 0);
+    invalid[0] = 255;
+    CHECK(dp_tcp_connect(f.core, invalid, 9000, &extra) == DP_INVALID_ARGUMENT && extra == 0);
+    CHECK(dp_tcp_connect(f.core, peer_ip, 0, &extra) == DP_INVALID_ARGUMENT && extra == 0);
+    struct segment_pressure pressure = {0};
+    CHECK(dp_core_execute(f.core, pressure_segments, &pressure) == DP_OK && pressure.count > 0);
+    CHECK(dp_tcp_connect(f.core, peer_ip, 9000, &extra) == DP_RESOURCE_LIMIT && extra == 0);
+    dp_stats stats;
+    CHECK(dp_core_get_stats(f.core, &stats) == DP_OK && stats.tcp_active == 0 && stats.heap_used == 0 && stats.pbuf_used == 0);
+    pressure.release = 1;
+    CHECK(dp_core_execute(f.core, pressure_segments, &pressure) == DP_OK);
+    for (unsigned i = 0; i < 32; ++i) connect_begin(&f, &streams[i], &port);
+    CHECK(dp_tcp_connect(f.core, peer_ip, 9000, &extra) == DP_RESOURCE_LIMIT && extra == 0);
+    for (unsigned i = 0; i < 32; ++i) CHECK(dp_tcp_connect_status(f.core, streams[i], &info) == DP_WOULD_BLOCK);
+    f.count = 0;
+    for (unsigned i = 0; i < 32; ++i) CHECK(dp_tcp_close(f.core, streams[i]) == DP_OK);
+    f.count = 0;
+    CHECK(dp_core_get_stats(f.core, &stats) == DP_OK && stats.tcp_active == 0 && stats.heap_used == 0 && stats.pbuf_used == 0);
+    f.ready = -1;
+    CHECK(dp_tcp_connect(f.core, peer_ip, 9000, &extra) == DP_LINK_IO && extra == 0);
+    CHECK(dp_core_get_stats(f.core, &stats) == DP_OK && stats.tcp_active == 0 && stats.heap_used == 0 && stats.pbuf_used == 0);
+    close_core(&f);
+}
+static void test_tcp_connect_retry(void) {
+    struct fixture f; ready_core(&f);
+    uint64_t stream; dp_tcp_info info;
+    f.ready = 0;
+    CHECK(dp_tcp_connect(f.core, peer_ip, 9000, &stream) == DP_OK && stream);
+    CHECK(dp_tcp_connect_status(f.core, stream, &info) == DP_WOULD_BLOCK);
+    f.count = 0; f.ready = 1;
+    CHECK(dp_core_set_link_ready(f.core, 1) == DP_OK);
+    advance(&f, 5000);
+    struct frame *syn = find(&f, 6, -1, 0);
+    CHECK(syn && (syn->bytes[67] & 0x12) == 2);
+    uint16_t port = u16(syn->bytes + 54);
+    uint32_t sequence = u32(syn->bytes + 58);
+    for (size_t i = 0; i < f.count; ++i) if (f.frames[i].bytes[20] == 6) {
+        CHECK(u16(f.frames[i].bytes + 54) == port && u32(f.frames[i].bytes + 58) == sequence);
+    }
+    send_tcp_pair(&f, 9000, port, 18, 7000, sequence + 1, "", 0);
+    CHECK(dp_tcp_connect_status(f.core, stream, &info) == DP_OK);
+    CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+    connect_begin(&f, &stream, &port);
+    dp_result state = DP_WOULD_BLOCK;
+    for (unsigned i = 0; i < 120 && state == DP_WOULD_BLOCK; ++i) {
+        f.count = 0;
+        advance(&f, 2000);
+        state = dp_tcp_connect_status(f.core, stream, &info);
+    }
+    CHECK(state == DP_PEER_RESET); /* Protocol retry exhaustion, not a Java operation deadline. */
+    CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+    f.count = 0; advance(&f, 4000);
+    dp_stats stats;
+    CHECK(dp_core_get_stats(f.core, &stats) == DP_OK && stats.tcp_active == 0 && stats.heap_used == 0 && stats.pbuf_used == 0);
+    close_core(&f);
 }
 static void test_tcp_large_refused(void) {
     struct fixture f;
@@ -1095,6 +1232,14 @@ int main(int argc, char **argv) {
         test_tcp_write_io();
     else if (!strcmp(argv[1], "tcp_shutdown_pressure"))
         test_tcp_shutdown_pressure();
+    else if (!strcmp(argv[1], "tcp_connect"))
+        test_tcp_connect();
+    else if (!strcmp(argv[1], "tcp_connect_cancel"))
+        test_tcp_connect_cancel();
+    else if (!strcmp(argv[1], "tcp_connect_limits"))
+        test_tcp_connect_limits();
+    else if (!strcmp(argv[1], "tcp_connect_retry"))
+        test_tcp_connect_retry();
     else if (!strcmp(argv[1], "udp"))
         test_udp();
     else if (!strcmp(argv[1], "lifecycle"))
