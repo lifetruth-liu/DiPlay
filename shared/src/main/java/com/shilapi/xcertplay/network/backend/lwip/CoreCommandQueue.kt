@@ -15,6 +15,23 @@ internal class CoreCommandQueue<C>(
     private val maxCommands: Int = 128,
     private val maxBytes: Int = 256 * 1024,
 ) {
+    /** Identity and terminal state only; the queue does not retain a registry of scopes. */
+    class Scope internal constructor(internal val identity: Any) {
+        internal var failure: BackendFailure? = null
+    }
+    private val scopeIdentity = Any()
+    fun newScope(): Scope = synchronized(signal) {
+        closed?.let { throw it }
+        Scope(scopeIdentity)
+    }
+    /** Cancellation needs no command slot, including when all slots are occupied. */
+    fun cancel(scope: Scope, reason: BackendFailure) = synchronized(signal) {
+        require(scope.identity === scopeIdentity) { "Scope belongs to another core queue" }
+        if (scope.failure == null) {
+            scope.failure = reason
+            for (task in live) if (task.scope === scope) task.cancel(reason)
+        }
+    }
     data class Snapshot(val commands: Int, val bytes: Int)
     data class Batch(val more: Boolean, val completed: Boolean)
     private enum class Phase { QUEUED, RUNNING, WAITING, DONE }
@@ -28,15 +45,17 @@ internal class CoreCommandQueue<C>(
 
     /** Internal operations and discard handlers must not block. retainedBytes
      * includes all owned payloads retained by the operation/completion. */
-    fun <T> call(retainedBytes: Int = 0, deadlineMillis: Long = 0, discard: (T) -> Unit = {}, operation: (C) -> CoreAttempt<T>): T {
+    fun <T> call(retainedBytes: Int = 0, deadlineMillis: Long = 0, discard: (T) -> Unit = {}, scope: Scope? = null, operation: (C) -> CoreAttempt<T>): T {
         require(retainedBytes >= 0 && deadlineMillis >= 0)
         if (Thread.currentThread().isInterrupted) throw BackendFailure(BackendFailure.Kind.CANCELLED)
         val task = synchronized(signal) {
+            require(scope == null || scope.identity === scopeIdentity) { "Scope belongs to another core queue" }
             closed?.let { throw it }
+            scope?.failure?.let { throw it }
             if (Thread.currentThread() === owner) throw BackendFailure(BackendFailure.Kind.INTERNAL)
             if (deadlineMillis != 0L && clock.nowMillis() >= deadlineMillis) throw BackendFailure(BackendFailure.Kind.TIMEOUT)
             if (live.size >= maxCommands || retainedBytes > maxBytes - retained) throw BackendFailure(BackendFailure.Kind.RESOURCE_LIMIT)
-            Task(retainedBytes, deadlineMillis, discard, operation).also {
+            Task(retainedBytes, deadlineMillis, discard, scope, operation).also {
                 live.add(it); ready.addLast(it); retained += retainedBytes
             }
         }
@@ -91,7 +110,7 @@ internal class CoreCommandQueue<C>(
     }
     private inner class Task<T>(
         val bytes: Int, val deadline: Long,
-        val discard: (T) -> Unit, val operation: (C) -> CoreAttempt<T>,
+        val discard: (T) -> Unit, val scope: Scope?, val operation: (C) -> CoreAttempt<T>,
     ) {
         var phase = Phase.QUEUED
         var active = false

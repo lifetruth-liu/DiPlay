@@ -11,6 +11,74 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class CoreCommandQueueTest {
+    @Test(timeout = 10_000) fun endpointCancellationIsIsolatedAndRejectsLaterCalls() {
+        val queue = queue(count = 3)
+        val endpoint = queue.newScope()
+        val other = queue.newScope()
+        val attempts = AtomicInteger()
+        val waiting = Call { queue.call<Int>(scope = endpoint) { attempts.incrementAndGet(); CoreAttempt.Pending } }
+        val unrelated = Call { queue.call<Int>(scope = other) { CoreAttempt.Pending } }
+        await { queue.snapshot().commands == 2 }
+        queue.runBatch(0)
+        val queued = Call { queue.call(scope = endpoint) { attempts.incrementAndGet(); CoreAttempt.Ready(42) } }
+        await { queue.snapshot().commands == 3 }
+        val reason = BackendFailure(BackendFailure.Kind.CANCELLED)
+        queue.cancel(endpoint, reason)
+        assertSame(reason, waiting.finish().exceptionOrNull())
+        assertSame(reason, queued.finish().exceptionOrNull())
+        assertNull(unrelated.result.get())
+        assertEquals(1, queue.snapshot().commands)
+        queue.cancel(endpoint, BackendFailure(BackendFailure.Kind.INTERNAL))
+        assertSame(reason, runCatching { queue.call(scope = endpoint) { CoreAttempt.Ready(0) } }.exceptionOrNull())
+        queue.progress(); queue.runBatch(0)
+        assertEquals(1, attempts.get())
+        queue.close(reason)
+        assertSame(reason, unrelated.finish().exceptionOrNull())
+        assertEquals(0, queue.snapshot().commands)
+    }
+
+    @Test(timeout = 10_000) fun endpointCancellationRetainsActiveBudgetThroughCoreCleanup() {
+        val queue = queue(count = 1)
+        val endpoint = queue.newScope()
+        val entered = CountDownLatch(1)
+        val gate = CountDownLatch(1)
+        val discarded = AtomicReference<Thread>()
+        val call = Call { queue.call(4, scope = endpoint, discard = { _: Int ->
+            assertEquals(4, queue.snapshot().bytes)
+            discarded.set(Thread.currentThread())
+        }) { entered.countDown(); gate.await(); CoreAttempt.Ready(42) } }
+        await { queue.snapshot().commands == 1 }
+        val pump = Thread { queue.runBatch(0) }.apply { isDaemon = true; start() }
+        try {
+            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            queue.cancel(endpoint, BackendFailure(BackendFailure.Kind.CANCELLED))
+            failure(BackendFailure.Kind.CANCELLED) { call.finish().getOrThrow() }
+            assertEquals(4, queue.snapshot().bytes)
+            failure(BackendFailure.Kind.RESOURCE_LIMIT) { queue.call<Int> { CoreAttempt.Ready(0) } }
+        } finally { gate.countDown(); pump.join(2000) }
+        assertFalse(pump.isAlive)
+        assertSame(pump, discarded.get())
+        assertEquals(0, queue.snapshot().commands)
+        assertEquals(0, queue.snapshot().bytes)
+    }
+
+    @Test(timeout = 10_000) fun endpointCancellationPreservesCommittedResultAndChecksQueueIdentity() {
+        val entered = CountDownLatch(1)
+        val gate = CountDownLatch(1)
+        val queue = CoreCommandQueue<Int>(MonotonicClock { now.get() }, { entered.countDown(); gate.await() })
+        val scope = queue.newScope()
+        val first = Call { queue.call(scope = scope) { CoreAttempt.Ready(42) } }
+        try {
+            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            queue.runBatch(0)
+            queue.cancel(scope, BackendFailure(BackendFailure.Kind.CANCELLED))
+        } finally { gate.countDown() }
+        assertEquals(42, first.finish().getOrThrow())
+        val foreign = queue().newScope()
+        assertTrue(runCatching { queue.cancel(foreign, BackendFailure(BackendFailure.Kind.CANCELLED)) }.exceptionOrNull() is IllegalArgumentException)
+        assertTrue(runCatching { queue.call(scope = foreign) { CoreAttempt.Ready(0) } }.exceptionOrNull() is IllegalArgumentException)
+        assertEquals(0, queue.snapshot().commands)
+    }
     private val now = AtomicLong(100)
     private fun queue(count: Int = 2, bytes: Int = 4) = CoreCommandQueue<Int>(
         MonotonicClock { now.get() }, {}, count, bytes,

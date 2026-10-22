@@ -15,6 +15,32 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class LwipPrototypeTest {
+    @Test fun cancellingOneEndpointLeavesTheRunnerAndOtherCommandsUsable() {
+        val core = Core(emptyList())
+        val prototype = LwipPrototype(Port()) { core.also { it.owner = Thread.currentThread() } }
+        val scope = prototype.newCommandScope()
+        val entered = CountDownLatch(1)
+        val result = AtomicReference<Throwable>()
+        prototype.start()
+        val waiter = Thread {
+            result.set(runCatching { prototype.executeCommand<Int>(scope = scope) {
+                entered.countDown(); CoreAttempt.Pending
+            } }.exceptionOrNull())
+        }.apply { isDaemon = true; start() }
+        try {
+            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            prototype.cancelCommands(scope)
+            waiter.join(2000)
+            assertFalse("endpoint cancellation must wake its pending caller", waiter.isAlive)
+            assertEquals(BackendFailure.Kind.CANCELLED, (result.get() as BackendFailure).kind)
+            assertEquals(42, prototype.executeCommand(deadlineMillis = prototype.commandClock.nowMillis() + 1000) {
+                CoreAttempt.Ready(42)
+            })
+            assertEquals(0, prototype.snapshot().commandCount)
+            assertNull(prototype.snapshot().failure)
+            assertEquals(LwipPrototype.State.LISTENING, prototype.snapshot().state)
+        } finally { prototype.close(); waiter.join(2000) }
+    }
     @Test fun commandsRunOnTheExistingCoreThread() {
         val core = Core(emptyList())
         val prototype = LwipPrototype(Port()) { core.also { it.owner = Thread.currentThread() } }

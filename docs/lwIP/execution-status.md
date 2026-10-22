@@ -705,3 +705,28 @@ debug.checkjni=1。四ABI/16KiB/NX/许可证和源码摘要检查通过；APK SH
 
 本通用队列依赖类型化调用者准确声明保留字节，不证明复制前内存准入。
 公共UdpEndpoint、端点级取消、TCP、会话选择及实际设备门槛仍待完成。
+
+### P3 按端点取消命令（2026-10-22）
+
+基于96efb9bd。CoreCommandQueue新增队列身份绑定的Scope；取消记录首个原因，
+原子取消该scope尚未提交的排队、Pending和执行中命令，拒绝后续入队。
+其他scope和无scope命令继续执行。取消不占命令槽，满队列时仍可进行。
+执行中任务被取消后，调用者可以退出；其预算保留到核心线程完成迟到结果清理。
+已提交但未领取的成功结果不被取消覆盖。队列不维护scope注册表。
+运行器提供独立scope创建/取消及executeCommand关联，不改变会话停止路径。
+
+先加入占位取消实现，端点取消隔离测试真实red，等待线程仍存活，exit1：
+TEMP/diplay-command-scope-red.log。实现后11项队列测试通过。
+运行器未转发取消时再次red：endpoint cancellation must wake its pending caller；
+diplay-command-scope-runner-red.log。接入后队列11项、运行器14项全部通过，
+零失败/错误/跳过：diplay-command-scope-runner-green.log。
+
+上述Scope只取消等待者，不关闭native端点。仍需关闭控制命令、类型化缓冲的
+复制前准入、公共UDP/TCP和会话集成。实际NCM/iPhone/ARM与G2/G3门槛不变。
+
+完整九项Android CI exit0，7m48s，250任务44执行：diplay-command-scope-ci.log。
+JUnit共3316项（shared1732/common1578/home6），零失败、错误、跳过。
+最终APK四ABI/16KiB/NX/许可证及源码摘要检查通过，SHA-256：
+0d7a5c359ee1af807a02d37c56d4065daf73961bfa946173ecd2af9f07804cb6。
+公开树检查通过。此批没有修改JNI/native，未重跑设备测试或宿主native套件；
+不将历史设备结果记录为本批新证据，也未取得独立评审完成结果。
