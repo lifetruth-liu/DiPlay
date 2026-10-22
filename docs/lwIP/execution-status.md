@@ -1702,3 +1702,26 @@ e2264833b46149a1d893acd98c3c3acc56035791b47a00f18923bd82ac4e3fc2。
 public tree及diff检查通过，测试用AVD已关闭。无参考NCM/iPhone/ARM设备证据。
 年龄检查只覆盖原生出队，已进入命令结果和媒体层的数据仍待完整暂停恢复验证；
 实际媒体策略、G0/G1与整体方案保持未完成，生产选择不变。
+
+### Native fuzz报告驱动与CPU计量组件
+
+按既有三target计划开始实现P6，新增lwip_fuzz_driver.py及CI中的驱动合同测试。
+互斥cpu-hours/runs/replay，记录固定seed、逐批命令、失败退出、日志/corpus摘要、
+binary/source SHA-256和可用Git身份；CPU用Linux wait4实测user+system，墙钟
+仅用于10秒分批。失败/短活动/runs/replay不会获得CPU预算通过标记。每活动独立
+报告目录，逐批原子写JSON，保留故障产物。详见fuzz-driver.md和实施计划。
+
+红测TEMP/diplay-fuzz-driver-red.log为缺少实现。Windows测试先发现测试断言
+写死POSIX路径，修正为平台Path；Linux端到端报告测试发现Windows管理的worktree
+不能由Linux Git解析，改为明确Git不可用并始终记录实际source/binary摘要，不假报
+commit或clean。Linux最终7/7，0.428s：/tmp/diplay-fuzz-driver-final-tests.log；
+Windows7项，5通过/2个Linux专用跳过，0.041s：TEMP/diplay-fuzz-driver-final-tests.log。
+真实子进程测试验证CPU及失败报告，假子进程不是lwIP fuzz流量。
+
+宿主Clang安装初遇APT snap hook及旧索引404；仅临时APT配置清除该安装hook，
+刷新索引后安装Clang10成功，未改仓库产品或系统长期APT配置。九项CI exit0、5s、
+12执行/238缓存：TEMP/diplay-fuzz-driver-ci.log；单元任务UP-TO-DATE，不记新执行。
+四ABI APK/源码检查通过：TEMP/diplay-fuzz-driver-apk.log，APK摘要仍
+e2264833b46149a1d893acd98c3c3acc56035791b47a00f18923bd82ac4e3fc2。
+public tree及diff检查通过。本轮无设备/native栈运行证据；真实三target、插桩、
+有效种子、fuzz_lwip.sh和实际活动仍待实现，累计24 CPU小时尚未开始计入，目标继续。
