@@ -1,7 +1,7 @@
 # P3 native TCP监听与接收
 
-`include/diplay_tcp.h`提供核心线程上的非阻塞listen、accept、read和本地abort关闭。
-这是一段TCP端点实现：尚无write、主动connect、shutdownOutput、优雅关闭策略、
+`include/diplay_tcp.h`提供核心线程上的非阻塞listen、accept、read、write、输出半关闭
+和本地abort关闭。这是一段TCP端点实现：尚无主动connect、完整优雅关闭策略、
 TCP JNI或公共TcpStream/SessionNetwork适配，不能作为完整TCP合同验收。
 现有生产后端与Java/JNI ABI未改变；新增C API及错误值是兼容的扩展。
 
@@ -23,6 +23,7 @@ tcp_recved。poll、计时器及普通接收不会恢复应用窗口。零容量
 缓存同样可读，之后PEER_RESET，不将reset伪装成EOF。PCB已由lwIP释放时不再调用它。
 
 本地关闭先失效handle、去除回调再abort；此处关闭原语用于即时取消和资源回收，
+仍由应用持有的连接适用；已进入TIME_WAIT的协议状态见下面的所有权说明。
 不实现公共TcpOptions默认的优雅关闭语义。关闭listener会清理未领取的已连接子项及
 SYN_RCVD半连接，已被应用领取的stream继续独立存在。未领取连接遇到RST立即移出
 backlog并释放其记录/pbuf。全core销毁后断言应用TCP计数和接管字节归零。
@@ -40,4 +41,27 @@ backlog并释放其记录/pbuf。全core销毁后断言应用TCP计数和接管�
 以上四项也在Android API28 x86_64独立native进程运行，不依赖root或USB。
 完整Linux ASan/UBSan/pool guards及Windows套件均包含这些场景。
 它们不是独立Linux内核peer对新TCP API的验证，也未覆盖全部窗口缩放/乱序矩阵、
-真实iPhone/NCM/ARM、公共并发/deadline合同及写入背压；G2/G3仍未通过。
+真实iPhone/NCM/ARM及公共并发/deadline合同；G2/G3仍未通过。
+
+write最多复制当前tcp_sndbuf允许的前缀，采用TCP_WRITE_FLAG_COPY；调用返回后不再
+借用原始payload。可写连接的0字节写入返回0，满缓冲或分配压力返回WOULD_BLOCK且未接收字节。
+一旦复制成功，暂时输出失败不再改报可重试的零字节写入；协议栈拥有这些字节并
+负责重传，避免上层重复提交。致命输出失败仍返回LINK_IO，此时copied可能非零，
+与“失败写入可能已发送前缀”的公共合同一致。32个TCP_SND_BUF之和编译期限制在
+2MiB发送负载预算内；固定池、heap和段元数据仍在原有总预算中，未新增大块TX缓存。
+
+shutdown_output只关闭发送方向，记录成功意图后幂等；禁止后续write，仍可接收。
+lwIP在TCP段池不足时可以延后FIN，接口不把它误报成尚未接受的重复关闭。
+ERR_CLSD是本地半关闭完成后的正常结束，映射EOF而不是reset。RST仍独立报告RESET。
+
+TIME_WAIT由协议栈在计时器/分配器中释放或复用，不保证err回调。每个core维护最多
+32个应用stream记录的有界链表，在raw操作返回的dp_leave边界，去掉TIME_WAIT PCB
+上的应用回调并清空应用记录的PCB引用；保留协议TIME_WAIT以正常确认重复FIN。
+应用的接管pbuf和generation记录独立保留到读取/关闭，不能把已经退休的PCB留给
+后续read/close。LAST_ACK完成由ERR_CLSD回调清空引用；销毁检查记录链表也归零。
+
+新增用例：tcp_write以40320字节验证短写、满缓冲、ACK恢复、完整顺序和调用后修改
+原数组；tcp_half_close覆盖本地先关、对端先关、同时FIN和RST，TIME_WAIT内重发FIN
+仍得到ACK，注入121秒后创建新连接，再读旧缓存和关闭旧handle，不影响新连接。
+tcp_write_io区分未就绪、已复制后的输出暂不可用与致命失败；tcp_shutdown_pressure
+用固定TCP段池耗尽验证延后FIN、资源恢复，以及压力期间取消。均不耗尽物理内存。

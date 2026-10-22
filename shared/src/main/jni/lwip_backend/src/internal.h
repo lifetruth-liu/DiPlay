@@ -7,6 +7,7 @@ struct dp_core {
     dp_endpoint_registry endpoints;
     uint32_t endpoint_allocated, endpoint_peak;
     struct dp_udp_pool *udp_pool;
+    struct tcp_stream *tcp_streams;
     uint32_t tcp_rx_bytes;
     uint16_t tcp_stream_count, tcp_listener_count;
     dp_config config;
@@ -20,4 +21,6 @@ struct dp_core {
 dp_result dp_netif_init(dp_core *core);
 dp_result dp_enter(dp_core *core, int allow_failed);
 dp_result dp_leave(dp_core *core);
+/* Drop application references to TIME_WAIT PCBs before timers/allocators can reclaim them. */
+void dp_tcp_reconcile(dp_core *core);
 #endif

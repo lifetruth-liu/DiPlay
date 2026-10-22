@@ -6,13 +6,14 @@
 #include <string.h>
 struct tcp_listener;
 struct tcp_stream {
+    struct tcp_stream *next;
     dp_core *owner;
     struct tcp_pcb *pcb;
     struct tcp_listener *listener;
     struct pbuf *rx;
     dp_tcp_info info;
     dp_result error;
-    int eof;
+    int eof, output_closed;
 };
 struct tcp_listener {
     dp_core *owner;
@@ -21,6 +22,22 @@ struct tcp_listener {
     unsigned count, backlog;
 };
 _Static_assert(MEMP_NUM_TCP_PCB * (uint32_t)TCP_WND <= DP_TCP_RX_BYTES, "TCP receive windows exceed RX budget");
+_Static_assert(MEMP_NUM_TCP_PCB * (uint32_t)TCP_SND_BUF <= DP_TCP_TX_BYTES, "TCP send buffers exceed TX budget");
+static void detach(struct tcp_pcb *pcb) {
+    tcp_arg(pcb, NULL); tcp_recv(pcb, NULL); tcp_err(pcb, NULL);
+    tcp_sent(pcb, NULL); tcp_poll(pcb, NULL, 0);
+}
+void dp_tcp_reconcile(dp_core *core) {
+    for (struct tcp_stream *stream = core->tcp_streams; stream; stream = stream->next) {
+        if (stream->pcb && stream->pcb->state == TIME_WAIT) {
+            /* Keep protocol TIME_WAIT behavior, but it must not retain an application pointer.
+             * lwIP frees/reuses these PCBs without calling the err callback. */
+            detach(stream->pcb);
+            stream->pcb = NULL;
+            stream->eof = 1;
+        }
+    }
+}
 static dp_result leave(dp_core *core, dp_result result) {
     dp_result status = dp_leave(core);
     return status == DP_OK ? result : status;
@@ -32,9 +49,12 @@ static void allocated(dp_core *core, size_t size) {
 static void release_stream(void *value) {
     struct tcp_stream *stream = value;
     dp_core *core = stream->owner;
+    struct tcp_stream **slot = &core->tcp_streams;
+    while (*slot && *slot != stream) slot = &(*slot)->next;
+    LWIP_ASSERT("TCP stream missing from owner list", *slot == stream);
+    *slot = stream->next;
     if (stream->pcb) {
-        tcp_arg(stream->pcb, NULL); tcp_recv(stream->pcb, NULL); tcp_err(stream->pcb, NULL);
-        tcp_sent(stream->pcb, NULL); tcp_poll(stream->pcb, NULL, 0); tcp_abort(stream->pcb);
+        detach(stream->pcb); tcp_abort(stream->pcb);
     }
     if (stream->rx) { core->tcp_rx_bytes -= stream->rx->tot_len; pbuf_free(stream->rx); }
     core->tcp_stream_count--;
@@ -43,8 +63,9 @@ static void release_stream(void *value) {
 }
 static void failed(void *arg, err_t error) {
     struct tcp_stream *stream = arg;
-    stream->pcb = NULL; /* lwIP already freed the PCB before this callback. */
-    stream->error = error == ERR_RST || error == ERR_ABRT || error == ERR_CLSD ? DP_PEER_RESET : DP_INTERNAL;
+    stream->pcb = NULL; /* Error/closed callbacks must not retain a retiring PCB. */
+    if (error == ERR_CLSD) { stream->error = DP_OK; stream->eof = 1; }
+    else stream->error = error == ERR_RST || error == ERR_ABRT ? DP_PEER_RESET : DP_INTERNAL;
     if (stream->listener) {
         struct tcp_listener *listener = stream->listener;
         for (unsigned i = 0; i < listener->count; ++i) if (listener->pending[i] == stream) {
@@ -79,6 +100,7 @@ static err_t accepted(void *arg, struct tcp_pcb *pcb, err_t error) {
     struct tcp_stream *stream = calloc(1, sizeof(*stream));
     if (!stream) { tcp_abort(pcb); return ERR_ABRT; }
     stream->owner = core; stream->pcb = pcb; stream->listener = listener;
+    stream->next = core->tcp_streams; core->tcp_streams = stream;
     memcpy(stream->info.local, ip_2_ip6(&pcb->local_ip)->addr, 16);
     memcpy(stream->info.remote, ip_2_ip6(&pcb->remote_ip)->addr, 16);
     stream->info.local_port = pcb->local_port; stream->info.remote_port = pcb->remote_port;
@@ -192,6 +214,47 @@ static dp_result close_handle(dp_core *core, uint64_t handle, dp_endpoint_kind k
     if (status != DP_OK) return status;
     status = dp_endpoint_remove(&core->endpoints, handle, kind);
     return leave(core, status);
+}
+dp_result dp_tcp_write(dp_core *core, uint64_t handle, const uint8_t *bytes, size_t length, size_t *copied) {
+    if (copied) *copied = 0;
+    if (!copied || (!bytes && length)) return DP_INVALID_ARGUMENT;
+    dp_result status = dp_enter(core, 0);
+    if (status != DP_OK) return status;
+    void *value = NULL;
+    status = dp_endpoint_lookup(&core->endpoints, handle, DP_ENDPOINT_TCP, &value);
+    if (status != DP_OK) return leave(core, status);
+    struct tcp_stream *stream = value;
+    if (stream->error != DP_OK) return leave(core, stream->error);
+    if (stream->output_closed || !stream->pcb) return leave(core, DP_PEER_CLOSED);
+    if (!length) return leave(core, DP_OK);
+    if (!core->link_ready) return leave(core, DP_WOULD_BLOCK);
+    uint16_t count = (uint16_t)LWIP_MIN(length, tcp_sndbuf(stream->pcb));
+    if (!count) { tcp_output(stream->pcb); return leave(core, DP_WOULD_BLOCK); }
+    err_t error = tcp_write(stream->pcb, bytes, count, TCP_WRITE_FLAG_COPY);
+    if (error == ERR_MEM || error == ERR_BUF) {
+        tcp_output(stream->pcb); return leave(core, DP_WOULD_BLOCK);
+    }
+    if (error != ERR_OK) return leave(core, error == ERR_CONN ? DP_PEER_CLOSED : DP_INTERNAL);
+    *copied = count;
+    /* Once copied, output backpressure cannot turn this prefix into a retryable write.
+     * lwIP owns it and retries transmission. Fatal core output failures still propagate. */
+    tcp_output(stream->pcb);
+    return leave(core, DP_OK);
+}
+dp_result dp_tcp_shutdown_output(dp_core *core, uint64_t handle) {
+    dp_result status = dp_enter(core, 0);
+    if (status != DP_OK) return status;
+    void *value = NULL;
+    status = dp_endpoint_lookup(&core->endpoints, handle, DP_ENDPOINT_TCP, &value);
+    if (status != DP_OK) return leave(core, status);
+    struct tcp_stream *stream = value;
+    if (stream->output_closed) return leave(core, DP_OK);
+    if (stream->error != DP_OK) return leave(core, stream->error);
+    if (!stream->pcb) return leave(core, DP_PEER_CLOSED);
+    err_t error = tcp_shutdown(stream->pcb, 0, 1);
+    if (error != ERR_OK) return leave(core, error == ERR_MEM ? DP_WOULD_BLOCK : DP_PEER_CLOSED);
+    stream->output_closed = 1;
+    return leave(core, DP_OK);
 }
 dp_result dp_tcp_close(dp_core *core, uint64_t handle) { return close_handle(core, handle, DP_ENDPOINT_TCP); }
 dp_result dp_tcp_listener_close(dp_core *core, uint64_t handle) { return close_handle(core, handle, DP_ENDPOINT_LISTENER); }

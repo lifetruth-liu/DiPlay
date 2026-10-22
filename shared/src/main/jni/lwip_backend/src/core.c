@@ -59,6 +59,7 @@ dp_result dp_enter(dp_core *core, int allow_failed) {
     return DP_OK;
 }
 dp_result dp_leave(dp_core *core) {
+    dp_tcp_reconcile(core);
     if (netif_ip6_addr_state(&core->netif, 0) == IP6_ADDR_DUPLICATED)
         core->failure = DP_ADDRESS_CONFLICT;
     if (core->pending_link_down) {
@@ -123,7 +124,7 @@ dp_result dp_core_destroy(dp_core **pointer) {
     netif_set_link_down(&core->netif);
     dp_endpoint_clear(&core->endpoints);
     LWIP_ASSERT("TCP endpoint ownership remains at destroy", core->tcp_rx_bytes == 0 &&
-                core->tcp_stream_count == 0 && core->tcp_listener_count == 0);
+                core->tcp_stream_count == 0 && core->tcp_listener_count == 0 && core->tcp_streams == NULL);
     /* One context owns every PCB. Remove callback reachability before abort/free. */
     while (tcp_active_pcbs || tcp_tw_pcbs || tcp_bound_pcbs) {
         struct tcp_pcb *pcb =

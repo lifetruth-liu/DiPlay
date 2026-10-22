@@ -869,3 +869,40 @@ JNI/UDP设备回归7/7，零失败、错误、跳过，10s：diplay-tcp-rx-conne
 abort原语不代表TcpOptions默认关闭语义完成。未取得完整公共两后端合同、真机
 NCM/iPhone/ARM或全部长稳/窗口矩阵证据，G2/G3仍未通过；整体目标保持未完成。
 未取得独立评审完成结果，不记作独立评审通过。
+
+### P3 native TCP短写与输出半关闭（2026-10-22）
+
+基于7ca7e41c。新增dp_tcp_write与dp_tcp_shutdown_output，复制可接受前缀、按ACK
+恢复发送空间。已复制后的输出暂不可用不再返回零字节WOULD_BLOCK，避免上层重复
+提交；致命LINK_IO可以伴随非零copied，与失败可能已发送前缀的合同一致。
+32个snd_buf总量编译期限制在2MiB发送负载预算内，未增加大块libc发送缓存。
+半关闭只禁止发送，保持接收，已接受的关闭意图幂等；段池不足时由栈延后FIN。
+
+补齐半关闭PCB所有权：ERR_CLSD表示正常结束，不作为reset。TIME_WAIT可能被计时器
+或分配器释放而无err回调，core维护最多32条应用记录的有界链表，dp_leave在raw
+操作返回后清除TIME_WAIT上的应用回调及记录引用，保留协议TIME_WAIT。应用接管的
+pbuf和generation记录独立存活，读取/关闭不会访问已回收或复用给新连接的PCB。
+core销毁同时检查记录链表归零；私有注册表的自定义TCP测试值不参与这条记录链。
+
+write/half-close占位实现真实red：新增两项失败、旧37项通过，exit8：
+WSL /tmp/diplay-tcp-write-red.log。实现后39项通过，再补暂不可用/致命输出和固定段池
+耗尽测试。最终Linux ASan/UBSan/pool guards及Windows MinGW各41/41：
+WSL /tmp/diplay-tcp-write-final-host.log、TEMP/diplay-tcp-write-final-windows.log。
+40320字节测试覆盖32768短写、缓冲满、ACK恢复、独立复制和完整顺序；FIN测试覆盖
+本地先关、远端先关、同时FIN及RST，重复FIN得到ACK，虚拟时间前进121秒后创建新
+连接，再读取旧缓存/关闭旧句柄且新连接仍正常。固定TCP_SEG池耗尽验证延后FIN及
+压力期间取消，不通过耗尽物理内存造故障。
+Android API28 x86_64独立frame_tests的tcp_write/tcp_half_close/tcp_write_io/
+tcp_shutdown_pressure全部PASS；构建日志TEMP/diplay-tcp-write-android-build.log。
+
+九项Android CI exit0，13s，250任务17执行：diplay-tcp-write-ci.log。
+JVM未修改，单元任务UP-TO-DATE；核对既有XML3345项（shared1761/common1578/home6）
+零失败/错误/跳过，不记为全部重新执行。JNI/UDP设备回归7/7，17s、exit0：
+diplay-tcp-write-connected.log，XML零失败/错误/跳过。自有模拟器debug.checkjni=1，
+测试进程4092日志确认already on；既有AVD路径告警未影响执行。
+四ABI均确认七项dp_tcp_*动态导出，APK四ABI/16KiB/NX/许可证与源摘要检查通过，
+SHA-256：1999d3ee65f7a75e86f1a3029536c503fb684977f9466816b23258d627d6d347。
+
+此批不等同于完整优雅close策略，仍缺主动connect、TCP JNI、公共TcpStream/
+SessionNetwork及完整两后端契约；独立内核peer、实际NCM/iPhone/ARM与长稳门槛
+仍未完成，G2/G3未通过。未取得独立评审完成结果，不记作独立评审通过。

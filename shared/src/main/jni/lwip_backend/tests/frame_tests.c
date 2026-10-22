@@ -6,6 +6,7 @@
 #define LWIP_DONT_PROVIDE_BYTEORDER_FUNCTIONS
 #include "lwip/nd6.h"
 #include "lwip/netif.h"
+#include "lwip/memp.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -436,6 +437,173 @@ static void test_tcp_endpoint_lifecycle(void) {
         CHECK(dp_tcp_read(f.core, stream, bytes, 1, &copied) == DP_WOULD_BLOCK);
         CHECK(dp_tcp_close(f.core, stream) == DP_OK);
         CHECK(dp_core_get_stats(f.core, &stats) == DP_OK && stats.heap_used == 0 && stats.pbuf_used == 0 && stats.tcp_active == 0);
+        close_core(&f);
+    }
+}
+static void test_tcp_write(void) {
+    struct fixture f; ready_core(&f);
+    uint64_t listener; uint16_t port;
+    CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK);
+    uint32_t server = establish(&f, 50000);
+    uint64_t stream = accept_stream(&f, listener);
+    enum { TOTAL = 40320 };
+    uint8_t source[TOTAL], expected[TOTAL], seen[TOTAL];
+    for (size_t i = 0; i < TOTAL; ++i) source[i] = expected[i] = (uint8_t)(i ^ (i >> 8));
+    memset(seen, 0, sizeof(seen));
+    size_t copied = 99;
+    CHECK(dp_tcp_write(f.core, stream, NULL, 0, &copied) == DP_OK && copied == 0);
+    CHECK(dp_tcp_write(f.core, listener, source, 1, &copied) == DP_INVALID_ARGUMENT && copied == 0);
+    CHECK(dp_tcp_write(f.core, stream, NULL, 1, &copied) == DP_INVALID_ARGUMENT && copied == 0);
+    CHECK(dp_tcp_write(f.core, stream, source, TOTAL, &copied) == DP_OK && copied == 32768);
+    size_t accepted_bytes = copied;
+    memset(source, 0, copied); /* Already accepted bytes must no longer borrow this buffer. */
+    CHECK(dp_tcp_write(f.core, stream, source, 1, &copied) == DP_WOULD_BLOCK && copied == 0);
+    size_t received_bytes = 0;
+    for (unsigned attempt = 0; received_bytes < TOTAL && attempt < 64; ++attempt) {
+        collect_echo(&f, server, expected, seen, TOTAL);
+        while (received_bytes < TOTAL && seen[received_bytes]) received_bytes++;
+        send_tcp(&f, 16, 1001, server + 1 + (uint32_t)received_bytes, "");
+        if (accepted_bytes < TOTAL) {
+            dp_result result = dp_tcp_write(f.core, stream, source + accepted_bytes, TOTAL - accepted_bytes, &copied);
+            CHECK(result == DP_OK || (result == DP_WOULD_BLOCK && copied == 0));
+            accepted_bytes += copied;
+        }
+        advance(&f, 250);
+    }
+    CHECK(accepted_bytes == TOTAL && received_bytes == TOTAL);
+    f.count = 0;
+    CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+    CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+    dp_stats stats; CHECK(dp_core_get_stats(f.core, &stats) == DP_OK && stats.heap_used == 0 && stats.pbuf_used == 0);
+    close_core(&f);
+}
+static void test_tcp_half_close(void) {
+    for (unsigned mode = 0; mode < 4; ++mode) {
+        struct fixture f; ready_core(&f);
+        uint64_t listener; uint16_t port;
+        CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK);
+        uint32_t server = establish(&f, 50000);
+        uint64_t stream = accept_stream(&f, listener);
+        uint8_t target[8]; size_t copied;
+        uint32_t fin_ack = server + 2;
+        if (mode == 1) {
+            send_tcp(&f, 25, 1001, server + 1, "after");
+            CHECK(dp_tcp_write(f.core, stream, (const uint8_t *)"R", 1, &copied) == DP_OK && copied == 1);
+            fin_ack++;
+        }
+        f.count = 0;
+        CHECK(dp_tcp_shutdown_output(f.core, stream) == DP_OK);
+        size_t frames = f.count;
+        CHECK(dp_tcp_shutdown_output(f.core, stream) == DP_OK && f.count == frames);
+        int fin = 0;
+        for (size_t i = 0; i < f.count; ++i) if (f.frames[i].bytes[20] == 6 && (f.frames[i].bytes[67] & 1)) {
+            CHECK(u32(f.frames[i].bytes + 58) == fin_ack - 1); fin = 1;
+        }
+        CHECK(fin);
+        CHECK(dp_tcp_write(f.core, stream, (const uint8_t *)"x", 1, &copied) == DP_PEER_CLOSED && copied == 0);
+        if (mode == 3) {
+            send_tcp(&f, 20, 1001, fin_ack, "");
+            CHECK(dp_tcp_read(f.core, stream, target, 1, &copied) == DP_PEER_RESET);
+            CHECK(dp_tcp_write(f.core, stream, (const uint8_t *)"x", 1, &copied) == DP_PEER_RESET && copied == 0);
+            CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+            CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+            close_core(&f);
+            continue;
+        }
+        if (mode == 0) {
+            send_tcp(&f, 16, 1001, fin_ack, "");
+            send_tcp(&f, 25, 1001, fin_ack, "after");
+        } else if (mode == 2) {
+            send_tcp(&f, 25, 1001, server + 1, "after"); /* FIN arrives before acknowledgment of our FIN. */
+            send_tcp(&f, 16, 1007, fin_ack, "");
+        } else send_tcp(&f, 16, 1007, fin_ack, "");
+        if (mode != 1) {
+            f.count = 0;
+            send_tcp(&f, 17, 1006, fin_ack, ""); /* TIME_WAIT still acknowledges a duplicate FIN. */
+            struct frame *ack = find(&f, 6, -1, 0);
+            CHECK(ack && (ack->bytes[67] & 0x14) == 0x10 && u32(ack->bytes + 62) == 1007);
+        }
+        f.count = 0;
+        advance(&f, 121000); /* Expire TIME_WAIT without dereferencing its former PCB. */
+        establish(&f, 50001);
+        uint64_t fresh = accept_stream(&f, listener);
+        CHECK(dp_tcp_read(f.core, stream, target, sizeof(target), &copied) == DP_OK && copied == 5 && !memcmp(target, "after", 5));
+        CHECK(dp_tcp_read(f.core, stream, target, 1, &copied) == DP_PEER_CLOSED && copied == 0);
+        CHECK(dp_tcp_shutdown_output(f.core, stream) == DP_OK);
+        CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+        CHECK(dp_tcp_read(f.core, fresh, target, 1, &copied) == DP_WOULD_BLOCK);
+        f.count = 0;
+        CHECK(dp_tcp_close(f.core, fresh) == DP_OK);
+        CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+        dp_stats stats; CHECK(dp_core_get_stats(f.core, &stats) == DP_OK && stats.heap_used == 0 && stats.pbuf_used == 0);
+        close_core(&f);
+    }
+}
+static void test_tcp_write_io(void) {
+    struct fixture f; ready_core(&f);
+    uint64_t listener; uint16_t port;
+    CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK);
+    uint32_t server = establish(&f, 50000);
+    uint64_t stream = accept_stream(&f, listener);
+    size_t copied;
+    CHECK(dp_core_set_link_ready(f.core, 0) == DP_OK);
+    CHECK(dp_tcp_write(f.core, stream, (const uint8_t *)"x", 1, &copied) == DP_WOULD_BLOCK && copied == 0);
+    CHECK(dp_core_set_link_ready(f.core, 1) == DP_OK);
+    f.count = 0; f.ready = 0;
+    uint8_t source[4] = {'h', 'e', 'l', 'd'}, seen[4] = {0};
+    CHECK(dp_tcp_write(f.core, stream, source, sizeof(source), &copied) == DP_OK && copied == sizeof(source));
+    memset(source, 0, sizeof(source));
+    f.ready = 1;
+    CHECK(dp_core_set_link_ready(f.core, 1) == DP_OK);
+    advance(&f, 5000);
+    collect_echo(&f, server, (const uint8_t *)"held", seen, sizeof(seen));
+    CHECK(seen[0] && seen[1] && seen[2] && seen[3]);
+    send_tcp(&f, 16, 1001, server + 5, "");
+    f.ready = -1;
+    CHECK(dp_tcp_write(f.core, stream, (const uint8_t *)"bad", 3, &copied) == DP_LINK_IO && copied == 3);
+    close_core(&f); /* Fatal output failure does not strand copied data or endpoint records. */
+}
+struct segment_pressure { void *blocks[512]; size_t count; int release; };
+static int pressure_segments(void *arg) {
+    struct segment_pressure *pressure = arg;
+    if (pressure->release) {
+        while (pressure->count) memp_free(MEMP_TCP_SEG, pressure->blocks[--pressure->count]);
+    } else {
+        void *block;
+        while ((block = memp_malloc(MEMP_TCP_SEG)) != NULL) {
+            CHECK(pressure->count < 512);
+            pressure->blocks[pressure->count++] = block;
+        }
+    }
+    return 0;
+}
+static void test_tcp_shutdown_pressure(void) {
+    for (unsigned cancel = 0; cancel < 2; ++cancel) {
+        struct fixture f; ready_core(&f);
+        uint64_t listener; uint16_t port;
+        CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK);
+        uint32_t server = establish(&f, 50000);
+        uint64_t stream = accept_stream(&f, listener);
+        struct segment_pressure pressure = {0};
+        CHECK(dp_core_execute(f.core, pressure_segments, &pressure) == DP_OK && pressure.count > 0);
+        f.count = 0;
+        CHECK(dp_tcp_shutdown_output(f.core, stream) == DP_OK && f.count == 0);
+        size_t copied;
+        CHECK(dp_tcp_write(f.core, stream, (const uint8_t *)"x", 1, &copied) == DP_PEER_CLOSED && copied == 0);
+        if (cancel) CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+        pressure.release = 1;
+        CHECK(dp_core_execute(f.core, pressure_segments, &pressure) == DP_OK && pressure.count == 0);
+        if (!cancel) {
+            advance(&f, 500);
+            struct frame *fin = find(&f, 6, -1, 0);
+            CHECK(fin && (fin->bytes[67] & 1));
+            send_tcp(&f, 17, 1001, server + 2, "");
+            uint8_t byte;
+            CHECK(dp_tcp_read(f.core, stream, &byte, 1, &copied) == DP_PEER_CLOSED);
+            CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+        }
+        f.count = 0;
+        CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
         close_core(&f);
     }
 }
@@ -919,6 +1087,14 @@ int main(int argc, char **argv) {
         test_tcp_endpoint_limits();
     else if (!strcmp(argv[1], "tcp_endpoint_lifecycle"))
         test_tcp_endpoint_lifecycle();
+    else if (!strcmp(argv[1], "tcp_write"))
+        test_tcp_write();
+    else if (!strcmp(argv[1], "tcp_half_close"))
+        test_tcp_half_close();
+    else if (!strcmp(argv[1], "tcp_write_io"))
+        test_tcp_write_io();
+    else if (!strcmp(argv[1], "tcp_shutdown_pressure"))
+        test_tcp_shutdown_pressure();
     else if (!strcmp(argv[1], "udp"))
         test_udp();
     else if (!strcmp(argv[1], "lifecycle"))
