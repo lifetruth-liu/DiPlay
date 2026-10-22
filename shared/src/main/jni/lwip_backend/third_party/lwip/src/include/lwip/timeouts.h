@@ -101,6 +101,9 @@ struct sys_timeo {
 };
 
 void sys_timeouts_init(void);
+#if LWIP_TCP
+err_t tcp_timer_ensure(void);
+#endif
 
 #if LWIP_DEBUG_TIMERNAMES
 void sys_timeout_debug(u32_t msecs, sys_timeout_handler handler, void *arg, const char* handler_name);

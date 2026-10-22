@@ -29,12 +29,18 @@ BACKPORTS = {
     ),
 }
 LOCAL_POST_IMAGES = {
+    "src/core/timeouts.c": ("a5e36f81cab4fcd17d870d286643bfa0787e40cf6a714e79c9a6b97f519a597b",
+                            "3267e731afbadec894ccccc4c52322503e5a30553fb33bbcc7efd3029a3f4d48"),
+    "src/include/lwip/timeouts.h": ("7bcd208f7250e10539cdb62c599d48444bc6787b5f4bea46bf571a3483aab0eb",
+                                   "c6d65a3f62e387a310fcb36945ed5f8498b4019656c5023100ba04470e1d7691"),
     "src/core/ipv6/ip6.c": ("b46f5bcc0d086552502bd0db36198a9a804f22efcb97683bc968e20099025dec",
                            "38bf7badfed81fdd58543f18c344966214aaa4235fed1d8d72a0f34019d8ce90"),
     "src/include/lwip/ip6_frag.h": ("0dcea4a7600b856877e7fb4943b20690aa9e2b69414b4b2273c7e9e0a25f74a3",
                                   "b38cc1cc2df8b90d77671326a24b58178f2183cf2b623103eb5b7ac318efb178"),
 }
 LOCAL_FIXES = {"src/core/tcp_in.c": "tcp-timestamp-unsigned-shift",
+               "src/core/timeouts.c": "tcp-timer-allocation-failure",
+               "src/include/lwip/timeouts.h": "tcp-timer-allocation-failure",
                **{name: "ipv6-separate-header-fragmentation" for name in
                   ["src/core/ipv6/ip6.c", "src/core/ipv6/ip6_frag.c", "src/include/lwip/ip6_frag.h"]}}
 ABIS = {"armeabi-v7a": (1, 40), "arm64-v8a": (2, 183), "x86": (1, 3), "x86_64": (2, 62)}

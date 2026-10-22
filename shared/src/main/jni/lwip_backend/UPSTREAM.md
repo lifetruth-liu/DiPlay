@@ -34,7 +34,7 @@ select this backend yet.
   upstream review head, configuration applicability and open work.
 
 Build inputs are vendored under `third_party/lwip/`: the complete `src/` tree and
-COPYING, README, FILES, CHANGELOG and UPGRADING (314 files, five exact post-images). Builds do
+COPYING, README, FILES, CHANGELOG and UPGRADING (314 files, seven exact post-images). Builds do
 not download dependencies. `UPSTREAM-SHA256.txt` records every file; its SHA-256 is
 `7882cdb8bc927ecd47a5b1e06b99f3190f245998e937fd0d043380c5e4a6f8c0`.
 `python scripts/check_lwip_native.py` checks the original manifest, exact inventory

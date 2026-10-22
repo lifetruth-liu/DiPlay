@@ -60,6 +60,11 @@ dp_result dp_enter(dp_core *core, int allow_failed) {
 }
 dp_result dp_leave(dp_core *core) {
     dp_tcp_reconcile(core);
+    /* A TCP PCB must never outlive a failed essential timer allocation unnoticed.
+     * Retry a transient failure once at the owner boundary; persistent failure
+     * terminates this context through the normal destruction barrier. */
+    if (core->failure == DP_OK && tcp_timer_ensure() != ERR_OK)
+        core->failure = DP_RESOURCE_LIMIT;
     if (netif_ip6_addr_state(&core->netif, 0) == IP6_ADDR_DUPLICATED)
         core->failure = DP_ADDRESS_CONFLICT;
     if (core->pending_link_down) {

@@ -134,6 +134,7 @@ sys_timeouts_get_next_timeout(void)
 #if LWIP_TCP
 /** global variable that shows if the tcp timer is currently scheduled or not */
 static int tcpip_tcp_timer_active;
+static err_t tcp_timer_schedule_try(void);
 
 /**
  * Timer callback function that calls tcp_tmr() and reschedules itself.
@@ -147,14 +148,8 @@ tcpip_tcp_timer(void *arg)
 
   /* call TCP timer handler */
   tcp_tmr();
-  /* timer still needed? */
-  if (tcp_active_pcbs || tcp_tw_pcbs) {
-    /* restart timer */
-    sys_timeout(TCP_TMR_INTERVAL, tcpip_tcp_timer, NULL);
-  } else {
-    /* disable timer */
-    tcpip_tcp_timer_active = 0;
-  }
+  tcpip_tcp_timer_active = 0;
+  (void)tcp_timer_ensure();
 }
 
 /**
@@ -162,33 +157,39 @@ tcpip_tcp_timer(void *arg)
  * the reason is to have the TCP timer only running when
  * there are active (or time-wait) PCBs.
  */
+err_t
+tcp_timer_ensure(void)
+{
+  LWIP_ASSERT_CORE_LOCKED();
+  if (!tcpip_tcp_timer_active && (tcp_active_pcbs || tcp_tw_pcbs)) {
+    err_t result = tcp_timer_schedule_try();
+    if (result != ERR_OK) {
+      return result;
+    }
+    tcpip_tcp_timer_active = 1;
+  }
+  return ERR_OK;
+}
+
 void
 tcp_timer_needed(void)
 {
-  LWIP_ASSERT_CORE_LOCKED();
-
-  /* timer is off but needed again? */
-  if (!tcpip_tcp_timer_active && (tcp_active_pcbs || tcp_tw_pcbs)) {
-    /* enable and start timer */
-    tcpip_tcp_timer_active = 1;
-    sys_timeout(TCP_TMR_INTERVAL, tcpip_tcp_timer, NULL);
-  }
+  (void)tcp_timer_ensure();
 }
 #endif /* LWIP_TCP */
 
-static void
+static err_t
 #if LWIP_DEBUG_TIMERNAMES
-sys_timeout_abs(u32_t abs_time, sys_timeout_handler handler, void *arg, const char *handler_name)
+sys_timeout_abs_try(u32_t abs_time, sys_timeout_handler handler, void *arg, const char *handler_name)
 #else /* LWIP_DEBUG_TIMERNAMES */
-sys_timeout_abs(u32_t abs_time, sys_timeout_handler handler, void *arg)
+sys_timeout_abs_try(u32_t abs_time, sys_timeout_handler handler, void *arg)
 #endif
 {
   struct sys_timeo *timeout, *t;
 
   timeout = (struct sys_timeo *)memp_malloc(MEMP_SYS_TIMEOUT);
   if (timeout == NULL) {
-    LWIP_ASSERT("sys_timeout: timeout != NULL, pool MEMP_SYS_TIMEOUT is empty", timeout != NULL);
-    return;
+    return ERR_MEM;
   }
 
   timeout->next = NULL;
@@ -204,7 +205,7 @@ sys_timeout_abs(u32_t abs_time, sys_timeout_handler handler, void *arg)
 
   if (next_timeout == NULL) {
     next_timeout = timeout;
-    return;
+    return ERR_OK;
   }
   if (TIME_LESS_THAN(timeout->time, next_timeout->time)) {
     timeout->next = next_timeout;
@@ -218,7 +219,36 @@ sys_timeout_abs(u32_t abs_time, sys_timeout_handler handler, void *arg)
       }
     }
   }
+  return ERR_OK;
 }
+
+static void
+#if LWIP_DEBUG_TIMERNAMES
+sys_timeout_abs(u32_t abs_time, sys_timeout_handler handler, void *arg, const char *handler_name)
+#else
+sys_timeout_abs(u32_t abs_time, sys_timeout_handler handler, void *arg)
+#endif
+{
+#if LWIP_DEBUG_TIMERNAMES
+  err_t result = sys_timeout_abs_try(abs_time, handler, arg, handler_name);
+#else
+  err_t result = sys_timeout_abs_try(abs_time, handler, arg);
+#endif
+  LWIP_ASSERT("sys_timeout: timeout != NULL, pool MEMP_SYS_TIMEOUT is empty", result == ERR_OK);
+  LWIP_UNUSED_ARG(result);
+}
+
+#if LWIP_TCP
+static err_t
+tcp_timer_schedule_try(void)
+{
+#if LWIP_DEBUG_TIMERNAMES
+  return sys_timeout_abs_try(sys_now() + TCP_TMR_INTERVAL, tcpip_tcp_timer, NULL, "tcpip_tcp_timer");
+#else
+  return sys_timeout_abs_try(sys_now() + TCP_TMR_INTERVAL, tcpip_tcp_timer, NULL);
+#endif
+}
+#endif
 
 /**
  * Timer callback function that calls cyclic->handler() and reschedules itself.

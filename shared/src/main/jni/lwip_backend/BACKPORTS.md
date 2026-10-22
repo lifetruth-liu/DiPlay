@@ -161,3 +161,23 @@ accepting exactly the reviewed post-image. No other vendor modification is allow
 
 NDP directed coverage and broader protocol audit findings remain
 open; it does not establish full upstream security approval or device gates.
+
+## Local TCP timer allocation recovery
+
+This is a local port correction, not an upstream backport or security approval.
+SYN allocation injection reproduced the `MEMP_SYS_TIMEOUT` exhaustion assertion.
+TCP timer scheduling now returns allocation failure internally and marks the timer
+active only after successful insertion. The owner boundary retries scheduling;
+persistent failure becomes sticky `DP_RESOURCE_LIMIT`, using normal owner teardown.
+The timer callback uses the same path when rescheduling. Other timeout callers keep
+their original assertion behavior; cold/non-TCP timeout exhaustion remains open.
+
+Exact SHA-256 post-images:
+
+- `src/core/timeouts.c`: `3267e731afbadec894ccccc4c52322503e5a30553fb33bbcc7efd3029a3f4d48`.
+- `src/include/lwip/timeouts.h`: `c6d65a3f62e387a310fcb36945ed5f8498b4019656c5023100ba04470e1d7691`.
+
+Tests inject transient/persistent SYN failures and replay the actual scheduled TCP
+timer handler under allocation failure. They check endpoint recovery or explicit
+core failure, teardown, reconstruction and heap/all-pool baselines. Handler replay
+isolates allocation behavior and does not establish timer scheduling precision.

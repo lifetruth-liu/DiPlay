@@ -114,3 +114,8 @@ IPv4、DHCP、DNS、socket/netconn等配置关闭。下表只是这些问题的�
 含完整UDP头的负例保持Fragment后非法HBH拒绝。当前覆盖40个长度/前置头/顺序
 向量、4个非法HBH顺序向量及内核IPV6_HOPOPTS互通；没有覆盖所有未知选项动作、
 路由头类型、畸形长度或分配故障，不将定向通过提升为完整安全结论。
+
+TCP SYN分配故障注入又复现了timeout pool分配断言。新增本地TCP定时器可失败调度，
+owner边界恢复或明确失败，精确post-image记录于BACKPORTS.md。SYN及实际handler
+重排故障测试覆盖该分支；非TCP/冷启动定时器及完整审计仍未通过。此修正没有
+上游提交身份或CVE认定，也不改变G0/G1和生产选择门槛。

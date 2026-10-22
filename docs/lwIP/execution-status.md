@@ -1550,3 +1550,25 @@ Linux ASan/UBSan/池检查及默认LSan56/56、9.46s，单项0.09s：
 TEMP/diplay-accept-allocation-final-ci.log；三模块单元任务UP-TO-DATE，不记重新执行。
 public tree及staged diff检查通过。本轮仅宿主测试和文档，无新JNI/设备证据；SYN/
 定时器分配、其他TCP/接收/并发故障、独立安全审查、峰值与真机/长稳仍缺，目标继续。
+
+### TCP定时器分配失败修复
+
+SYN逐点注入在第3处分配复现timeout pool耗尽断言：TEMP/
+diplay-syn-allocation-red.log。新增可失败的TCP定时器插入，成功后才置active；
+owner边界重试，持续失败报告核心RESOURCE_LIMIT并通过现有销毁屏障清理。
+TCP回调重排使用同一路径，其他timeout调用仍保留原行为，未改变池预算或ABI。
+SYN正常路径5点，分别瞬时/持续注入；另重放实际TCP timer handler定向覆盖
+瞬时恢复与持续核心失败，均检查销毁、重建及heap/所有pool基线。重放不证明时序。
+
+最终Windows58/58、2.81s：TEMP/diplay-timer-final-host.log；Linux ASan/UBSan、
+池检查及默认LSan58/58、9.85s：/tmp/diplay-timer-final-sanitize.log。
+LWIP_NOASSERT变体新增两例通过：TEMP/diplay-timer-noassert-final.log；该变体
+保留既有-Wno-error=unused-parameter配置，不声称无警告严格构建。
+九项CI通过，12s、17执行/233缓存：TEMP/diplay-timer-final-ci.log。
+实际Android JNI36/36通过，49s：TEMP/diplay-timer-final-jni.log。
+四ABI APK及源码精确摘要校验、public tree检查通过，APK SHA-256：
+af4ff3fc3175cfb3cc63a766a70f26242fbcd329ad71c782fc07f468155425e9。
+
+本轮未重跑内核互通，不把既有内核结果算作当前修复的新证据。冷启动/非TCP定时器、
+其他分配/并发路径、峰值、独立安全审查和实际NCM/iPhone/ARM仍待覆盖；用户确认
+目前没有参考设备或报告，G0/G1未通过，生产选择保持原状，整体目标继续。
