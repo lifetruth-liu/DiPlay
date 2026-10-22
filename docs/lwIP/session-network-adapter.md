@@ -53,7 +53,7 @@ SessionNetworkDeviceContractTest在Android上对系统socket和真实JNI会话�
 捕获真实输出帧验证端口、IPv6地址、负载及UDP校验和；不将此夹具当作独立kernel互通。
 
 独立kernel peer对原生端点API的验证见kernel-endpoint-peer.md。尚未完成全部两后端
-参数化合同（尤其共同TCP背压/写阻塞取消、UDP分片/上限），所有分配/引用/竞态故障矩阵、
+参数化合同（尤其共同TCP十秒暂停后恢复/预算、UDP分片/上限），所有分配/引用/竞态故障矩阵、
 真实NCM/iPhone/ARM及性能长稳验收。此层完成接口组合，不代表全部
 会话行为、业务集成或G2/G3已经验收。
 
@@ -81,3 +81,10 @@ peer收到FIN才回复，避免只用线程启动信号充当读操作已执行�
 时一次注入NS，忽略运行时NDP请求。peer改为对目标为peerIp的NS发送带正确hop limit/
 target/option/checksum的NA，并移除一次性预热注入。两轮诊断及最终32项中JNI握手
 均通过；此修正补齐夹具真实协议缺口，不宣称有限复跑已证明所有历史超时根因或长稳。
+
+共同写阻塞取消合同使用重复32KiB缓冲，最多1024次write；系统peer暂停读取并设置
+接收缓冲4096，JNI peer在SYN/ACK及后续ACK通告零窗口、不消耗数据。观察写完成计数
+至少500ms不变、写线程仍在后端write且未完成，再断言重叠write为RESOURCE_LIMIT，
+close两次后原writer三秒内以CANCELLED结束，源缓冲不变。测试夹具队列保持有界，
+并主动释放暂停的系统peer。最终Android34/34；此合同不证明十秒暂停后的恢复完整性
+或整个后端内存预算，T05仍未完成。

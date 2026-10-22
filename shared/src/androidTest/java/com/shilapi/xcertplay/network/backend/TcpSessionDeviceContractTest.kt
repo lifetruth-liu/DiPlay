@@ -14,6 +14,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import org.junit.Assert.*
 import org.junit.Test
@@ -22,6 +23,50 @@ import org.junit.runners.Parameterized
 
 @RunWith(Parameterized::class)
 class TcpSessionDeviceContractTest(private val backend: String) {
+    @Test fun closeCancelsBackpressuredWriterAndRejectsOverlappingWrite() {
+        peer(stallWrites = true).use { peer ->
+            val executor = Executors.newSingleThreadExecutor()
+            val completed = AtomicInteger()
+            val writer = AtomicReference<Thread>()
+            val started = CountDownLatch(1)
+            val chunk = ByteArray(32768) { 3 }
+            try {
+                val result = executor.submit<BackendFailure.Kind?> {
+                    writer.set(Thread.currentThread()); started.countDown()
+                    try {
+                        repeat(1024) {
+                            peer.stream.write(chunk, deadlineMillis = peer.network.clock.nowMillis() + 30000)
+                            completed.incrementAndGet()
+                        }
+                        null
+                    } catch (error: BackendFailure) { error.kind }
+                }
+                assertTrue(started.await(2, TimeUnit.SECONDS))
+                val end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+                var previous = -1; var stableSince = System.nanoTime(); var stalled = false
+                while (System.nanoTime() < end && !result.isDone) {
+                    val count = completed.get()
+                    if (count != previous) { previous = count; stableSince = System.nanoTime() }
+                    val insideWrite = writer.get().stackTrace.any {
+                        it.methodName == "write" && (it.className.contains("SystemSessionNetwork") || it.className.contains("LwipTcpStream"))
+                    }
+                    if (insideWrite && System.nanoTime() - stableSince >= TimeUnit.MILLISECONDS.toNanos(500)) {
+                        stalled = true; break
+                    }
+                    Thread.sleep(10)
+                }
+                assertTrue("Writer did not remain backpressured before the deadline; completed=${completed.get()}", stalled)
+                assertFalse(result.isDone)
+                assertTrue(completed.get() < 1024)
+                assertEquals(BackendFailure.Kind.RESOURCE_LIMIT,
+                    assertThrows(BackendFailure::class.java) { peer.stream.write(byteArrayOf(9)) }.kind)
+                peer.stream.close(); peer.stream.close()
+                assertEquals(BackendFailure.Kind.CANCELLED, result.get(3, TimeUnit.SECONDS))
+                assertArrayEquals(ByteArray(32768) { 3 }, chunk)
+            } finally { peer.stream.close(); executor.shutdownNow() }
+        }
+    }
+
     @Test fun peerResetIsDistinctFromEofTimeoutAndLocalCancellation() {
         peer(resetAfterData = true).use { peer ->
             val deadline = peer.network.clock.nowMillis() + 3000
@@ -160,17 +205,27 @@ class TcpSessionDeviceContractTest(private val backend: String) {
         fun verify()
     }
 
-    private fun peer(resetAfterData: Boolean = false): Peer =
-        if (backend == "system") systemPeer(resetAfterData) else nativePeer(resetAfterData)
+    private fun peer(resetAfterData: Boolean = false, stallWrites: Boolean = false): Peer =
+        if (backend == "system") systemPeer(resetAfterData, stallWrites) else nativePeer(resetAfterData, stallWrites)
 
-    private fun systemPeer(resetAfterData: Boolean): Peer {
+    private fun systemPeer(resetAfterData: Boolean, stallWrites: Boolean): Peer {
         val server = ServerSocket(0, 1, InetAddress.getByName("::1"))
+        if (stallWrites) server.receiveBufferSize = 4096
         val network = SystemSessionNetwork("tcp-contract")
         val error = AtomicReference<Throwable>()
+        val release = CountDownLatch(1)
+        val paused = CountDownLatch(1)
+        val accepted = AtomicReference<java.net.Socket>()
         val worker = Thread {
             try {
                 server.accept().use { socket ->
+                    accepted.set(socket)
                     socket.soTimeout = 30000
+                    if (stallWrites) {
+                        paused.countDown()
+                        check(release.await(30, TimeUnit.SECONDS))
+                        return@use
+                    }
                     if (resetAfterData) {
                         check(socket.getInputStream().read() == 1)
                         socket.setSoLinger(true, 0)
@@ -191,17 +246,21 @@ class TcpSessionDeviceContractTest(private val backend: String) {
         }.apply { start() }
         try {
             val stream = network.connect(NetworkEndpoint(InetAddress.getByName("::1").address, server.localPort, network.linkId), network.clock.nowMillis() + 3000)
+            if (stallWrites) check(paused.await(2, TimeUnit.SECONDS))
             return object : Peer {
                 override val network = network
                 override val stream = stream
                 override fun verify() { worker.join(3000); assertFalse(worker.isAlive); error.get()?.let { throw AssertionError(it) } }
-                override fun close() { try { network.close(); server.close() } finally { worker.join(3000) } }
+                override fun close() {
+                    try { network.close(); server.close(); accepted.get()?.close() }
+                    finally { release.countDown(); worker.join(3000) }
+                }
             }
-        } catch (failure: Throwable) { network.close(); server.close(); worker.join(3000); throw failure }
+        } catch (failure: Throwable) { network.close(); server.close(); accepted.get()?.close(); release.countDown(); worker.join(3000); throw failure }
     }
 
-    private fun nativePeer(resetAfterData: Boolean): Peer {
-        val wire = TcpWirePeer(resetAfterData)
+    private fun nativePeer(resetAfterData: Boolean, stallWrites: Boolean): Peer {
+        val wire = TcpWirePeer(resetAfterData, stallWrites)
         val base = coreCommandClock()
         val offset = AtomicLong()
         val clock = MonotonicClock { base.nowMillis() + offset.get() }
@@ -226,7 +285,7 @@ class TcpSessionDeviceContractTest(private val backend: String) {
     }
 
     /** Test-only, stop-and-wait echo after FIN. No native API or fake core calls. */
-    private class TcpWirePeer(private val resetAfterData: Boolean) : EthernetFramePort {
+    private class TcpWirePeer(private val resetAfterData: Boolean, private val stallWrites: Boolean) : EthernetFramePort {
         val mac = byteArrayOf(2, 0, 0, 0, 0, 1)
         val ip = ByteArray(16).also { it[0] = 0xfe.toByte(); it[1] = 0x80.toByte(); it[15] = 1 }
         val peerIp = ip.copyOf().also { it[15] = 2 }
@@ -279,6 +338,7 @@ class TcpSessionDeviceContractTest(private val backend: String) {
                 }
                 if (flags and 16 != 0) acknowledged = maxOf(acknowledged, ack)
                 if (seq == localNext && (data.isNotEmpty() || flags and 1 != 0)) {
+                    if (stallWrites) { emit(tcp(localPort, 16, peerNext, localNext)); continue }
                     if (resetAfterData && data.isNotEmpty()) {
                         emit(tcp(localPort, 20, peerNext, seq + data.size))
                         return
@@ -303,7 +363,7 @@ class TcpSessionDeviceContractTest(private val backend: String) {
         private fun tcp(port: Int, flags: Int, sequence: Long, acknowledgment: Long, bytes: ByteArray = byteArrayOf()) = packet(6, 20 + bytes.size).also {
             put16(it, 54, 9000); put16(it, 56, port)
             repeat(4) { n -> it[58 + n] = (sequence ushr (24 - n * 8)).toByte(); it[62 + n] = (acknowledgment ushr (24 - n * 8)).toByte() }
-            it[66] = 0x50; it[67] = flags.toByte(); put16(it, 68, 32768)
+            it[66] = 0x50; it[67] = flags.toByte(); put16(it, 68, if (stallWrites) 0 else 32768)
             bytes.copyInto(it, 74); checksum(it, 6, 70)
         }
         private fun packet(protocol: Int, length: Int) = ByteArray(54 + length).also {

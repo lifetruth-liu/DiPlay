@@ -1323,3 +1323,20 @@ d65be6d2fa4bba2b74b2a43033827c44e30774c39ee09934643a627259a1aba7。
 日志记录，不将UP-TO-DATE任务记重新执行。public tree及staged diff检查通过。
 本轮仅显式系统适配器错误分类及测试夹具变化，不切换生产后端；背压/写阻塞取消、
 故障矩阵、真机及安全/性能验收仍缺，G2/G3和完整目标保持未完成。
+
+### 共同写阻塞取消与同向并发拒绝
+
+新增closeCancelsBackpressuredWriterAndRejectsOverlappingWrite，两后端执行同一
+断言：重复使用32KiB源缓冲，最多1024次write。系统peer设置4096接收缓冲并暂停
+读取；JNI peer通告零窗口、不消耗输入数据。五秒观察期内必须出现完成计数至少
+500ms不变且writer在后端write内、future未完成；随后重叠write必须RESOURCE_LIMIT，
+close两次后writer三秒内CANCELLED，源缓冲不变。夹具保持有界，系统peer清理时关闭
+已接受socket并释放暂停门闩。无需生产代码修改。
+
+自建API28 x86_64 AVD，确认RUNNING_UNLOCKED；本轮34/34，零失败/错误/跳过，
+exit0、41s：TEMP/diplay-write-connected.log。测试APK SHA-256：
+6efa913028e5ac45267968553b424b44523d77a6b47e8b7c86c0b43473d46306。
+完整九项CI exit0、8s、250任务14执行：TEMP/diplay-write-final-ci.log。三模块单元
+任务UP-TO-DATE，不记重新执行。public tree及staged diff检查通过。
+此次覆盖T04的写取消及短期背压观察；十秒暂停后完整恢复及内存预算尚未验证，不
+标T05完成。故障矩阵、真实NCM/iPhone/ARM及安全/性能门槛仍缺，整体目标继续。
