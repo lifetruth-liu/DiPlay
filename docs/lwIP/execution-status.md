@@ -1772,3 +1772,18 @@ workflow YAML、shell语法检查通过。
 也没有达到10分钟宿主基准门槛。loopback测试只验证测量代码和报告完整性，不代表lwIP栈性能。
 用户确认当前无可用参考设备、抓包或VPN/无线基线；G0/G1、真实媒体余量、长时设备矩阵和
 累计24 CPU小时fuzz仍待补齐，整体方案与生产后端选择均保持未完成/不变。
+
+### P4 有线通道的静态网络调用复核
+
+对 `shared/src/main/java` 搜索 `java.net` Socket/Datagram API、HTTP connection、VPN 建立及
+Socket FD 操作，并查看每个命中点的生产调用者。AirPlay 有线主控制、事件、视频、音频、
+缓冲音频、iAP、视频设置、NTP 和麦克风均通过 SessionNetwork 端点；底层系统 TCP/UDP
+集中在 SystemSessionNetwork，TcpLiveness 也只从该适配器进入。无线 Bonjour probe、ADB、
+仅测试使用的旧 Socket 构造/ServerSocket overload已在通道清单标注。
+
+复核还发现显式配置的 RemoteMfiAuthenticationClient 使用未绑定 SessionNetwork 的
+HttpURLConnection 访问外部认证服务，由 Android 系统网络栈路由。它不是 iPhone 数据通道，
+但属于独立系统网络出站；已记录其调用边界，避免把数据面复核扩大成全进程无系统网络的结论。
+源码搜索未见其他有线 CarPlay 数据通道直接使用系统 Socket。静态审查项完成；是否迁移远程
+认证依赖仍是产品范围决策。该审计没有设备抓包或全通道协商回归，不据此标记 G4 或任一设备
+门槛完成。

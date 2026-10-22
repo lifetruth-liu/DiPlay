@@ -62,3 +62,22 @@ IPv6 bridge 并绑定 AirPlay listener，然后通告真实端口和 link-local 
 尚无脱敏 pcap、VPN 禁用设备、参考设备性能基线；G0 未通过。
 首期不能据此删除 IPv4/双栈兼容或对外声明用户态可用。
 后续需将 pcap 摘要、设备/iOS 与测试编号关联，原始媒体和密钥不入库。
+
+## 2026-10-23 静态网络调用复核
+
+复核命令覆盖 `shared/src/main/java` 中 `Socket`、`ServerSocket`、`DatagramSocket`、
+channel、`HttpURLConnection`、`VpnService.prepare/establish`、`ParcelFileDescriptor.fromSocket`
+等直接网络入口，并逐项查看调用者。当前 AirPlay 有线数据面由 `AirPlaySessionHost`
+持有注入的 `SessionNetwork`；控制、事件、视频、音频、缓冲音频、iAP、视频设置、NTP
+及麦克风走端点 API。iPhone 会话数据面的直接 TCP/UDP 创建、绑定和 I/O 集中在系统适配器中；
+`TcpLiveness` 也只由系统适配器调用。lwIP 的生产选择仍未启用。
+
+明确的例外路径：`CarPlayBonjour` 的 TCP probe 由无线启动分支创建；`LocalAdb` 连接 ADB
+服务；`BydStarterBridge` 只为显式 ADB 启动的导航测试桥服务；旧 `AirPlaySession(Socket)`
+及 `AirPlayPortSelector` 原始 `ServerSocket` overload 目前只被测试调用。另有可选的
+`RemoteMfiAuthenticationClient` 通过 `HttpURLConnection` 访问配置的远程 MFi 认证服务，
+它不是 iPhone 会话端点，也没有注入 `SessionNetwork`，由 Android 系统网络栈路由；如后续
+要求整个有线启动不产生系统网络流量，须单独决定是否迁移它及其可用性合同。
+
+这只是源码搜索和调用链检查，未验证设备上的实际路由或所有协商分支，不替代 G0/G1、
+全通道测试或最终发布审计。
