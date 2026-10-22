@@ -509,3 +509,28 @@ admitted263/drop13/delay250/reorder10/duplicate3，repeated_tcp_admissions10。
 这些是模拟器内核证据，不是NCM/iPhone或ARM验收。
 只读复核未发现测试/补丁/完整性逻辑实质问题；审查者未运行测试。
 NDP/IPv6重组/PMTU回补继续开放，整体安全审计未通过，生产未选用lwIP后端。
+
+### IPv6空重组清理回补（2026-10-22）
+
+基于25cd4971，精确回补上游56b29f8bcfaefe2974dca67bde16cc7c391feaeb的IPv6部分；
+IPv4关闭，未改动其vendor源码。原始manifest保持不变，补后digest进入严格白名单。
+BACKPORTS.md记录原始/补后摘要及测试范围。
+
+新reassembly_tests.c编译真实ip6_frag.c，在core线程执行真实重组入口：129个pool
+pbuf超过128配额，入口释放被拒绝链并留下空重组上下文。原版在timer清理时UBSan
+报告ip6_frag.c157空pbuf成员访问；纠正测试回调/销毁参数类型后重新运行，仍为预期
+red、exit1。补后连续八轮超额拒绝及31次timer tick清理，各轮pbuf/context池计数归零。
+这是内部配额失败路径，不声称当前每帧一个pbuf的入口可远程触发，也不称为分配失败注入。
+
+Linux ASan/UBSan/pool guards和Windows MinGW均27/27通过；Python完整性测试7/7。
+完整九项Android CI exit0，1m17s，250任务17执行，TEMP/diplay-reassembly-ci.log。
+四ABI APK检查通过（ELF/ZIP 16KiB、NX、许可证与源码摘要）；APK SHA-256为
+d01f85b9a1b13776e1236e80bf9224299ca4425dd17ec248e22e59359fc4849e。
+JNI connected 5/5、无失败/错误/跳过，19s、exit0；日志diplay-reassembly-connected.log。
+AVD路径查询同样有DeviceMonitor bad sub-command告警，测试XML已核对。
+
+重建Android内核工具，任务自有API28 x86_64模拟器隔离netns的TAP basic通过：
+TCP 3×64KiB，UDP空包/MTU/分片，exit0；diplay-reassembly-kernel-tap.log。
+rx265/tx229/not_ready0，heap_peak36008。该结果不替代NCM/iPhone和ARM验收。
+只读复核未发现实质问题并核对上游diff及digest；审查者未运行测试。
+公开树和diff检查通过。NDP/PMTU仍开放，整体安全审计与真机门槛仍未通过。

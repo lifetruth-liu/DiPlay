@@ -37,7 +37,8 @@ class NativeVerifierTest(unittest.TestCase):
 
     def test_exact_backport_is_reported(self):
         self.assertEqual(
-            ["3d896ba0a37ff3ce73270ca5e230707fe47f60e3"],
+            ["3d896ba0a37ff3ce73270ca5e230707fe47f60e3",
+             "56b29f8bcfaefe2974dca67bde16cc7c391feaeb"],
             verify_source()["backports"],
         )
 
@@ -47,7 +48,7 @@ class NativeVerifierTest(unittest.TestCase):
             shutil.copytree(check_lwip_native.ROOT / "third_party", root / "third_party")
             shutil.copy(check_lwip_native.ROOT / "UPSTREAM-SHA256.txt", root)
             with patch.object(check_lwip_native, "ROOT", root):
-                for name in ("src/core/tcp_in.c", "src/core/udp.c"):
+                for name in ("src/core/tcp_in.c", "src/core/ipv6/ip6_frag.c", "src/core/udp.c"):
                     path = root / "third_party/lwip" / name
                     original = path.read_bytes()
                     path.write_bytes(original + b"\n/* unexpected modification */\n")

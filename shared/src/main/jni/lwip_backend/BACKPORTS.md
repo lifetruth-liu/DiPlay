@@ -23,5 +23,26 @@ accepting exactly the reviewed post-image. No other vendor modification is allow
   `tcp_parseopt`, one byte beyond a 24-byte allocation. Green: all 26 host tests
   pass with ASan/UBSan/pool guards, and all 26 pass on Windows MinGW.
 
-This record covers one fix. NDP, IPv6 reassembly and PMTU audit findings remain
+## IPv6 empty reassembly cleanup
+
+- Official upstream commit: `56b29f8bcfaefe2974dca67bde16cc7c391feaeb`, IPv6
+  portion only (IPv4 is disabled and its vendor source remains unchanged).
+- File: `src/core/ipv6/ip6_frag.c`.
+- Original SHA-256: `c770139ab8d31da076fbf9b74a260511b647c377241bf1344547d02f6e0cc99d`.
+- Post-image SHA-256: `6d3783d2fcbe1187eac34a6b732436447288b9740b6ec9a8d69002acb08680f3`.
+- Change: wrap first-fragment ICMP generation in the upstream non-null pbuf guard.
+- Regression: `reassembly_tests.c` compiles real `ip6_frag.c`, calls `ip6_reass`
+  with a valid 129-pbuf chain, exceeds the configured 128-pbuf quota and confirms
+  the rejected chain is freed while an empty context remains. Real timer expiry
+  then frees the context. Eight cycles confirm zero pool use after each cleanup.
+- Red: UBSan null pbuf member access in `ip6_reass_free_complete_datagram`,
+  reached from `ip6_reass_tmr`. Green: 27/27 host tests on Linux with sanitizers
+  and pool guards, and on Windows MinGW; integrity verifier tests 7/7.
+- Scope: this is a stack-internal quota failure regression. The current bounded
+  Ethernet ingress copies each frame into one pool pbuf; this test does not
+  demonstrate remote reachability through that ingress or exercise allocation
+  failure injection. Existing real-frame tests still cover successful reassembly
+  and teardown of incomplete fragments.
+
+This record covers two fixes. NDP and PMTU audit findings remain
 open; it does not establish full upstream security approval or device gates.
