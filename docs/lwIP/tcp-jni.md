@@ -1,10 +1,10 @@
-# P3 TCP JNI桥（当前ABI 4）
+# P3 TCP JNI桥（当前ABI 5）
 
 在既有context/UDP桥上新增TCP桥，整体JNI ABI升级到3，Kotlin加载器与native
 abiVersion同步校验。后续新增[优雅关闭](tcp-graceful-close.md)将整体ABI升级4，
-当前加载器与native均要求4。native-only核心C ABI仍为1。原始接口由核心创建线程串行调用，
+新增PCB keepalive配置后整体ABI升级5，当前加载器与native均要求5。native-only核心C ABI仍为1。原始接口由核心创建线程串行调用，
 不自行创建线程或提供阻塞/deadline语义；已有[类型化宿主核心接口](tcp-core.md)，
-公共TcpStream/SessionNetwork尚未接入。
+已有[显式公共TcpStream主动连接适配](tcp-adapter.md)，监听器/SessionNetwork尚未接入。
 
 | 方法 | 输出/语义 |
 | --- | --- |
@@ -14,6 +14,7 @@ abiVersion同步校验。后续新增[优雅关闭](tcp-graceful-close.md)将整
 | tcpConnectStatus | 握手完成后写两地址/两端口；等待或失败时不发布信息 |
 | tcpRead/tcpWrite | offset/length子范围，IntArray(1)报告实际长度；WOULD_BLOCK为0 |
 | tcpShutdownOutput | 非阻塞半关闭，不能据此假定对端已经收到FIN |
+| tcpConfigureLiveness | 在对应PCB启用10s/3s/3次keepalive，不进入系统FD路径 |
 | tcpClose/tcpListenerClose | 释放对应类型generation handle，原始重复关闭返回INVALID_ARGUMENT |
 | tcpCloseGraceful | 消耗stream handle，把正常FIN关闭交给协议栈；不等待peer ACK |
 

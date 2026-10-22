@@ -132,6 +132,11 @@ JNIEXPORT jint JNICALL JNI_NAME(tcpShutdownOutput)(JNIEnv *env, jobject self, jl
     if ((*env)->ExceptionCheck(env)) return DP_INTERNAL;
     return dp_proto_tcp_shutdown_output((uint64_t)context, (uint64_t)endpoint);
 }
+JNIEXPORT jint JNICALL JNI_NAME(tcpConfigureLiveness)(JNIEnv *env, jobject self, jlong context, jlong endpoint) {
+    (void)self;
+    if ((*env)->ExceptionCheck(env)) return DP_INTERNAL;
+    return dp_proto_tcp_configure_liveness((uint64_t)context, (uint64_t)endpoint);
+}
 JNIEXPORT jint JNICALL JNI_NAME(tcpClose)(JNIEnv *env, jobject self, jlong context, jlong endpoint) {
     (void)self;
     if ((*env)->ExceptionCheck(env)) return DP_INTERNAL;

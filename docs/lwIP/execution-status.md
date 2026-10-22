@@ -1044,3 +1044,49 @@ public tree及staged diff检查通过。未取得独立评审完成结果，不�
 尚无tcp_close返回错误分支的运行时注入；公共流/监听器/SessionNetwork策略、全部
 两后端契约、独立kernel peer对新端点接口的验证、真实NCM/iPhone/ARM及长稳仍缺。
 不把关闭原语的已验证路径扩大为完整公共关闭合同；G2/G3及整体目标仍未完成。
+
+### P3 公共TCP主动连接流（2026-10-22）
+
+基于81e9c7fd。新增LwipTcpStream实现公共TcpStream，显式工厂经runner创建/等待
+同一candidate，实际地址/端口及linkId传至公共端点。读写按方向排他，可一读一写；
+整段write按最多32768字节的队列副本处理原生短写，保持同一绝对deadline。资源
+scope先预留，未发布候选取消走abort，已发布流默认优雅关闭、resetOnClose走abort。
+配置通过owner队列，关闭幂等且使用保留控制槽。详见[公共TCP流原型](tcp-adapter.md)。
+
+读取目标只在提交后由调用线程写入；已消费读取的迟到结果不能交付时关闭流。
+另补注入“消费后OOM”用例，确认出错后必须回收流，防止静默跳过字节。初修复发现
+关闭的CANCELLED覆盖原错误，改为resource close携带原结构化原因，保留RESOURCE_LIMIT/
+PEER_RESET；原有UDP默认取消行为不变。Pending就超时/中断则不关闭流，仍可继续读。
+
+公共流最初9项以未实现方法真实red：TEMP/diplay-tcp-stream-red.log。接通后通过，
+新增前缀写后超时不重放、中断及消费后分配失败用例。最后TCP12项，与UDP/命令队列
+共49项定向测试通过：diplay-tcp-stream-verified-focused.log。消费后OOM先red：
+diplay-tcp-stream-read-error-red.log；中间修复的错误覆盖失败也有保留日志
+diplay-tcp-stream-final-focused.log，不把中间失败记为通过。
+
+新增PCB keepalive配置及JNI/宿主接口，整体JNI ABI升至5，核心C ABI仍为1。该PCB
+启用idle10000ms/interval3000ms/count3，不访问系统FD，不宣称TCP_USER_TIMEOUT。
+原生探测用例先无实际配置而red，48/49通过、exit8：WSL /tmp/diplay-tcp-liveness-red.log。
+实现后Linux ASan/UBSan/pool guards、Windows各49/49、exit0（4.93s/1.23s）：
+WSL /tmp/diplay-tcp-stream-host.log、TEMP/diplay-tcp-stream-windows.log。真实探测帧
+覆盖健康空闲连接反复ACK保持可用、停止回复后PEER_RESET，不以视频/应用空闲判失败。
+
+Android公共流用例先缺tcpConfigureLiveness而NATIVE_UNAVAILABLE/UnsatisfiedLinkError
+真实red，exit1、39s：diplay-tcp-stream-jni-red.log。接通后12/12、18s、exit0：
+diplay-tcp-stream-connected.log。经公共connect/runner/JNI/lwIP走完整SYN/SYN-ACK、
+实际端点、keepalive配置、偏移read/EOF、write及FIN关闭，资源scope归零。
+
+最终九项Android CI exit0，7m24s、250任务46执行：diplay-tcp-stream-ci.log。
+shared/common单元任务本轮执行，home为UP-TO-DATE；核对XML共3357项（shared1773/
+common1578/home6）零失败/错误/跳过，不将home旧结果记作重新执行。最终API28
+x86_64模拟器12/12、13s、exit0：diplay-tcp-stream-final-connected.log，XML零失败/
+错误/跳过；debug.checkjni=1，测试进程7286确认already on。
+补齐prototype转发后的最终宿主回归也各49/49、exit0（Linux5.01s/Windows1.25s）：
+WSL /tmp/diplay-tcp-stream-final-host.log、TEMP/diplay-tcp-stream-final-windows.log。
+四ABI均确认十一项TCP JNI导出；APK四ABI/16KiB/NX/许可证与源摘要检查通过，SHA-256：
+336d587256ba2084206ca0c4cc46e97c18b3a6a5502a99a41587d1e317f80b04。
+public tree及staged diff检查通过。未取得独立评审完成结果，不记作独立评审通过。
+
+仍缺公共监听器、完整SessionNetwork、两后端参数化合同、全部JNI/分配/竞态故障矩阵、
+独立kernel peer对新端点接口的验证、真实NCM/iPhone/ARM及长稳性能报告。只提供
+显式原型主动流，不接入生产业务或改变后端选择；G2/G3与整体目标仍未完成。

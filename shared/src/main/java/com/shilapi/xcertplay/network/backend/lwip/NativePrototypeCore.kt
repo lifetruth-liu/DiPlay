@@ -169,6 +169,9 @@ internal class NativePrototypeCore private constructor(private val clockMillis: 
     override fun tcpShutdownOutput(token: Long): CoreAttempt<Unit> = nativeCall {
         supply(); udpAttempt(LwipNativeBindings.tcpShutdownOutput(handle, token))
     }
+    override fun tcpConfigureLiveness(token: Long) = nativeCall {
+        supply(); checkResult(LwipNativeBindings.tcpConfigureLiveness(handle, token))
+    }
     // Cleanup must remain available after supply/clock/entropy has failed. The C bridge quiesces
     // failed contexts before aborting; refreshing their clock here would prevent resource release.
     override fun tcpClose(token: Long) = nativeCall {

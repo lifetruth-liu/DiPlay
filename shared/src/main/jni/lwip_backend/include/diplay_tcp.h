@@ -26,6 +26,7 @@ DP_API dp_result dp_tcp_read(dp_core *, uint64_t, uint8_t *, size_t, size_t *);
  * A successful write queues owned data, not necessarily a completed wire send. */
 DP_API dp_result dp_tcp_write(dp_core *, uint64_t, const uint8_t *, size_t, size_t *);
 DP_API dp_result dp_tcp_shutdown_output(dp_core *, uint64_t);
+DP_API dp_result dp_tcp_configure_liveness(dp_core *, uint64_t);
 DP_API dp_result dp_tcp_close(dp_core *, uint64_t);
 /* Consume the application handle and hand closing PCB ownership to lwIP. */
 DP_API dp_result dp_tcp_close_graceful(dp_core *, uint64_t);

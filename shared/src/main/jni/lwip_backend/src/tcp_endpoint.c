@@ -334,6 +334,22 @@ dp_result dp_tcp_shutdown_output(dp_core *core, uint64_t handle) {
     return leave(core, DP_OK);
 }
 dp_result dp_tcp_close(dp_core *core, uint64_t handle) { return close_handle(core, handle, DP_ENDPOINT_TCP); }
+dp_result dp_tcp_configure_liveness(dp_core *core, uint64_t handle) {
+    dp_result status = dp_enter(core, 0);
+    if (status != DP_OK) return status;
+    void *value = NULL;
+    status = dp_endpoint_lookup(&core->endpoints, handle, DP_ENDPOINT_TCP, &value);
+    if (status != DP_OK) return leave(core, status);
+    struct tcp_stream *stream = value;
+    if (stream->error != DP_OK) return leave(core, stream->error);
+    if (!stream->pcb) return leave(core, DP_PEER_CLOSED);
+    ip_set_option(stream->pcb, SOF_KEEPALIVE);
+    stream->pcb->keep_idle = 10000;
+    stream->pcb->keep_intvl = 3000;
+    stream->pcb->keep_cnt = 3;
+    stream->pcb->keep_cnt_sent = 0;
+    return leave(core, DP_OK);
+}
 dp_result dp_tcp_close_graceful(dp_core *core, uint64_t handle) {
     dp_result status = dp_enter(core, 1);
     if (status != DP_OK) return status;

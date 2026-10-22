@@ -308,6 +308,10 @@ dp_result dp_proto_tcp_shutdown_output(uint64_t h, uint64_t endpoint) {
     struct prototype *p; dp_result s = lookup(h, &p, 0);
     return s == DP_OK ? finish(p, dp_tcp_shutdown_output(p->core, endpoint)) : s;
 }
+dp_result dp_proto_tcp_configure_liveness(uint64_t h, uint64_t endpoint) {
+    struct prototype *p; dp_result s = lookup(h, &p, 0);
+    return s == DP_OK ? finish(p, dp_tcp_configure_liveness(p->core, endpoint)) : s;
+}
 dp_result dp_proto_tcp_close(uint64_t h, uint64_t endpoint) {
     struct prototype *p; dp_result s = lookup(h, &p, 1);
     if (s == DP_OK && p->failure != DP_OK) dp_core_set_link_ready(p->core, 0);

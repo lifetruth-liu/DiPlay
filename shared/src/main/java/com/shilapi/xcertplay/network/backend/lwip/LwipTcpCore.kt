@@ -18,6 +18,7 @@ internal interface LwipTcpCore : LwipPrototypeCore {
     /** Ready reports an accepted prefix. A thrown failure may also have accepted a prefix. */
     fun tcpWrite(token: Long, bytes: ByteArray, offset: Int, length: Int): CoreAttempt<Int>
     fun tcpShutdownOutput(token: Long): CoreAttempt<Unit>
+    fun tcpConfigureLiveness(token: Long)
     fun tcpClose(token: Long)
     fun tcpCloseGraceful(token: Long)
     fun tcpListenerClose(token: Long)

@@ -717,6 +717,28 @@ static void test_tcp_graceful_failure(void) {
         close_core(&f);
     }
 }
+static void test_tcp_liveness(void) {
+    struct fixture f; ready_core(&f);
+    uint64_t listener; uint16_t port;
+    CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK);
+    uint32_t server = establish(&f, 50000);
+    uint64_t stream = accept_stream(&f, listener);
+    CHECK(dp_tcp_configure_liveness(f.core, stream) == DP_OK);
+    uint8_t target; size_t copied;
+    for (unsigned round = 0; round < 3; ++round) {
+        f.count = 0; advance(&f, 11000);
+        struct frame *probe = find(&f, 6, -1, 0);
+        CHECK(probe && probe->length == 74 && probe->bytes[67] == 16 && u32(probe->bytes + 58) == server);
+        send_tcp(&f, 16, 1001, server + 1, ""); /* A healthy idle peer stays connected. */
+        CHECK(dp_tcp_read(f.core, stream, &target, 1, &copied) == DP_WOULD_BLOCK);
+    }
+    CHECK(dp_tcp_configure_liveness(f.core, listener) == DP_INVALID_ARGUMENT);
+    f.count = 0; advance(&f, 21000); /* Drop all probe replies. */
+    CHECK(dp_tcp_read(f.core, stream, &target, 1, &copied) == DP_PEER_RESET);
+    CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+    CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+    close_core(&f);
+}
 static uint32_t connect_begin(struct fixture *f, uint64_t *stream, uint16_t *local_port) {
     f->count = 0;
     CHECK(dp_tcp_connect(f->core, peer_ip, 9000, stream) == DP_OK && *stream);
@@ -1346,6 +1368,8 @@ int main(int argc, char **argv) {
         test_tcp_graceful_pressure();
     else if (!strcmp(argv[1], "tcp_graceful_failure"))
         test_tcp_graceful_failure();
+    else if (!strcmp(argv[1], "tcp_liveness"))
+        test_tcp_liveness();
     else if (!strcmp(argv[1], "tcp_connect_cancel"))
         test_tcp_connect_cancel();
     else if (!strcmp(argv[1], "tcp_connect_limits"))

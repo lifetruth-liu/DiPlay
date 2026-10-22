@@ -2,7 +2,7 @@
 
 `LwipUdpEndpoint`实现现有`UdpEndpoint`，通过显式`LwipPrototype`绑定；尚未提供
 完整`LwipSessionNetwork`，也不改变生产后端选择。`LwipUdpCore`是仅限核心线程的
-非阻塞接口，`NativePrototypeCore`将其转发给既有UDP JNI（当前整体ABI 4），不新增C接口。
+非阻塞接口，`NativePrototypeCore`将其转发给既有UDP JNI（当前整体ABI 5），不新增C接口。
 
 bind在登记资源前检查运行状态和调用线程；IPv6本地地址只能是虚拟netif实际地址
 或全零通配地址。结果报告实际地址、实际分配端口和调用者的会话linkId，不使用

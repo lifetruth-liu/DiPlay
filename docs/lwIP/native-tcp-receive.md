@@ -2,9 +2,9 @@
 
 `include/diplay_tcp.h`提供核心线程上的非阻塞listen、accept、read、write、输出半关闭
 和本地abort关闭，亦支持下面的非阻塞主动连接。这是一段TCP端点实现：尚无完整优雅关闭策略、
-公共TcpStream/SessionNetwork适配，不能作为完整TCP合同验收。
-原始[TCP JNI](tcp-jni.md)已接入，当前JNI ABI 4；native-only核心C ABI仍为1。
-已有[优雅关闭原语](tcp-graceful-close.md)，公共适配策略尚未接入。
+完整两后端合同和SessionNetwork适配，不能作为完整TCP合同验收。
+原始[TCP JNI](tcp-jni.md)已接入，当前JNI ABI 5；native-only核心C ABI仍为1。
+已有[优雅关闭原语](tcp-graceful-close.md)及[显式公共TCP主动连接适配](tcp-adapter.md)。
 现有生产后端选择未改变，新增C API及错误值是兼容的扩展。
 
 监听绑定虚拟netif具体IPv6地址，支持动态端口；可以在链路未就绪和DAD前准备。

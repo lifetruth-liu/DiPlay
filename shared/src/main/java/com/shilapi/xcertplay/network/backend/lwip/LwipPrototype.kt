@@ -81,8 +81,9 @@ class LwipPrototype(
 
     internal fun newCommandScope() = commands.newScope()
     internal fun newResourceScope(release: (LwipPrototypeCore) -> Unit) = commands.newResourceScope(release)
-    internal fun closeResourceScope(scope: CoreCommandQueue.Scope): Boolean =
-        commands.closeResource(scope, BackendFailure(BackendFailure.Kind.CANCELLED))
+    internal fun closeResourceScope(scope: CoreCommandQueue.Scope,
+                                    reason: BackendFailure = BackendFailure(BackendFailure.Kind.CANCELLED)): Boolean =
+        commands.closeResource(scope, reason)
     internal fun cancelCommands(scope: CoreCommandQueue.Scope) =
         commands.cancel(scope, BackendFailure(BackendFailure.Kind.CANCELLED))
 
@@ -94,10 +95,10 @@ class LwipPrototype(
     }
 
     internal fun <T, R> executePreparedDelivered(retainedBytes: Int, deadlineMillis: Long,
-                                                scope: CoreCommandQueue.Scope, deliver: (T) -> R,
+                                                scope: CoreCommandQueue.Scope, deliver: (T) -> R, discard: (T) -> Unit = {},
                                                 prepare: () -> ((LwipPrototypeCore) -> CoreAttempt<T>)): R {
         checkCommandCaller()
-        return commands.callPreparedDeliver(retainedBytes, deadlineMillis, scope = scope, deliver = deliver, prepare = prepare)
+        return commands.callPreparedDeliver(retainedBytes, deadlineMillis, scope = scope, deliver = deliver, discard = discard, prepare = prepare)
     }
 
     internal fun <T> executeCommand(retainedBytes: Int = 0, deadlineMillis: Long = 0,

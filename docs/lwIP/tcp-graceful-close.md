@@ -2,7 +2,8 @@
 
 新增`dp_tcp_close_graceful`、prototype转发、`tcpCloseGraceful` JNI及类型化核心方法。
 整体JNI ABI升至4，Kotlin加载检查同步；native-only核心C ABI仍为1。既有tcpClose
-保留本地abort语义，用于取消、resetOnClose及未交付资源回滚。公共TcpStream尚未接入。
+保留本地abort语义，用于取消、resetOnClose及未交付资源回滚。后续已有
+[显式公共TcpStream主动连接适配](tcp-adapter.md)，当前整体JNI ABI为5。
 
 健康且已连接的stream先清除arg/recv/err/sent/poll回调，再调用lwIP tcp_close。
 成功后PCB可能已经释放，也可能处于FIN_WAIT/LAST_ACK或TF_CLOSEPEND；应用不得再
@@ -32,6 +33,6 @@ FIN尚未重试即销毁上下文、待握手候选取消、核心时钟倒退�
 Android模拟器验证JNI的FIN交付、无正常RST、旧token拒绝、FIN/ACK后上下文销毁；
 类型化核心回归也使用该关闭接口，包括失败prototype释放。
 
-尚未完成公共TcpStream的幂等关闭/并发取消/configure策略、两后端关闭合同、独立
+公共TcpStream已接入幂等关闭/并发取消/configure策略；尚未完成两后端关闭合同、独立
 kernel peer对端点接口的验证、全部资源失败路径及真实NCM/iPhone/ARM验收。已有门槛
 保持未通过，不把原语实现视为G2/G3或完整业务迁移完成。

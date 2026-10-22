@@ -18,6 +18,67 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class NativePrototypeInstrumentationTest {
+    @Test fun publicTcpStreamTraversesRunnerHandshakeReadWriteAndGracefulClose() {
+        val incoming = LinkedBlockingQueue<ByteArray>(); val outgoing = LinkedBlockingQueue<ByteArray>()
+        val port = object : EthernetFramePort {
+            override val hostMac = mac.copyOf()
+            override fun send(frame: ByteArray, timeoutMillis: Int): NcmSendResult {
+                outgoing.add(frame.copyOf()); return NcmSendResult.Sent
+            }
+            override fun recv(timeoutMillis: Long) = incoming.poll(timeoutMillis, TimeUnit.MILLISECONDS)
+            override fun close() { incoming.offer(ByteArray(14)) }
+        }
+        val base = coreCommandClock(); val offset = AtomicLong(100)
+        val clock = MonotonicClock { base.nowMillis() + offset.get() }
+        val runner = LwipPrototype(port, commandClock = clock) { NativePrototypeCore.create(mac, ip, 1500, clock::nowMillis) }
+        var connector: Thread? = null
+        fun nextTcp(accept: (ByteArray) -> Boolean): ByteArray {
+            val end = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+            while (System.nanoTime() < end) {
+                val frame = outgoing.poll(100, TimeUnit.MILLISECONDS) ?: continue
+                if (frame.size >= 74 && frame[20] == 6.toByte() && accept(frame)) return frame
+            }
+            throw AssertionError("TCP frame timeout")
+        }
+        try {
+            runner.start()
+            repeat(16) {
+                offset.addAndGet(250); runner.executeCommand { it.poll(); CoreAttempt.Ready(Unit) }
+            }
+            incoming.put(packet(58, 32).also {
+                it[21] = 255.toByte(); it[54] = 135.toByte(); ip.copyInto(it, 62)
+                it[78] = 1; it[79] = 1; peerMac.copyInto(it, 80); checksum(it, 58, 56)
+            })
+            val result = AtomicReference<Result<LwipTcpStream>>()
+            connector = Thread { result.set(runCatching {
+                LwipTcpStream.connect(runner, NetworkEndpoint(ip.copyOf().also { it[15] = 2 }, 9000, "native-test"), clock.nowMillis() + 2000)
+            }) }.apply { start() }
+            val syn = nextTcp { it[67].toInt() and 2 != 0 }; val localPort = read16(syn, 54); val sequence = read32(syn, 58)
+            incoming.put(tcpPacket(9000, localPort, 18, 7000, sequence + 1))
+            connector.join(2000); assertFalse(connector.isAlive)
+            val stream = result.get().getOrThrow()
+            assertEquals(localPort, stream.localEndpoint.port); assertEquals(9000, stream.remoteEndpoint.port)
+            stream.configureLiveness { assertTrue(it.contains("lwIP")) }
+            incoming.put(tcpPacket(9000, localPort, 25, 7001, sequence + 1, "hello".toByteArray()))
+            val target = ByteArray(5) { 9 }
+            assertEquals(3, stream.read(target, 1, 3, clock.nowMillis() + 2000))
+            assertArrayEquals(byteArrayOf(9, 104, 101, 108, 9), target)
+            assertEquals(2, stream.read(target, 0, 5, clock.nowMillis() + 2000))
+            assertEquals(-1, stream.read(target, 0, 5, clock.nowMillis() + 2000))
+            stream.write("reply".toByteArray(), 0, 5, clock.nowMillis() + 2000)
+            val sent = nextTcp { it.size > 54 + ((it[66].toInt() and 255) ushr 4) * 4 }
+            assertArrayEquals("reply".toByteArray(), sent.copyOfRange(54 + ((sent[66].toInt() and 255) ushr 4) * 4, sent.size))
+            incoming.put(tcpPacket(9000, localPort, 16, 7007, sequence + 6))
+            stream.close(); stream.close()
+            val fin = nextTcp { it[67].toInt() and 1 != 0 }
+            assertEquals(0, fin[67].toInt() and 4)
+            incoming.put(tcpPacket(9000, localPort, 16, 7007, sequence + 7))
+            val end = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+            while (runner.snapshot().resourceScopes != 0 && System.nanoTime() < end) Thread.sleep(1)
+            assertEquals(0, runner.snapshot().resourceScopes); assertNull(runner.snapshot().failure)
+        } finally { runner.close(); connector?.join(2000) }
+    }
+
     @Test fun tcpGracefulJniHandsFinToProtocolAndInvalidatesApplicationToken() {
         LwipNativeBindings.ensureLoaded()
         val h = LwipNativeBindings.create(mac, ip, 1500, 100, ByteArray(1024).also { SecureRandom().nextBytes(it) })
@@ -98,7 +159,7 @@ class NativePrototypeInstrumentationTest {
 
     @Test fun tcpJniAcceptReadWriteAndHalfCloseValidateBeforeConsuming() {
         LwipNativeBindings.ensureLoaded()
-        assertEquals(4, LwipNativeBindings.abiVersion())
+        assertEquals(5, LwipNativeBindings.abiVersion())
         val h = LwipNativeBindings.create(mac, ip, 1500, 100, ByteArray(1024).also { SecureRandom().nextBytes(it) })
         assertTrue(h > 0)
         try {
@@ -262,7 +323,7 @@ class NativePrototypeInstrumentationTest {
     }
     @Test fun nativeUdpBindingsPreserveDatagramsAndRejectStaleTokens() {
         LwipNativeBindings.ensureLoaded()
-        assertEquals(4, LwipNativeBindings.abiVersion())
+        assertEquals(5, LwipNativeBindings.abiVersion())
         val entropy = ByteArray(1024).also { SecureRandom().nextBytes(it) }
         val context = LwipNativeBindings.create(mac, ip, 1500, 100, entropy)
         assertTrue(context > 0)
