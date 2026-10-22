@@ -5,6 +5,38 @@ Base: lwIP 2.2.1, commit `77dcd25a72509eb83f72b033d219b1d40cd8eb95`.
 its digest and requires the original digest below to match that inventory before
 accepting exactly the reviewed post-image. No other vendor modification is allowed.
 
+## Full IPv6 UDP payload fragmentation/reassembly (local correction, 2026-10-22)
+
+- Local implementation, not an upstream commit or CVE fix. It retains the pbuf
+  u16 overflow guard and the 65527-byte public UDP validation limit.
+- `src/core/ipv6/ip6.c`: original
+  `b46f5bcc0d086552502bd0db36198a9a804f22efcb97683bc968e20099025dec`, current
+  `2c9d7c76fd3d5c990d2967cd2ae8f9e240054e115892085e974c0ce8f191ecd6`.
+- `src/core/ipv6/ip6_frag.c`: cumulative with the existing fragment backport;
+  previous post-image `6d3783d2fcbe1187eac34a6b732436447288b9740b6ec9a8d69002acb08680f3`,
+  current `23a4c2b37ee48527afb642bf1568a84b6e0ece67f19a9cda93371e3a674dd655`.
+- `src/include/lwip/ip6_frag.h`: original
+  `0dcea4a7600b856877e7fb4943b20690aa9e2b69414b4b2273c7e9e0a25f74a3`, current
+  `b38cc1cc2df8b90d77671326a24b58178f2183cf2b623103eb5b7ac318efb178`.
+- TX: when a legal payload plus the base IPv6 header cannot fit the u16 pbuf,
+  retain the base header separately and pass the payload through the existing
+  fragment loop, sharing its ID generator and netif output. Enable this path
+  only with fragmentation enabled and loopback disabled, as in this port.
+  The new path propagates output errors, including after partial output; legacy
+  fragment output error behavior is unchanged.
+- RX: strip fragment/helper metadata before concatenation, avoiding temporary
+  u16 wrap. Reassembled payloads exceeding the full-header pbuf limit keep the
+  base header in first-pbuf headroom; ip6_input consumes the payload separately.
+  Reject extension-adjusted payload lengths above65535. The compatibility
+  ip6_reass entry drops oversized results when it cannot return a separate header.
+- Header pointers are borrowed only while the owning pbuf is alive. Operations
+  remain outside assertion expressions, so disabling assertions does not skip
+  header removal. No heap/pool/queue budget or public C/JNI ABI is increased.
+- Evidence includes ordered/reordered32768/65487/65488/65527-byte native vectors,
+  output failures at fragment0/1/45, actual JNI and independent kernel peer tests.
+  Broader extension-header/fault matrices and independent security review remain
+  open; this is not full upstream security approval.
+
 ## TCP timestamp unsigned shift (local correction, 2026-10-22)
 
 - File: `src/core/tcp_in.c`, cumulative with the TCP option reader backport below.
@@ -45,7 +77,8 @@ accepting exactly the reviewed post-image. No other vendor modification is allow
   portion only (IPv4 is disabled and its vendor source remains unchanged).
 - File: `src/core/ipv6/ip6_frag.c`.
 - Original SHA-256: `c770139ab8d31da076fbf9b74a260511b647c377241bf1344547d02f6e0cc99d`.
-- Post-image SHA-256: `6d3783d2fcbe1187eac34a6b732436447288b9740b6ec9a8d69002acb08680f3`.
+- Backport-only post-image SHA-256: `6d3783d2fcbe1187eac34a6b732436447288b9740b6ec9a8d69002acb08680f3`;
+  the current cumulative post-image is recorded in the large-payload correction above.
 - Change: wrap first-fragment ICMP generation in the upstream non-null pbuf guard.
 - Regression: `reassembly_tests.c` compiles real `ip6_frag.c`, calls `ip6_reass`
   with a valid 129-pbuf chain, exceeds the configured 128-pbuf quota and confirms

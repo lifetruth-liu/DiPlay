@@ -19,7 +19,7 @@ BACKPORTS = {
     ),
     "src/core/ipv6/ip6_frag.c": (
         "c770139ab8d31da076fbf9b74a260511b647c377241bf1344547d02f6e0cc99d",
-        "6d3783d2fcbe1187eac34a6b732436447288b9740b6ec9a8d69002acb08680f3",
+        "23a4c2b37ee48527afb642bf1568a84b6e0ece67f19a9cda93371e3a674dd655",
         "56b29f8bcfaefe2974dca67bde16cc7c391feaeb",
     ),
     "src/core/tcp_in.c": (
@@ -28,12 +28,20 @@ BACKPORTS = {
         "3d896ba0a37ff3ce73270ca5e230707fe47f60e3",
     ),
 }
-LOCAL_FIXES = {"src/core/tcp_in.c": "tcp-timestamp-unsigned-shift"}
+LOCAL_POST_IMAGES = {
+    "src/core/ipv6/ip6.c": ("b46f5bcc0d086552502bd0db36198a9a804f22efcb97683bc968e20099025dec",
+                           "2c9d7c76fd3d5c990d2967cd2ae8f9e240054e115892085e974c0ce8f191ecd6"),
+    "src/include/lwip/ip6_frag.h": ("0dcea4a7600b856877e7fb4943b20690aa9e2b69414b4b2273c7e9e0a25f74a3",
+                                  "b38cc1cc2df8b90d77671326a24b58178f2183cf2b623103eb5b7ac318efb178"),
+}
+LOCAL_FIXES = {"src/core/tcp_in.c": "tcp-timestamp-unsigned-shift",
+               **{name: "ipv6-separate-header-fragmentation" for name in
+                  ["src/core/ipv6/ip6.c", "src/core/ipv6/ip6_frag.c", "src/include/lwip/ip6_frag.h"]}}
 ABIS = {"armeabi-v7a": (1, 40), "arm64-v8a": (2, 183), "x86": (1, 3), "x86_64": (2, 62)}
 
 
 def verify_source():
-    if not LOCAL_FIXES.keys() <= BACKPORTS.keys():
+    if not LOCAL_FIXES.keys() <= BACKPORTS.keys() | LOCAL_POST_IMAGES.keys() or BACKPORTS.keys() & LOCAL_POST_IMAGES.keys():
         raise ValueError("local fixes require an exact reviewed post-image")
     manifest = (ROOT / "UPSTREAM-SHA256.txt").read_bytes()
     if hashlib.sha256(manifest).hexdigest() != MANIFEST_HASH:
@@ -49,6 +57,10 @@ def verify_source():
     for name, (original, patched, commit) in BACKPORTS.items():
         if expected.get(name) != original:
             raise ValueError("backport does not match the original release: " + name)
+        expected[name] = patched
+    for name, (original, patched) in LOCAL_POST_IMAGES.items():
+        if expected.get(name) != original or name not in LOCAL_FIXES:
+            raise ValueError("local correction does not match original release: " + name)
         expected[name] = patched
     actual = {p.relative_to(vendor).as_posix(): p for p in vendor.rglob("*") if p.is_file()}
     if set(actual) != set(expected):

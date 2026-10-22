@@ -1,13 +1,14 @@
 # P3 UDP公共合同适配
 
-`LwipUdpEndpoint`实现现有`UdpEndpoint`，通过显式`LwipPrototype`绑定；尚未提供
-完整`LwipSessionNetwork`，也不改变生产后端选择。`LwipUdpCore`是仅限核心线程的
+`LwipUdpEndpoint`实现现有`UdpEndpoint`，通过显式`LwipPrototype`绑定；后续已由
+显式`LwipSessionNetwork`组合，见session-network-adapter.md；
+仍不改变生产后端选择。`LwipUdpCore`是仅限核心线程的
 非阻塞接口，`NativePrototypeCore`将其转发给既有UDP JNI（当前整体ABI 6），不新增C接口。
 
 bind在登记资源前检查运行状态和调用线程；IPv6本地地址只能是虚拟netif实际地址
 或全零通配地址。结果报告实际地址、实际分配端口和调用者的会话linkId，不使用
 内核IPv6接口索引。端口冲突映射ADDRESS_CONFLICT，OOM映射RESOURCE_LIMIT。
-原型echo监听器仍存在，统计中必须扣清其基线，不能把它误报为泄漏。
+单独echo原型工厂仍有监听器，统计须扣清其基线；显式会话不创建echo监听器。
 
 每个端点持有一个资源scope和generation token。token只在核心线程发布和消费；
 关闭先取消等待者，再通过预留控制队列释放native端点，最多释放一次。绑定失败、
@@ -37,7 +38,9 @@ delivery失败也在finally退休命令。普通准备入口使用同一交付�
 队列另测delivery持有预算、跨关闭交付和delivery异常后的回收。
 Android测试从公共UDP合同经运行器/JNI到真实lwIP，以有效IPv6/NDP/UDP帧收发，
 核对来源与截断、零包、实际输出端口/内容、关闭唤醒、native数量回到echo基线，
-以及同端口重新绑定。此处“公共合同”不表示已有完整SessionNetwork工厂可供业务选用。
+以及同端口重新绑定。此处“公共合同”不表示业务已切换到该后端。
 
-未验收：全部65527字节边界、媒体过期丢弃策略、完整两后端参数化T01–T08、TCP、
-完整会话、实际NCM/iPhone/ARM和关闭耗时预算。G2/G3没有因此通过。
+后续共同设备/原生/独立kernel测试已覆盖65527字节及65487/65488边界，修复大负载
+分片与重组，见udp-large-datagram-gap.md。显式会话已组合TCP/UDP，但不改变生产选择。
+未验收：完整分配/扩展头故障矩阵、媒体过期丢弃策略、全部两后端T01–T08、实际
+NCM/iPhone/ARM和完整内存/关闭耗时预算。G2/G3没有因此通过。

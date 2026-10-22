@@ -1005,7 +1005,8 @@ netif_found:
 #if LWIP_IPV6_REASS
         /* reassemble the packet */
         ip_data.current_ip_header_tot_len = hlen_tot;
-        p = ip6_reass(p);
+        struct ip6_hdr *separate_reass_header = NULL;
+        p = ip6_reass_with_header(p, &separate_reass_header);
         /* packet not fully reassembled yet? */
         if (p == NULL) {
           goto ip6_input_cleanup;
@@ -1013,11 +1014,13 @@ netif_found:
 
         /* Returned p points to IPv6 header.
          * Update all our variables and pointers and continue. */
-        ip6hdr = (struct ip6_hdr *)p->payload;
+        ip6hdr = separate_reass_header != NULL ? separate_reass_header : (struct ip6_hdr *)p->payload;
         ip_data.current_ip6_header = ip6hdr;
         nexth = &IP6H_NEXTH(ip6hdr);
         hlen = hlen_tot = IP6_HLEN;
-        pbuf_remove_header(p, IP6_HLEN);
+        if (separate_reass_header == NULL) {
+          pbuf_remove_header(p, IP6_HLEN);
+        }
 
 #else /* LWIP_IPV6_REASS */
         /* free (drop) packet pbufs */
@@ -1176,6 +1179,10 @@ ip6_output_if_src(struct pbuf *p, const ip6_addr_t *src, const ip6_addr_t *dest,
              u8_t nexth, struct netif *netif)
 {
   struct ip6_hdr *ip6hdr;
+#if LWIP_IPV6_FRAG && !ENABLE_LOOPBACK
+  struct ip6_hdr separate_header;
+  u8_t separate = 0;
+#endif
   ip6_addr_t dest_addr;
 
   LWIP_ASSERT_CORE_LOCKED();
@@ -1197,7 +1204,15 @@ ip6_output_if_src(struct pbuf *p, const ip6_addr_t *src, const ip6_addr_t *dest,
     }
 #endif /* LWIP_IPV6_SCOPES */
 
-    /* generate IPv6 header */
+    /* Keep the base header separate when a legal payload fills the u16 pbuf. */
+    u16_t payload_length = p->tot_len;
+#if LWIP_IPV6_FRAG && !ENABLE_LOOPBACK
+    if (payload_length > 0xffffU - IP6_HLEN && netif_mtu6(netif) != 0) {
+      ip6hdr = &separate_header;
+      separate = 1;
+    } else
+#endif
+    {
     if (pbuf_add_header(p, IP6_HLEN)) {
       LWIP_DEBUGF(IP6_DEBUG | LWIP_DBG_LEVEL_SERIOUS, ("ip6_output: not enough room for IPv6 header in pbuf\n"));
       IP6_STATS_INC(ip6.err);
@@ -1207,6 +1222,7 @@ ip6_output_if_src(struct pbuf *p, const ip6_addr_t *src, const ip6_addr_t *dest,
     ip6hdr = (struct ip6_hdr *)p->payload;
     LWIP_ASSERT("check that first pbuf can hold struct ip6_hdr",
                (p->len >= sizeof(struct ip6_hdr)));
+    }
 
     IP6H_HOPLIM_SET(ip6hdr, hl);
     IP6H_NEXTH_SET(ip6hdr, nexth);
@@ -1215,7 +1231,7 @@ ip6_output_if_src(struct pbuf *p, const ip6_addr_t *src, const ip6_addr_t *dest,
     ip6_addr_copy_to_packed(ip6hdr->dest, *dest);
 
     IP6H_VTCFL_SET(ip6hdr, 6, tc, 0);
-    IP6H_PLEN_SET(ip6hdr, (u16_t)(p->tot_len - IP6_HLEN));
+    IP6H_PLEN_SET(ip6hdr, payload_length);
 
     if (src == NULL) {
       src = IP6_ADDR_ANY6;
@@ -1232,6 +1248,11 @@ ip6_output_if_src(struct pbuf *p, const ip6_addr_t *src, const ip6_addr_t *dest,
   }
 
   IP6_STATS_INC(ip6.xmit);
+#if LWIP_IPV6_FRAG && !ENABLE_LOOPBACK
+  if (separate) {
+    return ip6_frag_payload(p, &separate_header, netif, dest);
+  }
+#endif
 
   LWIP_DEBUGF(IP6_DEBUG, ("ip6_output_if: %c%c%"U16_F"\n", netif->name[0], netif->name[1], (u16_t)netif->num));
   ip6_debug_print(p);

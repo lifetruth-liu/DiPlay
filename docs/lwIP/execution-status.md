@@ -1359,3 +1359,48 @@ c09ed14b3eaf2ae6d99c7eb46e062c8f13e921ce7fcd7cd152b4bc66f45b979b。
 单元任务UP-TO-DATE，不记重新执行。public tree及staged diff检查通过。
 本轮仅测试夹具/文档变化，生产后端不变；完整内存峰值、故障矩阵、真实NCM/iPhone/
 ARM与安全/性能门槛仍缺，整体目标和G2/G3保持未完成。
+
+### UDP大负载发送与有序重组修复
+
+994298b3之后扩展公共向量，先复现JNI65488字节发送RESOURCE_LIMIT、系统可发65527；
+36项中35通过1失败，TEMP/diplay-udp-fragments-boundary.log。原因是完整IPv6头加
+UDP负载超过16位pbuf长度。没有降低65527输入上限、扩大预算或移除溢出保护。
+
+本地补丁使大负载的基础IPv6头与payload分开，复用现有分片循环、ID生成器与netif
+输出，仅对当前启用分片且禁用loopback的port配置启用。新大报文路径传播首片和
+部分输出错误。内部helper新增但公共C ABI1/JNI ABI6不变。
+
+首轮JNI36/36后，扩大独立kernel UDP向量才发现顺序65488字节重组时pbuf头恢复
+断言：TEMP/diplay-udp-large-kernel-tap.log。接收侧改为先剥各片元数据再拼接，消除
+临时16位回绕；大结果的基础头保留在首片headroom，IPv6输入分别消费头与payload。
+扩展调整后超过65535仍拒绝；断言关闭时仍执行所有头部移除操作。
+
+三个vendor文件保留CRLF，精确post-image及适用边界记录于原生BACKPORTS.md；原始
+314文件发布清单和manifest摘要不变。新本地补丁身份与三个官方回补身份分开，
+没有伪称上游提交或安全评审完成。校验器增加两个独立local post-image及累计frag
+摘要约束，仍拒绝任意vendor修改。
+
+最终验证：
+
+- Windows MinGW原生50/50，0.93s：TEMP/diplay-udp-large-reass-final-host.log。
+  UDP案例含32768/65487/65488/65527，顺序/乱序输入；第0/1/45片输出失败后正确
+  错误、UDP PCB/pbuf归零。早期测试误将无echo夹具PCB基线设为1、并把失败核心
+  close结果期待OK，已依据源码与实际基线纠正，没有修改生产清理语义。
+- Linux ASan/UBSan/默认LSan50/50，5.48s：/tmp/diplay-udp-large-reass-final-sanitize.log。
+- JNI最终36/36，51s，零失败/错误/跳过：TEMP/diplay-udp-large-reass-connected.log。
+  API28 x86_64自建AVD，无真实USB/iPhone。测试APK SHA-256：
+  392d66453c426c61795a32d21b8006dfe773b16ebe875c61d443fce9c89e419b。
+- Android ASan/UBSan独立内核peer：TAP endpoints、veth endpoints及旧echo TAP均通过，
+  UDP0/1/1200/4096/8192/65487/65488/65527和既有TCP/主动连接。日志TEMP/
+  diplay-udp-large-kernel-tap-fixed.log、diplay-udp-large-kernel-veth.log、
+  diplay-udp-large-kernel-legacy.log。Android明确detect_leaks=0，不宣称LSan扫描。
+- 关闭断言的附加MinGW变体UDP回归通过：TEMP/diplay-udp-large-noassert-variant.log；
+  使用-DLWIP_NOASSERT=1 -Wno-error=unused-parameter，因已有TCP参数仅被断言引用。
+  首次原始-Werror构建因此失败，不宣称原始无断言配置警告全通过。
+- 完整九项CI exit0、3s、250任务15执行：TEMP/diplay-udp-large-final-ci.log，三个
+  单元任务UP-TO-DATE，不记重新执行。APK四ABI/16KiB/NX/许可证/源摘要检查通过，
+  mobile APK SHA-256：f4153b749415108f751dbe85de94d84f59ee4a92939963af4945f5c178378689。
+
+父namespace仍net:[4026531963]，dp-lwip0/dp-peer0不存在；public tree及staged diff
+检查通过。完整分配/扩展头故障矩阵、独立安全评审、进程峰值、实际NCM/iPhone/ARM
+及性能/长稳仍缺，生产选择未切换，G2/G3与整体目标保持未完成。

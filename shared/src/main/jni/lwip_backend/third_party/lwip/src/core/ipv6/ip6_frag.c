@@ -271,7 +271,7 @@ ip6_reass_remove_oldest_datagram(struct ip6_reassdata *ipr, int pbufs_needed)
  *         IPv6 Header if reassembly is complete
  */
 struct pbuf *
-ip6_reass(struct pbuf *p)
+ip6_reass_with_header(struct pbuf *p, struct ip6_hdr **separate_header)
 {
   struct ip6_reassdata *ipr, *ipr_prev;
   struct ip6_reass_helper *iprh, *iprh_tmp, *iprh_prev=NULL;
@@ -282,6 +282,9 @@ ip6_reass(struct pbuf *p)
   u8_t valid = 1;
   struct pbuf *q, *next_pbuf;
 
+  if (separate_header != NULL) {
+    *separate_header = NULL;
+  }
   IP6_FRAG_STATS_INC(ip6_frag.recv);
 
   /* ip6_frag_hdr must be in the first pbuf, not chained. Checked by caller. */
@@ -567,50 +570,40 @@ ip6_reass(struct pbuf *p)
   if (valid) {
     /* All fragments have been received */
     struct ip6_hdr* iphdr_ptr;
+    u8_t header_error;
 
-    /* chain together the pbufs contained within the ip6_reassdata list. */
-    iprh = (struct ip6_reass_helper*) ipr->p->payload;
-    while (iprh != NULL) {
-      next_pbuf = iprh->next_pbuf;
-      if (next_pbuf != NULL) {
-        /* Save next helper struct (will be hidden in next step). */
-        iprh_tmp = (struct ip6_reass_helper*)next_pbuf->payload;
-
-        /* hide the fragment header for every succeeding fragment */
-        pbuf_remove_header(next_pbuf, IP6_FRAG_HLEN);
-#if IPV6_FRAG_COPYHEADER
-        if (IPV6_FRAG_REQROOM > 0) {
-          /* hide the extra bytes borrowed from ip6_hdr for struct ip6_reass_helper */
-          u8_t hdrerr = pbuf_remove_header(next_pbuf, IPV6_FRAG_REQROOM);
-          LWIP_UNUSED_ARG(hdrerr); /* in case of LWIP_NOASSERT */
-          LWIP_ASSERT("no room for struct ip6_reass_helper", hdrerr == 0);
-        }
-#endif
-        pbuf_cat(ipr->p, next_pbuf);
-      }
-      else {
-        iprh_tmp = NULL;
-      }
-
-      iprh = iprh_tmp;
-    }
-
-    /* Get the first pbuf. */
+    /* Strip per-fragment metadata before concatenation so the u16 total
+     * never includes a fragment/helper header beyond the legal payload. */
     p = ipr->p;
-
+    iprh = (struct ip6_reass_helper *)p->payload;
+    next_pbuf = iprh->next_pbuf;
 #if IPV6_FRAG_COPYHEADER
     if (IPV6_FRAG_REQROOM > 0) {
-      u8_t hdrerr;
-      /* Restore (only) the bytes that we overwrote beyond the fragment header.
-       * Those bytes may belong to either the IPv6 header or an extension
-       * header placed before the fragment header. */
       MEMCPY(p->payload, ipr->orig_hdr, IPV6_FRAG_REQROOM);
-      /* get back room for struct ip6_reass_helper (only required if sizeof(void*) > 4) */
-      hdrerr = pbuf_remove_header(p, IPV6_FRAG_REQROOM);
-      LWIP_UNUSED_ARG(hdrerr); /* in case of LWIP_NOASSERT */
-      LWIP_ASSERT("no room for struct ip6_reass_helper", hdrerr == 0);
+      header_error = pbuf_remove_header(p, IPV6_FRAG_REQROOM);
+      LWIP_ASSERT("first helper room", header_error == 0);
+      LWIP_UNUSED_ARG(header_error);
     }
 #endif
+    header_error = pbuf_remove_header(p, IP6_FRAG_HLEN);
+    LWIP_ASSERT("first fragment header", header_error == 0);
+    LWIP_UNUSED_ARG(header_error);
+    while (next_pbuf != NULL) {
+      q = next_pbuf;
+      iprh_tmp = (struct ip6_reass_helper *)q->payload;
+      next_pbuf = iprh_tmp->next_pbuf;
+      header_error = pbuf_remove_header(q, IP6_FRAG_HLEN);
+      LWIP_ASSERT("fragment header", header_error == 0);
+      LWIP_UNUSED_ARG(header_error);
+#if IPV6_FRAG_COPYHEADER
+      if (IPV6_FRAG_REQROOM > 0) {
+        header_error = pbuf_remove_header(q, IPV6_FRAG_REQROOM);
+        LWIP_ASSERT("helper room", header_error == 0);
+        LWIP_UNUSED_ARG(header_error);
+      }
+#endif
+      pbuf_cat(p, q);
+    }
 
     /* We need to get rid of the fragment header itself, which is somewhere in
      * the middle of the packet (but still in the first pbuf of the chain).
@@ -622,18 +615,18 @@ ip6_reass(struct pbuf *p)
      * of the chain, and because the caller adjusts all its pointers on
      * successful reassembly. */
     MEMMOVE((u8_t*)ipr->iphdr + sizeof(struct ip6_frag_hdr), ipr->iphdr,
-      (size_t)((u8_t*)p->payload - (u8_t*)ipr->iphdr));
+      (size_t)((u8_t*)p->payload - (u8_t*)ipr->iphdr - IP6_FRAG_HLEN));
 
     /* This is where the IPv6 header is now. */
     iphdr_ptr = (struct ip6_hdr*)((u8_t*)ipr->iphdr +
       sizeof(struct ip6_frag_hdr));
 
     /* Adjust datagram length by adding header lengths. */
-    ipr->datagram_len = (u16_t)(ipr->datagram_len + ((u8_t*)p->payload - (u8_t*)iphdr_ptr)
-                         - IP6_HLEN);
+    u32_t datagram_length = (u32_t)ipr->datagram_len +
+      (u32_t)((u8_t*)p->payload - (u8_t*)iphdr_ptr) - IP6_HLEN;
 
     /* Set payload length in ip header. */
-    iphdr_ptr->_plen = lwip_htons(ipr->datagram_len);
+    iphdr_ptr->_plen = lwip_htons((u16_t)datagram_length);
 
     /* With the fragment header gone, we now need to adjust the next-header
      * field of whatever header was originally before it. Since the packet made
@@ -665,8 +658,20 @@ ip6_reass(struct pbuf *p)
     LWIP_ASSERT("ip6_reass_pbufcount >= clen", ip6_reass_pbufcount >= clen);
     ip6_reass_pbufcount = (u16_t)(ip6_reass_pbufcount - clen);
 
-    /* Move pbuf back to IPv6 header. This should never fail. */
-    if (pbuf_header_force(p, (s16_t)((u8_t*)p->payload - (u8_t*)iphdr_ptr))) {
+    /* A full IPv6 payload fits u16, but its base header may not. Keep that
+     * header in the first pbuf headroom and expose only the payload length. */
+    u16_t header_bytes = (u16_t)((u8_t*)p->payload - (u8_t*)iphdr_ptr);
+    if (datagram_length > 0xffffU ||
+        (datagram_length > 0xffffU - IP6_HLEN && separate_header == NULL)) {
+      pbuf_free(p);
+      IP6_FRAG_STATS_INC(ip6_frag.drop);
+      return NULL;
+    }
+    if (datagram_length > 0xffffU - IP6_HLEN) {
+      *separate_header = iphdr_ptr;
+      header_bytes = (u16_t)(header_bytes - IP6_HLEN);
+    }
+    if (pbuf_header_force(p, (s16_t)header_bytes)) {
       LWIP_ASSERT("ip6_reass: moving p->payload to ip6 header failed", 0);
       pbuf_free(p);
       return NULL;
@@ -683,6 +688,12 @@ nullreturn:
   IP6_FRAG_STATS_INC(ip6_frag.drop);
   pbuf_free(p);
   return NULL;
+}
+
+struct pbuf *
+ip6_reass(struct pbuf *p)
+{
+  return ip6_reass_with_header(p, NULL);
 }
 
 #endif /* LWIP_IPV6 && LWIP_IPV6_REASS */
@@ -732,10 +743,10 @@ ip6_frag_free_pbuf_custom(struct pbuf *p)
  *
  * @return ERR_OK if sent successfully, err_t otherwise
  */
-err_t
-ip6_frag(struct pbuf *p, struct netif *netif, const ip6_addr_t *dest)
+static err_t
+ip6_frag_with_header(struct pbuf *p, const struct ip6_hdr *original_ip6hdr,
+                     struct netif *netif, const ip6_addr_t *dest, u8_t payload_only)
 {
-  struct ip6_hdr *original_ip6hdr;
   struct ip6_hdr *ip6hdr;
   struct ip6_frag_hdr *frag_hdr;
   struct pbuf *rambuf;
@@ -750,15 +761,16 @@ ip6_frag(struct pbuf *p, struct netif *netif, const ip6_addr_t *dest)
   const u16_t nfb = (u16_t)((mtu - (IP6_HLEN + IP6_FRAG_HLEN)) & IP6_FRAG_OFFSET_MASK);
   u16_t fragment_offset = 0;
   u16_t last;
-  u16_t poff = IP6_HLEN;
+  u16_t poff = payload_only ? 0 : IP6_HLEN;
 
   identification++;
 
-  original_ip6hdr = (struct ip6_hdr *)p->payload;
-
   /* @todo we assume there are no options in the unfragmentable part (IPv6 header). */
-  LWIP_ASSERT("p->tot_len >= IP6_HLEN", p->tot_len >= IP6_HLEN);
-  left = (u16_t)(p->tot_len - IP6_HLEN);
+  LWIP_ASSERT("fragment header offset valid", p->tot_len >= poff);
+  if (mtu <= IP6_HLEN + IP6_FRAG_HLEN || nfb == 0) {
+    return ERR_VAL;
+  }
+  left = (u16_t)(p->tot_len - poff);
 
   while (left) {
     last = (left <= nfb);
@@ -859,7 +871,13 @@ ip6_frag(struct pbuf *p, struct netif *netif, const ip6_addr_t *dest)
      * when allocated.
      */
     IP6_FRAG_STATS_INC(ip6_frag.xmit);
-    netif->output_ip6(netif, rambuf, dest);
+    {
+      err_t output_error = netif->output_ip6(netif, rambuf, dest);
+      if (payload_only && output_error != ERR_OK) {
+        pbuf_free(rambuf);
+        return output_error;
+      }
+    }
 
     /* Unfortunately we can't reuse rambuf - the hardware may still be
      * using the buffer. Instead we free it (and the ensuing chain) and
@@ -873,6 +891,20 @@ ip6_frag(struct pbuf *p, struct netif *netif, const ip6_addr_t *dest)
     fragment_offset = (u16_t)(fragment_offset + cop);
   }
   return ERR_OK;
+}
+
+err_t
+ip6_frag(struct pbuf *p, struct netif *netif, const ip6_addr_t *dest)
+{
+  return ip6_frag_with_header(p, (const struct ip6_hdr *)p->payload, netif, dest, 0);
+}
+
+/* A separate base header keeps a full 65535-byte IPv6 payload representable. */
+err_t
+ip6_frag_payload(struct pbuf *p, const struct ip6_hdr *header,
+                 struct netif *netif, const ip6_addr_t *dest)
+{
+  return ip6_frag_with_header(p, header, netif, dest, 1);
 }
 
 #endif /* LWIP_IPV6 && LWIP_IPV6_FRAG */

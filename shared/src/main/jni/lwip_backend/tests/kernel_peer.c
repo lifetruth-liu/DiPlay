@@ -116,7 +116,7 @@ static int udp_cases(unsigned scope, const unsigned char *payload) {
         perror("UDP connect");
         return 1;
     }
-    const size_t sizes[] = {0, 1, 1200, 4096, 8192};
+    const size_t sizes[] = {0, 1, 1200, 4096, 8192, 65487, 65488, 65527};
     int result = 1;
     for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
         ssize_t n;
@@ -127,7 +127,7 @@ static int udp_cases(unsigned scope, const unsigned char *payload) {
             perror("UDP send");
             goto done;
         }
-        unsigned char bytes[8193];
+        unsigned char bytes[65528];
         struct sockaddr_in6 source = {0};
         socklen_t size = sizeof(source);
         do {

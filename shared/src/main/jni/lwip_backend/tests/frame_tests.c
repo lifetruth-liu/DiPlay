@@ -34,6 +34,7 @@ struct fixture {
     uint32_t random;
     int ready;
     size_t count;
+    size_t fail_after;
     struct frame frames[64];
 };
 static const uint8_t local_mac[6] = {2, 0, 0, 0, 0, 1};
@@ -82,7 +83,7 @@ static uint32_t random32(void *arg) {
 }
 static dp_tx_result output(void *arg, const uint8_t *bytes, size_t length) {
     struct fixture *f = arg;
-    if (f->ready < 0)
+    if (f->ready < 0 || (f->fail_after && f->count >= f->fail_after))
         return DP_TX_FAILED;
     if (!f->ready)
         return DP_TX_NOT_READY;
@@ -1277,45 +1278,73 @@ static void test_fragments(void) {
     CHECK(stats.pbuf_used == 0 && stats.heap_used == 0);
     close_core(&f);
 }
-static void test_udp_endpoint_fragments(void) {
+static void test_udp_endpoint_fragments_case(size_t payload_length, int ordered) {
     struct fixture f;
     ready_core(&f);
     uint64_t handle;
     uint16_t port;
     CHECK(dp_udp_bind(f.core, 0, &handle, &port) == DP_OK);
-    uint8_t datagram[32776] = {0}, received[32768], reply[32776] = {0};
-    w16(datagram, 50000); w16(datagram + 2, port); w16(datagram + 4, sizeof(datagram));
-    for (size_t i = 8; i < sizeof(datagram); ++i) datagram[i] = (uint8_t)(i ^ (i >> 8));
+    uint8_t datagram[65535] = {0}, received[65527], reply[65535] = {0};
+    const size_t datagram_length = payload_length + 8;
+    w16(datagram, 50000); w16(datagram + 2, port); w16(datagram + 4, (uint16_t)datagram_length);
+    for (size_t i = 8; i < datagram_length; ++i) datagram[i] = (uint8_t)(i ^ (i >> 8));
     uint8_t pseudo[40] = {0};
     memcpy(pseudo + 8, peer_ip, 16); memcpy(pseudo + 24, local_ip, 16);
-    w16(datagram + 6, checksum(pseudo, datagram, sizeof(datagram), 17));
-    fragment(&f, datagram, 32400, sizeof(datagram) - 32400, 0, 345);
-    for (size_t offset = 0; offset < 32400; offset += 1200)
-        fragment(&f, datagram, offset, 1200, 1, 345);
+    w16(datagram + 6, checksum(pseudo, datagram, datagram_length, 17));
+    const size_t tail = ((datagram_length - 1) / 1200) * 1200;
+    if (!ordered) fragment(&f, datagram, tail, datagram_length - tail, 0, 345);
+    for (size_t offset = 0; offset < (ordered ? datagram_length : tail); offset += 1200) {
+        size_t length = datagram_length - offset < 1200 ? datagram_length - offset : 1200;
+        fragment(&f, datagram, offset, length, offset + length < datagram_length, 345);
+    }
     dp_udp_datagram info;
     CHECK(dp_udp_receive(f.core, handle, received, sizeof(received), &info) == DP_OK);
-    CHECK(info.original_length == sizeof(received) && info.copied_length == sizeof(received));
-    CHECK(!memcmp(received, datagram + 8, sizeof(received)));
+    CHECK(info.original_length == payload_length && info.copied_length == payload_length);
+    CHECK(!memcmp(received, datagram + 8, payload_length));
     CHECK(info.source_port == 50000 && !memcmp(info.source, peer_ip, 16));
     f.count = 0;
-    CHECK(dp_udp_send(f.core, handle, peer_ip, 50000, received, sizeof(received)) == DP_OK);
+    CHECK(dp_udp_send(f.core, handle, peer_ip, 50000, received, payload_length) == DP_OK);
     size_t total = 0, pieces = 0;
     for (size_t i = 0; i < f.count; ++i) {
         const uint8_t *ip = f.frames[i].bytes + 14;
         if (ip[6] != 44) continue;
         const uint8_t *frag = ip + 40;
         size_t offset = u16(frag + 2) & 0xfff8, length = u16(ip + 4) - 8;
-        CHECK(frag[0] == 17 && offset + length <= sizeof(reply));
+        CHECK(frag[0] == 17 && offset + length <= datagram_length);
         memcpy(reply + offset, frag + 8, length);
         if (!(u16(frag + 2) & 1)) total = offset + length;
         pieces++;
     }
-    CHECK(pieces > 1 && total == sizeof(reply));
+    CHECK(pieces > 1 && total == datagram_length);
     CHECK(u16(reply) == port && u16(reply + 2) == 50000);
-    CHECK(!memcmp(reply + 8, received, sizeof(received)));
+    CHECK(!memcmp(reply + 8, received, payload_length));
     memcpy(pseudo + 8, local_ip, 16); memcpy(pseudo + 24, peer_ip, 16);
-    CHECK(checksum(pseudo, reply, sizeof(reply), 17) == 0);
+    CHECK(checksum(pseudo, reply, datagram_length, 17) == 0);
     close_core(&f);
+
+    if (payload_length != 65527 || ordered) return;
+
+    const size_t failures[] = {0, 1, 45};
+    for (size_t attempt = 0; attempt < sizeof(failures) / sizeof(failures[0]); ++attempt) {
+        ready_core(&f);
+        CHECK(dp_udp_bind(f.core, 0, &handle, &port) == DP_OK);
+        f.fail_after = failures[attempt];
+        if (!f.fail_after) f.ready = -1;
+        CHECK(dp_udp_send(f.core, handle, peer_ip, 50000, received, sizeof(received)) == DP_LINK_IO);
+        CHECK(f.count == failures[attempt]);
+        CHECK(dp_udp_close(f.core, handle) == DP_LINK_IO);
+        dp_stats failure_stats;
+        CHECK(dp_core_get_stats(f.core, &failure_stats) == DP_OK);
+        CHECK(failure_stats.failure == DP_LINK_IO && failure_stats.udp_pcbs == 0 && failure_stats.pbuf_used == 0);
+        close_core(&f);
+    }
+}
+static void test_udp_endpoint_fragments(void) {
+    const size_t sizes[] = {32768, 65487, 65488, 65527};
+    for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); ++i) {
+        test_udp_endpoint_fragments_case(sizes[i], 0);
+        test_udp_endpoint_fragments_case(sizes[i], 1);
+    }
 }
 static void test_tx_failed(void) {
     struct fixture f;

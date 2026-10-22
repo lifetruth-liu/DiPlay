@@ -33,7 +33,8 @@ class SessionNetworkDeviceContractTest(private val backend: String) {
             val network = fixture.network
             network.bindUdp(NetworkEndpoint(fixture.localAddress, 0, network.linkId)).use { receiver ->
                 val deadline = { network.clock.nowMillis() + 3000 }
-                for ((size, capacity) in listOf(0 to 16, 1 to 16, 1200 to 1200, 1200 to 17, 19 to 0)) {
+                for ((size, capacity) in listOf(0 to 16, 1 to 16, 1200 to 1200, 1200 to 17, 19 to 0,
+                    8192 to 8192, 65527 to 65527, 65527 to 17)) {
                     val payload = ByteArray(size) { (it * 31 + size).toByte() }
                     fixture.send(receiver.localEndpoint.port, payload)
                     // A following datagram must not be merged into the first or discarded on truncation.
@@ -54,9 +55,10 @@ class SessionNetworkDeviceContractTest(private val backend: String) {
                     assertFalse(following.truncated)
                     assertArrayEquals(byteArrayOf(42, 43), next.copyOf(2))
                 }
-                for (size in listOf(0, 1, 1200)) {
+                for (size in listOf(0, 1, 1200, 8192, 65487, 65488, 65527)) {
                     val payload = ByteArray(size) { (it * 17 + 3).toByte() }
-                    receiver.send(payload, fixture.destination, deadline())
+                    try { receiver.send(payload, fixture.destination, deadline()) }
+                    catch (failure: BackendFailure) { throw AssertionError("UDP send payload=$size backend=$backend", failure) }
                     fixture.assertSent(receiver.localEndpoint.port, payload)
                 }
                 assertThrows(IllegalArgumentException::class.java) {
@@ -90,7 +92,7 @@ class SessionNetworkDeviceContractTest(private val backend: String) {
                     socket.send(DatagramPacket(payload, payload.size, address, destinationPort))
                 }
                 override fun assertSent(sourcePort: Int, payload: ByteArray) {
-                    val packet = DatagramPacket(ByteArray(1500), 1500)
+                    val packet = DatagramPacket(ByteArray(65535), 65535)
                     socket.receive(packet)
                     assertEquals(sourcePort, packet.port)
                     assertArrayEquals(address.address, packet.address.address)
@@ -133,27 +135,58 @@ class SessionNetworkDeviceContractTest(private val backend: String) {
                 it[0] = 0xff.toByte(); it[1] = 2; it[15] = 1
             }, 50000, network.linkId)
             override fun assertSent(sourcePort: Int, payload: ByteArray) {
+                val assembled = ByteArray(payload.size + 8)
+                val seen = BooleanArray(assembled.size)
+                var copied = 0
+                var last = false
+                var identifier: List<Byte>? = null
+                fun validateUdp(udp: ByteArray) {
+                    fun read16(at: Int) = ((udp[at].toInt() and 255) shl 8) or (udp[at + 1].toInt() and 255)
+                    assertEquals(sourcePort, read16(0)); assertEquals(destination.port, read16(2))
+                    assertEquals(payload.size + 8, read16(4))
+                    assertArrayEquals(payload, udp.copyOfRange(8, udp.size))
+                    assertNotEquals(0, read16(6))
+                    var sum = 17 + udp.size
+                    for (address in listOf(ip, destination.address)) {
+                        for (at in address.indices step 2) sum += ((address[at].toInt() and 255) shl 8) or (address[at + 1].toInt() and 255)
+                    }
+                    for (at in udp.indices step 2) {
+                        sum += (udp[at].toInt() and 255) shl 8
+                        if (at + 1 < udp.size) sum += udp[at + 1].toInt() and 255
+                    }
+                    while (sum ushr 16 != 0) sum = (sum and 65535) + (sum ushr 16)
+                    assertEquals(65535, sum)
+                }
                 val end = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
                 while (System.nanoTime() < end) {
                     val frame = outgoing.poll(100, TimeUnit.MILLISECONDS) ?: continue
-                    if (frame.size < 62 || frame[20] != 17.toByte()) continue
+                    if (frame.size < 62 || frame[20].toInt() !in listOf(17, 44)) continue
                     fun read16(at: Int) = ((frame[at].toInt() and 255) shl 8) or (frame[at + 1].toInt() and 255)
                     assertEquals(0x86dd, read16(12))
                     assertArrayEquals(ip, frame.copyOfRange(22, 38))
                     assertArrayEquals(destination.address, frame.copyOfRange(38, 54))
-                    assertEquals(sourcePort, read16(54)); assertEquals(destination.port, read16(56))
-                    assertEquals(payload.size + 8, read16(58))
-                    assertEquals(payload.size + 8, read16(18))
-                    assertArrayEquals(payload, frame.copyOfRange(62, frame.size))
-                    assertNotEquals(0, read16(60))
-                    var sum = 17 + payload.size + 8
-                    for (at in 22 until frame.size step 2) {
-                        sum += (frame[at].toInt() and 255) shl 8
-                        if (at + 1 < frame.size) sum += frame[at + 1].toInt() and 255
+                    assertEquals(frame.size - 54, read16(18))
+                    assertTrue(frame.size <= 1514)
+                    if (frame[20] == 17.toByte()) {
+                        validateUdp(frame.copyOfRange(54, frame.size)); return
                     }
-                    while (sum ushr 16 != 0) sum = (sum and 65535) + (sum ushr 16)
-                    assertEquals(65535, sum)
-                    return
+                    assertEquals(17, frame[54].toInt())
+                    val id = frame.copyOfRange(58, 62).toList()
+                    if (identifier == null) identifier = id else assertEquals(identifier, id)
+                    val fragment = read16(56)
+                    val start = fragment and 0xfff8
+                    val length = frame.size - 62
+                    assertTrue(start + length <= assembled.size)
+                    if (fragment and 1 == 0) {
+                        assertFalse(last); last = true
+                        assertEquals(assembled.size, start + length)
+                    } else assertEquals(0, length % 8)
+                    repeat(length) { index ->
+                        assertFalse("Overlapping output fragments", seen[start + index])
+                        seen[start + index] = true
+                    }
+                    frame.copyInto(assembled, start, 62, frame.size); copied += length
+                    if (last && copied == assembled.size) { validateUdp(assembled); return }
                 }
                 fail("No UDP output frame before deadline")
             }
@@ -173,9 +206,35 @@ class SessionNetworkDeviceContractTest(private val backend: String) {
                 while (sum ushr 16 != 0) sum = (sum and 65535) + (sum ushr 16)
                 val checksum = sum.inv() and 65535
                 put16(60, if (checksum == 0) 65535 else checksum)
-                check(incoming.offer(frame, 2, TimeUnit.SECONDS))
+                if (frame.size <= 1514) {
+                    check(incoming.offer(frame, 2, TimeUnit.SECONDS))
+                } else {
+                    val fragments = ArrayList<ByteArray>()
+                    var start = 0
+                    while (start < payload.size + 8) {
+                        val length = minOf(1448, payload.size + 8 - start)
+                        val part = ByteArray(62 + length)
+                        frame.copyInto(part, 0, 0, 54)
+                        part[18] = ((length + 8) ushr 8).toByte(); part[19] = (length + 8).toByte()
+                        part[20] = 44; part[54] = 17
+                        val bits = start or if (start + length < payload.size + 8) 1 else 0
+                        part[56] = (bits ushr 8).toByte(); part[57] = bits.toByte()
+                        // Each vector has a distinct ID, including the two maximum-size cases.
+                        val id = fragmentId.incrementAndGet()
+                        repeat(4) { n -> part[58 + n] = (id ushr (24 - n * 8)).toByte() }
+                        frame.copyInto(part, 62, 54 + start, 54 + start + length)
+                        fragments.add(part); start += length
+                    }
+                    // All fragments of a datagram share one ID; deliver first fragment last.
+                    val id = fragments.first().copyOfRange(58, 62)
+                    for (part in fragments.asReversed()) {
+                        id.copyInto(part, 58)
+                        check(incoming.offer(part, 2, TimeUnit.SECONDS))
+                    }
+                }
             }
             override fun close() = network.close()
+            private val fragmentId = java.util.concurrent.atomic.AtomicInteger()
         }
     }
 

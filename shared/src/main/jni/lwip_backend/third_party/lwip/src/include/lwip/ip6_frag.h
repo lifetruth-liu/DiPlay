@@ -47,6 +47,8 @@
 #include "lwip/ip6.h"
 #include "lwip/netif.h"
 
+struct ip6_hdr;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -114,6 +116,7 @@ struct ip6_reassdata {
 #define ip6_reass_init() /* Compatibility define */
 void ip6_reass_tmr(void);
 struct pbuf *ip6_reass(struct pbuf *p);
+struct pbuf *ip6_reass_with_header(struct pbuf *p, struct ip6_hdr **separate_header);
 
 #endif /* LWIP_IPV6 && LWIP_IPV6_REASS */
 
@@ -133,6 +136,9 @@ struct pbuf_custom_ref {
 #endif /* LWIP_PBUF_CUSTOM_REF_DEFINED */
 
 err_t ip6_frag(struct pbuf *p, struct netif *netif, const ip6_addr_t *dest);
+struct ip6_hdr;
+err_t ip6_frag_payload(struct pbuf *p, const struct ip6_hdr *header,
+                      struct netif *netif, const ip6_addr_t *dest);
 
 #endif /* LWIP_IPV6 && LWIP_IPV6_FRAG */
 
