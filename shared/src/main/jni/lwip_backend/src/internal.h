@@ -2,7 +2,9 @@
 #define DIPLAY_LWIP_INTERNAL_H
 #include "diplay_lwip.h"
 #include "lwip/netif.h"
+#include "endpoint_registry.h"
 struct dp_core {
+    dp_endpoint_registry endpoints;
     dp_config config;
     struct netif netif;
     uint64_t initial_clock, last_clock;

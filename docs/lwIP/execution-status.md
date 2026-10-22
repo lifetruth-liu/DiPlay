@@ -588,3 +588,29 @@ JNI connected 5/5、零失败/错误/跳过，12s、exit0：diplay-pmtu-connecte
 rx271/tx226/not_ready0、heap_peak36008；不是NCM/iPhone或ARM验收。
 只读复核回合未完成，不记作通过；实现diff和测试结果已由主代理核对。
 NDP其余定向入口、完整端点/会话集成及真机验收继续待完成，整体方案尚未完成。
+
+### P3私有端点句柄注册表（2026-10-22）
+
+基于dfc31d9c，新增endpoint_registry.{h,c}及独立测试；CMake/Android.mk均编译。
+80槽固定容量嵌入dp_core，进程级单调generation和类型/槽号组成正值token，不编码
+指针。耗尽拒绝，代数不回绕；成功注册转移所有权，remove先失效再释放，clear幂等。
+core销毁在剩余PCB清理前clear。内存由现有sizeof(core)预算统计覆盖。
+详细合同和未覆盖项见[端点注册表](endpoint-registry.md)。
+
+测试先因缺实现编译失败，再以占位实现运行至预期注册断言red、exit1。实现表后通过；
+补充真实core销毁用例再次red，确认释放回调未执行，接入clear后green。
+覆盖正确查找、已占用的不同表同槽/同类型隔离、类型错误、旧句柄、槽复用、满80项、
+失败输出清零、逐项/批量释放一次、清空后代数不重用及真实上下文销毁释放。
+不把计数回调等同于真实TCP/UDP PCB并发关闭验证；后续端点实现仍需覆盖。
+
+Linux ASan/UBSan/pool guards、Windows MinGW各31/31。补充跨占用表隔离后Linux
+定向用例及Android x86_64独立native测试重新通过，Windows完整31项重跑通过。
+日志WSL /tmp/diplay-endpoint-registry-host.log及TEMP/diplay-endpoint-registry-windows-final.log。
+完整九项Android CI exit0、27s，250任务17执行：diplay-endpoint-registry-ci.log。
+JNI connected 5/5，零失败/错误/跳过，17s、exit0：diplay-endpoint-registry-connected.log。
+Android native endpoint_registry_tests在任务自有API28模拟器exit0，不依赖root。
+APK四ABI/16KiB/NX/许可证与源码检查通过，SHA-256：
+454658946ef961c8fea0bbe1d1efacca65901236756c7224fa163e7dc12dcdcd。
+
+G2实际NCM与ARM预检缺口仍存在，不扩大业务迁移或生产后端选择。这只是P3的基础
+组件，尚无公共lwIP SessionNetwork或完整端点JNI操作，G3未通过。公开树检查通过。

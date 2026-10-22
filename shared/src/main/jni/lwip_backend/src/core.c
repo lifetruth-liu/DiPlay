@@ -121,6 +121,7 @@ dp_result dp_core_destroy(dp_core **pointer) {
         return status;
     core->link_ready = 0;
     netif_set_link_down(&core->netif);
+    dp_endpoint_clear(&core->endpoints);
     /* One context owns every PCB. Remove callback reachability before abort/free. */
     while (tcp_active_pcbs || tcp_tw_pcbs || tcp_bound_pcbs) {
         struct tcp_pcb *pcb =
