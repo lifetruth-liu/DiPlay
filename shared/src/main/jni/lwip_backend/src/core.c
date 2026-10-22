@@ -246,13 +246,13 @@ dp_result dp_core_get_stats(dp_core *core, dp_stats *stats) {
     if (status != DP_OK)
         return status;
     *stats = core->stats;
-    stats->heap_used = (uint32_t)lwip_stats.mem.used;
-    stats->heap_peak = (uint32_t)lwip_stats.mem.max;
+    stats->heap_used = (uint32_t)lwip_stats.mem.used + core->endpoint_allocated;
+    stats->heap_peak = (uint32_t)lwip_stats.mem.max + core->endpoint_peak;
     stats->pbuf_used =
         (uint32_t)(lwip_stats.memp[MEMP_PBUF_POOL]->used + lwip_stats.memp[MEMP_PBUF]->used);
     /* Reserve 64 KiB for descriptors, counters and global protocol metadata in addition
      * to the actual heap/pools/context. ELF data+BSS is checked separately per ABI. */
-    stats->configured_bytes = MEM_SIZE + sizeof(*core) + 1536 + 65536;
+    stats->configured_bytes = MEM_SIZE + sizeof(*core) + 1536 + 65536 + core->endpoint_allocated;
     stats->failure = core->failure;
     for (int i = 0; i < MEMP_MAX; i++)
         stats->configured_bytes +=

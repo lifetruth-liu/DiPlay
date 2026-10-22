@@ -1,4 +1,5 @@
 #include "diplay_lwip.h"
+#include "diplay_endpoints.h"
 #include "echo_services.h"
 /* Keep lwIP byte-order aliases out of the Windows SDK declarations below. */
 #define LWIP_DONT_PROVIDE_BYTEORDER_FUNCTIONS
@@ -333,10 +334,9 @@ static void test_tcp(void) {
     send_tcp(&f, 16, 1006, server + 6, "");
     close_core(&f);
 }
-static void send_udp(struct fixture *f, uint16_t port, const char *data) {
-    uint8_t frame[256];
-    size_t n = strlen(data);
-    CHECK(n < 128);
+static void send_udp_bytes(struct fixture *f, uint16_t port, const uint8_t *data, size_t n) {
+    uint8_t frame[1514];
+    CHECK(n <= 1452);
     ethernet(frame, local_mac);
     uint8_t *p = ipv6(frame, local_ip, 17, (uint16_t)(8 + n));
     w16(p, 50000);
@@ -346,6 +346,9 @@ static void send_udp(struct fixture *f, uint16_t port, const char *data) {
     uint16_t c = checksum(frame + 14, p, 8 + n, 17);
     w16(p + 6, c ? c : 65535);
     CHECK(dp_core_input(f->core, frame, 62 + n) == DP_OK);
+}
+static void send_udp(struct fixture *f, uint16_t port, const char *data) {
+    send_udp_bytes(f, port, (const uint8_t *)data, strlen(data));
 }
 static void test_udp(void) {
     struct fixture f;
@@ -363,6 +366,114 @@ static void test_udp(void) {
     f.count = 0;
     send_udp(&f, 6001, "x");
     CHECK(find(&f, 58, 1, 0));
+    close_core(&f);
+}
+static void test_udp_endpoint(void) {
+    struct fixture f;
+    open_core(&f, 0);
+    uint64_t prepared;
+    uint16_t prepared_port;
+    CHECK(dp_udp_bind(f.core, 0, &prepared, &prepared_port) == DP_OK);
+    CHECK(dp_udp_send(f.core, prepared, peer_ip, 50000, NULL, 0) == DP_WOULD_BLOCK);
+    close_core(&f);
+    ready_core(&f);
+    uint64_t handle = 0, conflict = 9;
+    uint16_t port = 0, conflict_port = 9;
+    CHECK(dp_udp_bind(f.core, 0, &handle, &port) == DP_OK);
+    CHECK(handle > 0 && port != 0);
+    CHECK(dp_udp_bind(f.core, port, &conflict, &conflict_port) == DP_ADDRESS_IN_USE);
+    CHECK(conflict == 0 && conflict_port == 0);
+    dp_udp_datagram datagram;
+    uint8_t data[16] = {0};
+    CHECK(dp_udp_receive(f.core, handle, data, sizeof(data), &datagram) == DP_WOULD_BLOCK);
+    send_udp(&f, port, "");
+    CHECK(dp_udp_receive(f.core, handle, NULL, 0, &datagram) == DP_OK);
+    CHECK(datagram.original_length == 0 && datagram.copied_length == 0);
+    CHECK(datagram.source_port == 50000 && !memcmp(datagram.source, peer_ip, 16));
+    send_udp(&f, port, "hello");
+    CHECK(dp_udp_receive(f.core, handle, data, 2, &datagram) == DP_OK);
+    CHECK(datagram.original_length == 5 && datagram.copied_length == 2 && !memcmp(data, "he", 2));
+    CHECK(dp_udp_receive(f.core, handle, data, sizeof(data), &datagram) == DP_WOULD_BLOCK);
+    f.count = 0;
+    CHECK(dp_udp_send(f.core, handle, peer_ip, 50000, (const uint8_t *)"reply", 5) == DP_OK);
+    struct frame *reply = find(&f, 17, -1, 0);
+    CHECK(reply && u16(reply->bytes + 54) == port && !memcmp(reply->bytes + 62, "reply", 5));
+    f.count = 0;
+    CHECK(dp_udp_send(f.core, handle, peer_ip, 50000, NULL, 0) == DP_OK);
+    reply = find(&f, 17, -1, 0);
+    CHECK(reply && u16(reply->bytes + 18) == 8 && u16(reply->bytes + 54) == port);
+    f.count = 0;
+    f.ready = 0; /* The queue can stop accepting after the initial ready check. */
+    CHECK(dp_udp_send(f.core, handle, peer_ip, 50000, (const uint8_t *)"x", 1) == DP_WOULD_BLOCK);
+    f.ready = 1;
+    CHECK(dp_core_set_link_ready(f.core, 1) == DP_OK);
+    for (unsigned i = 0; i <= DP_UDP_QUEUE_PACKETS; ++i) send_udp(&f, port, "");
+    dp_udp_queue_stats queued;
+    CHECK(dp_udp_get_queue_stats(f.core, handle, &queued) == DP_OK);
+    CHECK(queued.packets == DP_UDP_QUEUE_PACKETS && queued.bytes == 0 && queued.dropped == 1);
+    for (unsigned i = 0; i < DP_UDP_QUEUE_PACKETS; ++i)
+        CHECK(dp_udp_receive(f.core, handle, NULL, 0, &datagram) == DP_OK);
+    uint8_t large[1000], received[1000];
+    for (size_t i = 0; i < sizeof(large); ++i) large[i] = (uint8_t)i;
+    /* Exercise the byte ceiling independently of the packet ceiling. */
+    for (unsigned i = 0; i < 66; ++i) {
+        w16(large, (uint16_t)i);
+        send_udp_bytes(&f, port, large, sizeof(large));
+    }
+    CHECK(dp_udp_get_queue_stats(f.core, handle, &queued) == DP_OK);
+    CHECK(queued.packets == 65 && queued.bytes == 65000 && queued.dropped == 2);
+    /* Pop, then wrap both descriptor and payload rings and verify each byte. */
+    for (unsigned i = 0; i < 130; ++i) {
+        CHECK(dp_udp_receive(f.core, handle, received, sizeof(received), &datagram) == DP_OK);
+        CHECK(datagram.original_length == sizeof(large) && u16(received) == i);
+        CHECK(!memcmp(large + 2, received + 2, sizeof(large) - 2));
+        if (i < 65) {
+            w16(large, (uint16_t)(65 + i));
+            send_udp_bytes(&f, port, large, sizeof(large));
+        }
+    }
+    CHECK(dp_udp_get_queue_stats(f.core, handle, &queued) == DP_OK);
+    CHECK(queued.packets == 0 && queued.bytes == 0);
+    CHECK(dp_udp_close(f.core, handle) == DP_OK);
+    CHECK(dp_udp_receive(f.core, handle, data, sizeof(data), &datagram) == DP_INVALID_ARGUMENT);
+    uint64_t stale = handle;
+    CHECK(dp_udp_bind(f.core, port, &handle, &port) == DP_OK && handle != stale);
+    send_udp(&f, port, "queued at close");
+    dp_stats stats;
+    CHECK(dp_core_get_stats(f.core, &stats) == DP_OK);
+    CHECK(stats.pbuf_used == 0 && stats.heap_used >= DP_UDP_QUEUE_BYTES);
+    uint16_t ports[32];
+    uint64_t endpoint_handles[32];
+    ports[0] = port;
+    endpoint_handles[0] = handle;
+    for (unsigned i = 1; i < 32; ++i) {
+        uint64_t another;
+        uint16_t another_port;
+        CHECK(dp_udp_bind(f.core, 0, &another, &another_port) == DP_OK);
+        ports[i] = another_port;
+        endpoint_handles[i] = another;
+    }
+    CHECK(dp_core_get_stats(f.core, &stats) == DP_OK);
+    CHECK(stats.udp_pcbs == 32 && stats.configured_bytes < 16 * 1024 * 1024);
+    CHECK(stats.heap_used <= DP_UDP_GLOBAL_QUEUE_BYTES);
+    CHECK(dp_udp_bind(f.core, 0, &conflict, &conflict_port) == DP_RESOURCE_LIMIT);
+    CHECK(conflict == 0 && conflict_port == 0);
+    uint64_t total_bytes = 0, total_dropped = 0;
+    /* The plan's 512 KiB UDP receive ceiling applies across all endpoints. */
+    for (unsigned i = 0; i < 32; ++i)
+        for (unsigned packet = 0; packet < 17; ++packet)
+            send_udp_bytes(&f, ports[i], large, sizeof(large));
+    for (unsigned i = 0; i < 32; ++i) {
+        CHECK(dp_udp_get_queue_stats(f.core, endpoint_handles[i], &queued) == DP_OK);
+        total_bytes += queued.bytes;
+        total_dropped += queued.dropped;
+    }
+    CHECK(total_bytes <= 512 * 1024 && total_dropped > 0);
+    close_core(&f); /* Queued data and PCB must be reclaimed by registry teardown. */
+    open_core(&f, 0);
+    CHECK(dp_udp_close(f.core, stale) == DP_INVALID_ARGUMENT);
+    CHECK(dp_core_get_stats(f.core, &stats) == DP_OK);
+    CHECK(stats.udp_pcbs == 0 && stats.pbuf_used == 0 && stats.heap_used == 0);
     close_core(&f);
 }
 static int read_peer_mtu(void *arg) {
@@ -529,6 +640,46 @@ static void test_fragments(void) {
     CHECK(stats.pbuf_used == 0 && stats.heap_used == 0);
     close_core(&f);
 }
+static void test_udp_endpoint_fragments(void) {
+    struct fixture f;
+    ready_core(&f);
+    uint64_t handle;
+    uint16_t port;
+    CHECK(dp_udp_bind(f.core, 0, &handle, &port) == DP_OK);
+    uint8_t datagram[32776] = {0}, received[32768], reply[32776] = {0};
+    w16(datagram, 50000); w16(datagram + 2, port); w16(datagram + 4, sizeof(datagram));
+    for (size_t i = 8; i < sizeof(datagram); ++i) datagram[i] = (uint8_t)(i ^ (i >> 8));
+    uint8_t pseudo[40] = {0};
+    memcpy(pseudo + 8, peer_ip, 16); memcpy(pseudo + 24, local_ip, 16);
+    w16(datagram + 6, checksum(pseudo, datagram, sizeof(datagram), 17));
+    fragment(&f, datagram, 32400, sizeof(datagram) - 32400, 0, 345);
+    for (size_t offset = 0; offset < 32400; offset += 1200)
+        fragment(&f, datagram, offset, 1200, 1, 345);
+    dp_udp_datagram info;
+    CHECK(dp_udp_receive(f.core, handle, received, sizeof(received), &info) == DP_OK);
+    CHECK(info.original_length == sizeof(received) && info.copied_length == sizeof(received));
+    CHECK(!memcmp(received, datagram + 8, sizeof(received)));
+    CHECK(info.source_port == 50000 && !memcmp(info.source, peer_ip, 16));
+    f.count = 0;
+    CHECK(dp_udp_send(f.core, handle, peer_ip, 50000, received, sizeof(received)) == DP_OK);
+    size_t total = 0, pieces = 0;
+    for (size_t i = 0; i < f.count; ++i) {
+        const uint8_t *ip = f.frames[i].bytes + 14;
+        if (ip[6] != 44) continue;
+        const uint8_t *frag = ip + 40;
+        size_t offset = u16(frag + 2) & 0xfff8, length = u16(ip + 4) - 8;
+        CHECK(frag[0] == 17 && offset + length <= sizeof(reply));
+        memcpy(reply + offset, frag + 8, length);
+        if (!(u16(frag + 2) & 1)) total = offset + length;
+        pieces++;
+    }
+    CHECK(pieces > 1 && total == sizeof(reply));
+    CHECK(u16(reply) == port && u16(reply + 2) == 50000);
+    CHECK(!memcmp(reply + 8, received, sizeof(received)));
+    memcpy(pseudo + 8, local_ip, 16); memcpy(pseudo + 24, peer_ip, 16);
+    CHECK(checksum(pseudo, reply, sizeof(reply), 17) == 0);
+    close_core(&f);
+}
 static void test_tx_failed(void) {
     struct fixture f;
     open_core(&f, 1);
@@ -611,6 +762,10 @@ int main(int argc, char **argv) {
         test_ndp_options();
     else if (!strcmp(argv[1], "pmtu"))
         test_pmtu();
+    else if (!strcmp(argv[1], "udp_endpoint"))
+        test_udp_endpoint();
+    else if (!strcmp(argv[1], "udp_endpoint_fragments"))
+        test_udp_endpoint_fragments();
     else if (!strcmp(argv[1], "api"))
         test_api();
     else if (!strcmp(argv[1], "thread"))

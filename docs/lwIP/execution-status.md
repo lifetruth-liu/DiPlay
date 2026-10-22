@@ -614,3 +614,38 @@ APK四ABI/16KiB/NX/许可证与源码检查通过，SHA-256：
 
 G2实际NCM与ARM预检缺口仍存在，不扩大业务迁移或生产后端选择。这只是P3的基础
 组件，尚无公共lwIP SessionNetwork或完整端点JNI操作，G3未通过。公开树检查通过。
+
+### P3 native UDP端点（2026-10-22）
+
+基于25d43648，新增diplay_endpoints.h及udp_endpoint.c，CMake/Android.mk编译。
+实现虚拟IPv6/netif bind、动态端口、发送、拥有型数据报接收、队列统计和关闭，
+使用已有generation注册表。接收返回来源/原始长度/复制长度；空队列WOULD_BLOCK
+与成功空包分开。API均为核心线程非阻塞操作，尚未暴露端点JNI或Kotlin实现。
+合同和范围见[native UDP端点](native-udp-endpoints.md)。
+
+首次测试缺符号链接失败；加入占位实现后运行至预期bind断言red、exit1，再实现。
+真实帧覆盖动态/冲突端口、准备期bind、双向零长度、来源、截断、UDP端口和校验和、
+端点记录及字节上限、带序号的记录回绕/块复用、32个UDP PCB耗尽、排队关闭/新core
+零资源。32KiB用例乱序输入IPv6分片，完整接收后发送并重组核对内容与UDP校验和。
+
+补测实际输出由ready转not-ready时，初版错误返回LINK_IO，red复现后改为WOULD_BLOCK；
+真正输出失败仍沿core failure返回LINK_IO。恢复ready后继续接收，未隐藏重发。
+对照performance.md发现初版仅端点限额不满足所有UDP累计512KiB，32端点总量测试red。
+改为共享1KiB块池，扣除32端点记录和块索引后计算块数，编译期断言总缓存分配≤512KiB。
+raw接收无分配，首次成功bind分配共享池，最后端点关闭释放；失败路径归还所有权。
+额外libc对象加入heap_used/configured_bytes；heap_peak为各分配域峰值之和，属保守上界。
+此段早期实现从未作为最终候选提交，旧绿色结果不用于证明最终资源预算。
+
+最终Linux ASan/UBSan/pool guards及Windows MinGW各33/33；补充运行时512KiB分配
+断言后，Linux定向两用例和Windows完整套件重跑通过。
+日志WSL /tmp/diplay-udp-endpoint-budget-host.log，TEMP/diplay-udp-endpoint-budget-windows-final.log。
+完整九项Android CI exit0、8s，250任务17执行：diplay-udp-endpoint-budget-ci.log。
+JNI兼容回归5/5，零失败/错误/跳过，10s、exit0：diplay-udp-endpoint-budget-connected.log。
+最终Android x86_64独立frame_tests的udp_endpoint及udp_endpoint_fragments均exit0；
+构建日志diplay-udp-endpoint-budget-android-build.log，不依赖root。
+四ABI/16KiB/NX/许可证和源摘要检查通过，最终APK SHA-256：
+5672fadb21dae002ab3eee409883e35571a3d6a297213fc0c3317c16a49d4222。
+
+未宣称全部65527字节边界、公共阻塞/deadline合同、按媒体通道的过期丢弃或实际
+NCM/iPhone/ARM已验收。仍需JNI命令桥、公共适配、TCP及会话集成，G2/G3未通过。
+公开树检查通过；本批未取得独立审查完成结果，不记作独立评审通过。
