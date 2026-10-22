@@ -11,6 +11,12 @@ MANIFEST_HASH = "7882cdb8bc927ecd47a5b1e06b99f3190f245998e937fd0d043380c5e4a6f8c
 # Original release manifest stays immutable. Each reviewed backport permits one
 # exact post-image, never an arbitrary change to a listed source file.
 BACKPORTS = {
+    # This post-image includes the four-commit dependency chain in BACKPORTS.md.
+    "src/core/ipv6/nd6.c": (
+        "c415888732a6b68e9276a6f50276bf1de524b0aa2403121b18c15b1bec3fe0b4",
+        "73aef9287f9afbc1a40ed08094b0c7b925733c1fc16a623f47bbb924d07f56fe",
+        "7d1327e51407440350c5687d65dfa78de0f8f961",
+    ),
     "src/core/ipv6/ip6_frag.c": (
         "c770139ab8d31da076fbf9b74a260511b647c377241bf1344547d02f6e0cc99d",
         "6d3783d2fcbe1187eac34a6b732436447288b9740b6ec9a8d69002acb08680f3",

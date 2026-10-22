@@ -44,5 +44,37 @@ accepting exactly the reviewed post-image. No other vendor modification is allow
   failure injection. Existing real-frame tests still cover successful reassembly
   and teardown of incomplete fragments.
 
-This record covers two fixes. NDP and PMTU audit findings remain
+## NDP option dependency chain
+
+- Official upstream commits, in order:
+  `0a65e654943c7e91c8f1129513572e99072ef142` (option search),
+  `db4e4c9d0e19255f908d4eec17a52407fa5b44c5` (casts),
+  `8e75a40acfea6b05ee643099e41f3b2e11ee464d` (bounded address copy),
+  `7d1327e51407440350c5687d65dfa78de0f8f961` (remaining cast).
+- File: `src/core/ipv6/nd6.c`.
+- Original SHA-256: `c415888732a6b68e9276a6f50276bf1de524b0aa2403121b18c15b1bec3fe0b4`.
+- Upstream-chain post-image SHA-256: `ae81f842253339b37a749f4683b5a5be3d3d41eed27065e2fad4893b8d060b0c`.
+- Final post-image SHA-256: `73aef9287f9afbc1a40ed08094b0c7b925733c1fc16a623f47bbb924d07f56fe`.
+- Provenance: the original file matches the pinned tag after newline normalization.
+  The official file at the chain's final commit differs from that tag by exactly
+  these four commits. Original CRLF representation is preserved. The verifier
+  reports the chain's final commit as its identifier, and pins the entire post-image,
+  including the local cursor guard described below.
+- Regression: real Ethernet/IPv6 Neighbor Solicitation with a valid unknown
+  option before Source LL Address. Original release responds to the unknown
+  option's `a5` bytes as a MAC; the backport responds to the actual peer MAC.
+  Zero-length preceding options and truncated following LL options produce no NA.
+- Scope: this first directed frame test covers NS. Directed NA, Redirect, RA and
+  non-Ethernet address-length/copy cases are still pending; generic sanitizer,
+  frame and kernel tests alone do not establish complete NDP security coverage.
+- Additional local guard: reject an option length exceeding the remaining total
+  pbuf bytes before advancing the 16-bit offset. A direct real-parser regression
+  at the 65535-byte boundary fails on the upstream chain: the cursor wraps and
+  returns an unrelated earlier option. The guard makes it return NULL. This is
+  an in-memory parser boundary test, not a remote exploitability claim or CVE.
+  `ndp_option_tests.c` also verifies the real address-copy helper reads only the
+  six bytes available in an eight-byte option when hardware length is eight.
+  The guard is local; it must not be attributed to the upstream commits above.
+
+NDP directed coverage and PMTU audit findings remain
 open; it does not establish full upstream security approval or device gates.

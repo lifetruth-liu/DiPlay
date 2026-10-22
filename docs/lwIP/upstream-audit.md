@@ -2,7 +2,7 @@
 
 日期：2026-10-22。候选：DiPlay `d58c2f15`，lwIP 2.2.1，
 `77dcd25a72509eb83f72b033d219b1d40cd8eb95`。结论：发布ZIP签名验证通过；
-安全审计**未通过**。已定位启用路径上的后续修复；TCP选项边界和IPv6空重组清理已回补，NDP/PMTU尚未闭环。
+安全审计**未通过**。TCP选项边界、IPv6空重组清理和NDP依赖链已回补；NDP定向覆盖与PMTU尚未闭环。
 不据未编译应用模块或既有绿色测试宣称该版本没有漏洞。
 
 ## 工件身份与签名
@@ -64,7 +64,7 @@ IPv4、DHCP、DNS、socket/netconn等配置关闭。下表只是这些问题的�
 | --- | --- |
 | [56b29f8bcfaefe2974dca67bde16cc7c391feaeb](https://github.com/lwip-tcpip/lwip/commit/56b29f8bcfaefe2974dca67bde16cc7c391feaeb) | IPv6重组清理空pbuf检查已精确回补。真实重组入口因pbuf配额不足留下空上下文，原版UBSan空指针复现；修复后定时清理及资源回收回归通过。该129-pbuf用例测试栈内部失败路径，不声称当前单帧入口可远程触发 |
 | [3d896ba0a37ff3ce73270ca5e230707fe47f60e3](https://github.com/lwip-tcpip/lwip/commit/3d896ba0a37ff3ce73270ca5e230707fe47f60e3) | TCP选项读取边界检查已精确回补；原版ASan越界复现、截断MSS/未知选项及两缓冲区各分割点测试已通过。完整入口pbuf处理与直接解析器测试的范围见[补丁记录](../../shared/src/main/jni/lwip_backend/BACKPORTS.md) |
-| [0a65e654943c7e91c8f1129513572e99072ef142](https://github.com/lwip-tcpip/lwip/commit/0a65e654943c7e91c8f1129513572e99072ef142)、db4e4c9d、[8e75a40acfea6b05ee643099e41f3b2e11ee464d](https://github.com/lwip-tcpip/lwip/commit/8e75a40acfea6b05ee643099e41f3b2e11ee464d)、7d1327e5 | NDP选项查找、长度内复制及依赖性类型修正；当前NDP启用。作为依赖链评估，需未知/零长/截断选项回归，不能只拣末项 |
+| [0a65e654943c7e91c8f1129513572e99072ef142](https://github.com/lwip-tcpip/lwip/commit/0a65e654943c7e91c8f1129513572e99072ef142)、db4e4c9d、[8e75a40acfea6b05ee643099e41f3b2e11ee464d](https://github.com/lwip-tcpip/lwip/commit/8e75a40acfea6b05ee643099e41f3b2e11ee464d)、7d1327e5 | 四项依赖链已完整回补。真实NS未知选项在前的错误目的MAC已red/green复现；零长和截断选项回归通过。另加本地剩余长度检查，修复上游16位选项偏移回绕，直接解析器边界测试已red/green确认。地址复制只读选项内字节的定向测试通过；NA/Redirect/RA完整入口覆盖仍待补齐，不能据NS用例宣称整项安全验收完成 |
 | [d08f4773edd0182b7910fc8f046eed82ffcd67c9](https://github.com/lwip-tcpip/lwip/commit/d08f4773edd0182b7910fc8f046eed82ffcd67c9) | Packet Too Big的最小PMTU验证；当前ICMP6启用。需伪造/极小/过大PMTU和后续发包回归 |
 | 0f8331d47b21a24e7ed4542d42cffe4fab5e4dea | netif地址长度断言；本port固定6字节。当前受port约束，仍作为防御性回补候选 |
 | 41a36098b39241d4a14d3c7f781ad91aad3ff3e7 | TCP timestamp大端修正；当前四个NDK ABI均为小端，不以此推断未来大端正确 |

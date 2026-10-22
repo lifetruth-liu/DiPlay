@@ -534,3 +534,31 @@ TCP 3×64KiB，UDP空包/MTU/分片，exit0；diplay-reassembly-kernel-tap.log�
 rx265/tx229/not_ready0，heap_peak36008。该结果不替代NCM/iPhone和ARM验收。
 只读复核未发现实质问题并核对上游diff及digest；审查者未运行测试。
 公开树和diff检查通过。NDP/PMTU仍开放，整体安全审计与真机门槛仍未通过。
+
+### NDP依赖链与选项边界（2026-10-22）
+
+基于962bc1ca。nd6.c回补0a65e654/db4e4c9d/8e75a40a/7d1327e5四项上游依赖链；
+脚本核对原文件等于固定tag，官方tag..7d对该文件只有这四项变更，保留CRLF。
+新增真实Ethernet/IPv6 NS回归：未知选项在前、Source LL在后，原版NA目的MAC取到
+未知选项的a5字节，独立重跑red exit1；补后目的MAC正确。前置零长度和后续截断
+Source LL用例均无NA。日志WSL /tmp/diplay-ndp-red.log。
+
+复核提示上游查找函数16位offset存在回绕风险。独立内存边界测试确认：近65535末尾
+的选项长度超过剩余字节时，原链返回起始位置之前的无关选项，ctest red exit1。
+随后本地增加推进前剩余长度检查，返回NULL。该防御性检查不是上游提交内容，摘要
+及来源在BACKPORTS.md分别记录。直接真实helper还验证八字节选项仅复制可用的六字节，
+即使hwaddr_len为八也不越界。未生成网络攻击流量，不声称远程可利用性或分配CVE。
+
+最终Linux ASan/UBSan/pool guards与Windows MinGW各29/29；Python完整性7/7。
+完整九项Android CI exit0、8s，250任务17执行：TEMP/diplay-ndp-final-ci.log。
+四ABI/ELF与ZIP 16KiB/NX/许可证检查通过；最终APK SHA-256：
+d46bab59d7677067c79de36d935a5cedfcecd0d4726a05f232dbfd19790dab5b。
+JNI connected 5/5，零失败/错误/跳过，exit0、9s：diplay-ndp-final-connected.log。
+早期不含本地guard的CI/JNI/内核结果不用于证明最终版本。
+最终Android独立内核工具重建后，任务自有API28 x86_64模拟器veth basic在独立netns
+通过TCP 3×64KiB、UDP空包/MTU/分片，exit0：diplay-ndp-final-kernel-veth.log。
+rx317/tx212/not_ready0、heap_peak36008；该结果不是NCM/iPhone或ARM验收。
+
+只读审查提出offset问题后其审查回合未正常完成，不记作审查通过；本地完成了上述
+red/green验证。NA/Redirect/RA完整入口定向覆盖仍待补齐，PMTU仍未回补，安全审计
+继续未通过。真机G0/G1与ARM门槛不变；生产未启用lwIP后端。

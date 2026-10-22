@@ -186,6 +186,37 @@ static void test_ndp(void) {
     CHECK(!memcmp(reply->bytes + 54 + 8, local_ip, 16));
     close_core(&f);
 }
+static void test_ndp_options(void) {
+    /* Do not pre-populate the peer cache: the response must use the address
+     * learned from the source-LL option, skipping the preceding unknown one. */
+    for (int malformed = 0; malformed < 3; ++malformed) {
+        struct fixture f;
+        open_core(&f, 1);
+        advance(&f, 3000);
+        f.count = 0;
+        uint8_t frame[94] = {0};
+        const uint8_t multicast[6] = {0x33, 0x33, 0xff, 0, 0, 1};
+        ethernet(frame, multicast);
+        uint8_t *p = ipv6(frame, solicited, 58, 40);
+        p[0] = 135;
+        memcpy(p + 8, local_ip, 16);
+        p[24] = 254; /* Unknown option is valid and must be skipped. */
+        p[25] = malformed == 1 ? 0 : 1;
+        memset(p + 26, 0xa5, 6);
+        p[32] = 1;
+        p[33] = malformed == 2 ? 2 : 1; /* Advertised length exceeds packet. */
+        memcpy(p + 34, peer_mac, 6);
+        w16(p + 2, checksum(frame + 14, p, 40, 58));
+        CHECK(dp_core_input(f.core, frame, sizeof(frame)) == DP_OK);
+        struct frame *reply = find(&f, 58, 136, 0);
+        if (malformed) CHECK(reply == NULL);
+        else {
+            CHECK(reply != NULL);
+            CHECK(!memcmp(reply->bytes, peer_mac, 6));
+        }
+        close_core(&f);
+    }
+}
 static void test_dad(void) {
     struct fixture f;
     open_core(&f, 1);
@@ -534,6 +565,8 @@ int main(int argc, char **argv) {
         test_tx_failed();
     else if (!strcmp(argv[1], "fragments"))
         test_fragments();
+    else if (!strcmp(argv[1], "ndp_options"))
+        test_ndp_options();
     else if (!strcmp(argv[1], "api"))
         test_api();
     else if (!strcmp(argv[1], "thread"))
