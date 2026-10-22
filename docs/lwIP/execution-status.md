@@ -1752,3 +1752,23 @@ replay也exit 0，实际执行1个输入：
 该证据只覆盖本机x86_64短时native fuzz。测试计划要求的三个target各8 CPU小时、合计
 24 CPU小时仍未完成；用户确认目前没有参考设备或脱敏基线报告，G0/G1真机验证也仍缺失。
 Android完整CI、public-tree/APK核验和最终diff检查在本实现后继续执行；生产后端选择保持不变。
+
+### Release-like Linux TCP/UDP 宿主基准
+
+新增 `scripts/benchmark_lwip.sh`，默认构建 Release、关闭 sanitizer，校验 native 源码，
+并要求 Linux root、隔离 network namespace 与网络接口权限。它在隔离 veth/TAP peer 上
+运行 lwIP TCP/UDP echo，默认测量600秒；核对回显字节和零UDP丢包，记录吞吐、RTT分位数、
+环境、源码/二进制摘要、lwIP计数和客户端CPU/RSS。`report.json`明确标记这不是设备验收，
+且不评估相对真实媒体峰值的带宽余量。`workflow_dispatch`新增默认关闭的可选任务并上传
+报告和构建日志；PR流程只运行快速脚本/报告合同测试，不承担10分钟基准。
+
+Linux `test_lwip*.py` 18/18通过（含本机IPv6 loopback echo指标与报告门槛测试）；Windows
+18项通过、9项Linux专属跳过。Release `lwip_kernel_echo`与`lwip_kernel_offloads`成功构建。
+ASan/UBSan/池保护宿主CTest 63/63通过，其中包含10,000轮生命周期soak。要求的完整Android
+检查成功：250个Gradle任务，12执行、238缓存命中；public-tree及APK/native源核验通过。
+workflow YAML、shell语法检查通过。
+
+本机WSL `unshare --net`预检返回无权限，故未创建隔离peer，没有实际lwIP TCP/UDP吞吐值，
+也没有达到10分钟宿主基准门槛。loopback测试只验证测量代码和报告完整性，不代表lwIP栈性能。
+用户确认当前无可用参考设备、抓包或VPN/无线基线；G0/G1、真实媒体余量、长时设备矩阵和
+累计24 CPU小时fuzz仍待补齐，整体方案与生产后端选择均保持未完成/不变。

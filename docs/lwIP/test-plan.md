@@ -131,7 +131,7 @@ Windows PowerShell 使用 `./gradlew.bat`，参数不变并放同一行。SDK �
 bash scripts/test_lwip_host.sh --build-dir build/lwip-host --sanitizers address,undefined
 # P3：设备 JNI 契约；需要兼容且已连接的 Android 测试设备
 ./gradlew :shared:connectedDebugAndroidTest
-# P6：release-like 宿主基准，写入结构化指标及环境元数据
+# P6：Linux CAP_NET_ADMIN 宿主微基准；不是车机性能验收，写入结构化报告
 bash scripts/benchmark_lwip.sh --output build/lwip-benchmark
 # P6：三类 target 各 8 CPU 小时，总计至少 24 CPU 小时
 bash scripts/fuzz_lwip.sh --target ethernet --cpu-hours 8 --output build/lwip-fuzz/ethernet
@@ -139,10 +139,10 @@ bash scripts/fuzz_lwip.sh --target commands --cpu-hours 8 --output build/lwip-fu
 bash scripts/fuzz_lwip.sh --target lifecycle --cpu-hours 8 --output build/lwip-fuzz/lifecycle
 ```
 
-脚本必须提供 `--help`、固定随机 seed 的重放参数、构建版本和非零失败状态。仅存在不被测试发现的源码不能算作已接入 CI。
+fuzz入口必须提供 `--help`、固定随机seed和单文件replay；benchmark入口提供 `--help`及测量时长选项。两者都记录构建版本、结构化报告和非零失败状态。benchmark默认至少测量10分钟，但不据此评估真实媒体带宽余量。仅存在不被测试发现的源码不能算作已接入 CI。
 
 - PR：现有 Android 检查 + native 单元/契约 + ASan/UBSan + 四 ABI 构建；设备测试单独注明运行结果。
-- 定时或人工任务：fuzz、协议故障矩阵、100 次重连和 8 小时长稳；不要求每个 PR 跑满 24 CPU 小时。
+- 定时或人工任务：fuzz、宿主 benchmark、协议故障矩阵、100 次重连和 8 小时长稳；不要求每个 PR 跑满 24 CPU 小时。`workflow_dispatch`可选执行宿主benchmark并上传报告，默认关闭。
 - 发布候选：累计满足完整 fuzz 门槛，重跑失败 corpus、低配性能和完整设备矩阵。
 - CI 上传：JUnit/CTest、sanitizer 日志、corpus/seed、性能 JSON、构建元数据；抓包和原始媒体默认不上传公共 CI。
 

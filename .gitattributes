@@ -1,6 +1,7 @@
 # Shell entry points must remain runnable in Linux checkouts on Windows hosts.
 scripts/test_lwip_*.sh text eol=lf
 scripts/fuzz_lwip.sh text eol=lf
+scripts/benchmark_lwip.sh text eol=lf
 scripts/lwip_kernel_client.py text eol=lf
 # Retain the pinned upstream archive's exact bytes, including its original line endings.
 shared/src/main/jni/lwip_backend/third_party/lwip/** -text -whitespace
