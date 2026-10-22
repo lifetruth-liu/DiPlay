@@ -1276,3 +1276,24 @@ no-snapshot-load重新启动。测试代码编译通过；首次设备24项中JN
 九项完整CI exit0：TEMP/diplay-tcp-contract-final-ci.log；单元任务均UP-TO-DATE，
 不记作重新执行。public tree及staged diff检查通过。本轮仅测试/文档，生产选择不变。
 仍缺共同TCP并发/背压/异常关闭、故障矩阵及真机证据，G2/G3及整体目标保持未完成。
+
+### 共同 TCP 超时恢复与读取取消
+
+TcpSessionDeviceContractTest新增两个后端相同断言：静默读取100ms超时且缓冲不变，
+随后并发读与write/shutdownOutput收回4097字节；close取消已进入后端的读取、重复
+close、缓冲不变及关闭后拒绝。通过2秒有界线程栈观察确认read已进入再写入或关闭；
+peer只在FIN后回复，因此测试的读取不会提前成功。另新增每后端12次重复创建会话/
+握手/空半关闭的诊断回归。wire轨迹最多20条，连接失败时附带runner快照和peer异常。
+
+首次冷启动仅wait-for-device就启动Gradle过早：ActivityManager明确报测试包not
+encryption aware，instrumentation进程未创建；取消失效调用也结束了同一启动树内的
+模拟器。确认设备消失后单独启动新实例，并确认dumpsys user为RUNNING_UNLOCKED，
+才重新运行。原始日志TEMP/diplay-tcp-errors-connected.log无测试结果，不计通过。
+重新执行时新增合同通过，但旧大数据用例JNI握手再次3秒超时（27/28通过）：
+TEMP/diplay-tcp-errors-final-connected.log。带轨迹diagnostic为28/28，加入12次重复
+创建的最终handshake为30/30，exit0、24s，XML零失败/错误/跳过：
+TEMP/diplay-tcp-errors-handshake.log。没有得到超时失败时的wire轨迹，根因仍未确认。
+
+完整九项CI exit0：TEMP/diplay-tcp-errors-final-ci.log；三模块单元任务均UP-TO-DATE，
+不记重新执行。public tree及staged diff检查通过。仅测试及文档变化，未更改生产行为。
+背压、RST、写阻塞取消、故障矩阵及真机门槛仍缺，G2/G3及完整目标保持未完成。

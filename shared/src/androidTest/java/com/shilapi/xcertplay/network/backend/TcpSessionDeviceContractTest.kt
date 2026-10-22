@@ -9,6 +9,8 @@ import java.net.InetAddress
 import java.net.ServerSocket
 import java.util.Random
 import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -20,6 +22,90 @@ import org.junit.runners.Parameterized
 
 @RunWith(Parameterized::class)
 class TcpSessionDeviceContractTest(private val backend: String) {
+    @Test fun repeatedSessionHandshakeAndEmptyHalfClose() {
+        repeat(12) {
+            peer().use { peer ->
+                peer.stream.shutdownOutput()
+                assertEquals(-1, peer.stream.read(ByteArray(1), deadlineMillis = peer.network.clock.nowMillis() + 3000))
+                peer.verify()
+            }
+        }
+    }
+
+    @Test fun timedOutReadPreservesBufferAndAllowsConcurrentWriteAndResponse() {
+        peer().use { peer ->
+            val stream = peer.stream
+            val target = ByteArray(19) { 0x55 }
+            assertEquals(BackendFailure.Kind.TIMEOUT,
+                assertThrows(BackendFailure::class.java) {
+                    stream.read(target, 2, 13, peer.network.clock.nowMillis() + 100)
+                }.kind)
+            assertArrayEquals(ByteArray(19) { 0x55 }, target)
+            val executor = Executors.newSingleThreadExecutor()
+            try {
+                val started = CountDownLatch(1)
+                val reader = AtomicReference<Thread>()
+                val deadline = peer.network.clock.nowMillis() + 5000
+                val response = executor.submit<ByteArray> {
+                    reader.set(Thread.currentThread())
+                    started.countDown()
+                    val result = ByteArrayOutputStream()
+                    val bytes = ByteArray(113)
+                    while (true) {
+                        val count = stream.read(bytes, deadlineMillis = deadline)
+                        if (count == -1) break
+                        check(count > 0 && result.size() + count <= 4097)
+                        result.write(bytes, 0, count)
+                    }
+                    result.toByteArray()
+                }
+                assertTrue(started.await(2, TimeUnit.SECONDS))
+                awaitReadEntry(reader.get())
+                val payload = ByteArray(4097).also { Random(7).nextBytes(it) }
+                stream.write(payload, deadlineMillis = deadline)
+                stream.shutdownOutput()
+                assertArrayEquals(payload, response.get(6, TimeUnit.SECONDS))
+                peer.verify()
+            } finally { executor.shutdownNow() }
+        }
+    }
+
+    @Test fun closeCancelsAConcurrentReadAndIsIdempotent() {
+        peer().use { peer ->
+            val executor = Executors.newSingleThreadExecutor()
+            try {
+                val started = CountDownLatch(1)
+                val reader = AtomicReference<Thread>()
+                val target = ByteArray(11) { 0x55 }
+                val result = executor.submit<BackendFailure.Kind> {
+                    reader.set(Thread.currentThread())
+                    started.countDown()
+                    try { peer.stream.read(target); error("Expected cancellation") }
+                    catch (error: BackendFailure) { error.kind }
+                }
+                assertTrue(started.await(2, TimeUnit.SECONDS))
+                awaitReadEntry(reader.get())
+                peer.stream.close(); peer.stream.close()
+                assertEquals(BackendFailure.Kind.CANCELLED, result.get(3, TimeUnit.SECONDS))
+                assertArrayEquals(ByteArray(11) { 0x55 }, target)
+                assertEquals(BackendFailure.Kind.CANCELLED,
+                    assertThrows(BackendFailure::class.java) { peer.stream.read(ByteArray(1)) }.kind)
+            } finally { executor.shutdownNow() }
+        }
+    }
+
+    private fun awaitReadEntry(reader: Thread) {
+        val end = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+        while (System.nanoTime() < end) {
+            if (reader.stackTrace.any {
+                it.methodName == "read" &&
+                    (it.className.contains("SystemSessionNetwork") || it.className.contains("LwipTcpStream"))
+            }) return
+            Thread.sleep(1)
+        }
+        fail("Reader did not enter the backend read before the deadline")
+    }
+
     @Test fun chunkedBytesHalfCloseResponseAndEof() {
         val payload = ByteArray(65537).also { Random(73).nextBytes(it) }
         peer().use { peer ->
@@ -114,6 +200,7 @@ class TcpSessionDeviceContractTest(private val backend: String) {
             }
         } catch (failure: Throwable) {
             try { wire.checkFailure() } catch (peerFailure: Throwable) { failure.addSuppressed(peerFailure) }
+            failure.addSuppressed(AssertionError("wire=${wire.trace} runner=${runner.snapshot()}"))
             network.close(); throw failure
         }
     }
@@ -129,6 +216,7 @@ class TcpSessionDeviceContractTest(private val backend: String) {
         private val output = LinkedBlockingQueue<ByteArray>(64)
         private val closed = AtomicBoolean()
         private val error = AtomicReference<Throwable>()
+        val trace = java.util.concurrent.CopyOnWriteArrayList<String>()
         private val worker = Thread {
             try { runPeer() } catch (failure: Throwable) { if (!closed.get()) error.set(failure) }
         }.apply { start() }
@@ -152,6 +240,7 @@ class TcpSessionDeviceContractTest(private val backend: String) {
             val received = ByteArrayOutputStream()
             while (!closed.get()) {
                 val frame = output.poll(100, TimeUnit.MILLISECONDS) ?: continue
+                if (trace.size < 20) trace.add("out proto=${frame.getOrNull(20)} size=${frame.size} flags=${frame.getOrNull(67)}")
                 if (frame.size < 74 || frame[20] != 6.toByte()) continue
                 check(read16(frame, 56) == 9000)
                 val flags = frame[67].toInt() and 255
@@ -160,6 +249,7 @@ class TcpSessionDeviceContractTest(private val backend: String) {
                 val header = ((frame[66].toInt() and 255) ushr 4) * 4
                 val data = frame.copyOfRange(54 + header, frame.size)
                 if (flags and 2 != 0) {
+                    if (trace.size < 20) trace.add("syn seq=$seq peer=$peerNext")
                     localPort = read16(frame, 54); localNext = seq + 1
                     emit(tcp(localPort, 18, peerNext, localNext)); peerNext++
                     continue
