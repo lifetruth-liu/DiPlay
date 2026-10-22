@@ -42,6 +42,13 @@ accept/connect/read/write/UDP send/receive六类并发等待取消、端点/候�
 Android显式native会话可绑定原型echo端口，验证服务隔离、真实JNI选项、地址冲突及
 会话关闭唤醒等待者；既有完整TCP/UDP帧路径继续回归。
 
-尚未完成全部两后端参数化合同、所有分配/引用/竞态故障矩阵、独立kernel peer对新
-端点API的验证、真实NCM/iPhone/ARM及性能长稳验收。此层完成接口组合，不代表全部
+SessionNetworkDeviceContractTest在Android上对系统socket和真实JNI会话运行相同的
+三项参数化合同：临时监听端口分配/冲突/关闭重绑，跨link拒绝及非法/到期deadline，
+会话关闭取消accept/UDP receive并拒绝新端点。lwIP使用断开的EthernetFramePort，
+不伪造JNI或core，但这组用例没有网络peer。并发用例覆盖关闭与调用起始的竞争，
+不声称精确证明每个等待者关闭前已进入原生阻塞状态。
+
+独立kernel peer对原生端点API的验证见kernel-endpoint-peer.md。尚未完成全部两后端
+参数化合同（尤其共同的TCP/UDP传输及背压夹具）、所有分配/引用/竞态故障矩阵、
+真实NCM/iPhone/ARM及性能长稳验收。此层完成接口组合，不代表全部
 会话行为、业务集成或G2/G3已经验收。

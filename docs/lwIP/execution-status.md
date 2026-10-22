@@ -1228,3 +1228,18 @@ tree及staged diff检查通过。未取得独立评审完成结果，不记作�
 
 这次原生API内核互通不替代Kotlin两后端完整合同；更多资源/关闭/畸形包矩阵、fuzz、
 真实NCM/iPhone/ARM、性能长稳及生产集成仍缺。安全审计、G2/G3和整体目标不标完成。
+
+### 两后端 Android 本地契约首批
+
+新增SessionNetworkDeviceContractTest，同一参数化测试分别创建真实系统socket后端
+与LwipSessionNetwork.native；不替换JNI或core。覆盖临时监听端口、重复绑定冲突、
+关闭重绑、跨link地址拒绝、非法/到期deadline、会话关闭取消accept/UDP receive、
+重复关闭及关闭后新端点拒绝。断开EthernetFramePort不提供网络peer，这批结果仅为
+本地契约；起始栅栏也不证明关闭时所有调用都已进入底层等待。共同流量/背压夹具
+及完整T01–T08仍待补齐。
+
+API28 x86_64模拟器参数化6项与既有JNI14项合计20/20，零失败/错误/跳过，Gradle
+exit0：TEMP/diplay-device-contract-connected.log。未在本轮重新设置/确认CheckJNI，
+不追加该项证据。完整九项Android CI exit0，12s、250任务14执行：
+TEMP/diplay-device-contract-final-ci.log；三个单元任务均UP-TO-DATE，不记作重新执行。
+public tree及diff检查通过。本轮只增加测试和覆盖记录，生产选择保持原状。
