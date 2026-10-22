@@ -937,3 +937,43 @@ c45c6c49084d1db1abb14c93b9b0a6fed128f970a3f5105099c4187cccef91b3。
 仍缺TCP JNI、公共TcpStream/SessionNetwork、完整优雅关闭策略、独立内核peer对新
 端点API的验证与完整两后端契约。实际NCM/iPhone/ARM、长稳及G2/G3仍未完成，整体
 目标不标完成。未取得独立评审完成结果，不记作独立评审通过。
+
+### P3 TCP JNI与ABI 3（2026-10-22）
+
+基于a854e5a5。新增tcp_jni.c及prototype转发，九项TCP接口包括listen/accept/
+connect/status/read/write/shutdown_output/两类close。新增方法使整体JNI ABI升级3，
+Kotlin加载检查及native返回值同步；native-only核心C ABI仍为1。共享原有65527字节
+复制区，helper改名copy_buffer，不增大prototype预算或JNI栈数组，不暴露裸指针。
+数组形状、地址别名和范围在改变端点/消费前校验；Region调用后检查异常，发布新
+handle失败用纯C回收；读写已发生后发布失败不重放。细节见[TCP JNI桥](tcp-jni.md)。
+
+Android模拟器测试先缺tcpListen实现而red，UnsatisfiedLinkError，exit1、36s：
+TEMP/diplay-tcp-jni-red.log。首次接通后设备8/9通过，剩余在失败context关闭候选时
+期望0实际LINK_IO（-9），exit1：diplay-tcp-jni-green.log。原型已失败仍尝试输出RST
+导致额外失败；修为失败context先停输出，核心已失败关闭同样禁止继续发送。
+修复后模拟器9/9，12s：diplay-tcp-jni-fixed-connected.log。
+
+新增Android用例覆盖被动/主动握手、实际地址/端口、偏移/零长度、溢出/负范围、
+无效输出与地址别名不消费、FIN/RST、100000字节请求短写、复用scratch后重传内容、
+错误线程/类型、重复close、失效handle、新context及失败context清理。
+宿主prototype生命周期补转发接口关闭与重建，Linux ASan/UBSan/pool guards和Windows
+最终各45/45：WSL /tmp/diplay-tcp-jni-host.log、TEMP/diplay-tcp-jni-windows.log。
+
+首轮完整CI在既有SettingsBackupServerTest准备六个空闲连接时出现Connection refused，
+8m19s、exit1：TEMP/diplay-tcp-jni-ci.log。单独测试类通过；独立Java探针在backlog4、
+未accept时复现第5次连接被拒绝而监听仍bound。仅修改测试准备：有限重试瞬时
+ConnectException，失败也清理已建socket；生产服务和请求断言不变。修正后该类通过，
+9s：diplay-tcp-jni-backup-fixed.log。
+
+最终九项Android CI exit0，6m10s、250任务15执行：diplay-tcp-jni-final-ci.log。
+本轮common单元任务重新执行；核对XML共3345项（shared1761/common1578/home6），
+零失败/错误/跳过，UP-TO-DATE任务不记为重新执行。最终API28 x86_64模拟器JNI回归
+9/9，13s、exit0：diplay-tcp-jni-final-connected.log，XML零失败/错误/跳过。
+debug.checkjni=1，测试进程5876确认already on；既有AVD路径告警未影响测试。
+四ABI均确认九项TCP JNI导出；APK四ABI/16KiB/NX/许可证与源摘要检查通过，SHA-256：
+a3523b57a0149ba34b52a71af4e3a5f5f2694cc9e374b886d99bff998f7cbb49。
+public tree及staged diff检查通过。未取得独立评审完成结果，不记作独立评审通过。
+
+尚无Java输出发布异常的运行时注入，不把检查代码和正常CheckJNI视为全部异常
+路径证据。TCP公共适配、完整SessionNetwork/优雅关闭/两后端契约、实际NCM/iPhone/
+ARM与长稳仍未完成，G2/G3未通过。

@@ -18,6 +18,101 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class NativePrototypeInstrumentationTest {
+    @Test fun tcpJniAcceptReadWriteAndHalfCloseValidateBeforeConsuming() {
+        LwipNativeBindings.ensureLoaded()
+        assertEquals(3, LwipNativeBindings.abiVersion())
+        val h = LwipNativeBindings.create(mac, ip, 1500, 100, ByteArray(1024).also { SecureRandom().nextBytes(it) })
+        assertTrue(h > 0)
+        try {
+            val bound = LongArray(2)
+            assertEquals(-1, LwipNativeBindings.tcpListen(h, 7000, 2, LongArray(1)))
+            assertEquals(0, LwipNativeBindings.tcpListen(h, 7000, 2, bound))
+            assertEquals(7000L, bound[1])
+            val listener = bound[0]
+            assertEquals(-10, LwipNativeBindings.tcpListen(h, 7000, 2, LongArray(2)))
+            rawReady(h)
+            val handle = LongArray(1); val local = ByteArray(16); val remote = ByteArray(16); val ports = IntArray(2)
+            assertEquals(-11, LwipNativeBindings.tcpAccept(h, listener, handle, local, remote, ports))
+            assertEquals(0, LwipNativeBindings.input(h, tcpPacket(50000, 7000, 2, 1000, 0)))
+            val syn = rawDrain(h).first { it[20] == 6.toByte() }
+            val server = read32(syn, 58)
+            assertEquals(0, LwipNativeBindings.input(h, tcpPacket(50000, 7000, 16, 1001, server + 1)))
+            val data = tcpPacket(50000, 7000, 24, 1001, server + 1, "hello".toByteArray())
+            assertEquals(0, LwipNativeBindings.input(h, data)); data.fill(0)
+            assertEquals(-1, LwipNativeBindings.tcpAccept(h, listener, LongArray(0), local, remote, ports))
+            assertEquals(-1, LwipNativeBindings.tcpAccept(h, listener, handle, local, local, ports))
+            assertEquals(-1, LwipNativeBindings.tcpAccept(h, listener, handle, local, remote, IntArray(1)))
+            assertEquals(0, LwipNativeBindings.tcpAccept(h, listener, handle, local, remote, ports))
+            val stream = handle[0]
+            assertArrayEquals(ip, local); assertArrayEquals(ip.copyOf().also { it[15] = 2 }, remote)
+            assertArrayEquals(intArrayOf(7000, 50000), ports)
+            val target = ByteArray(4) { 9 }; val count = intArrayOf(99)
+            assertEquals(-1, LwipNativeBindings.tcpRead(h, stream, target, Int.MAX_VALUE, 2, count))
+            assertEquals(-1, LwipNativeBindings.tcpRead(h, stream, target, 0, 1, IntArray(0)))
+            assertEquals(0, LwipNativeBindings.tcpRead(h, stream, target, 1, 2, count))
+            assertEquals(2, count[0]); assertArrayEquals(byteArrayOf(9, 104, 101, 9), target)
+            assertEquals(0, LwipNativeBindings.tcpRead(h, stream, target, 0, 0, count)); assertEquals(0, count[0])
+            assertEquals(0, LwipNativeBindings.tcpRead(h, stream, target, 0, 4, count))
+            assertEquals(3, count[0]); assertArrayEquals("llo".toByteArray(), target.copyOf(3))
+            assertEquals(-1, LwipNativeBindings.tcpWrite(h, stream, target, 0, -1, count))
+            assertEquals(0, LwipNativeBindings.tcpWrite(h, stream, byteArrayOf(9, 111, 107, 9), 1, 2, count)); assertEquals(2, count[0])
+            val sent = rawDrain(h).first { it[20] == 6.toByte() && it.size > 54 + ((it[66].toInt() and 255) ushr 4) * 4 }
+            assertArrayEquals("ok".toByteArray(), sent.copyOfRange(54 + ((sent[66].toInt() and 255) ushr 4) * 4, sent.size))
+            assertEquals(0, LwipNativeBindings.input(h, tcpPacket(50000, 7000, 16, 1006, server + 3)))
+            val wrong = AtomicInteger()
+            Thread { wrong.set(LwipNativeBindings.tcpClose(h, stream)) }.apply { start(); join(2000); assertFalse(isAlive) }
+            assertEquals(-3, wrong.get())
+            assertEquals(-1, LwipNativeBindings.tcpClose(h, listener))
+            assertEquals(0, LwipNativeBindings.tcpShutdownOutput(h, stream))
+            assertEquals(-12, LwipNativeBindings.tcpWrite(h, stream, target, 0, 1, count)); assertEquals(0, count[0])
+            assertEquals(0, LwipNativeBindings.input(h, tcpPacket(50000, 7000, 17, 1006, server + 4)))
+            assertEquals(-12, LwipNativeBindings.tcpRead(h, stream, target, 0, 1, count)); assertEquals(0, count[0])
+            assertEquals(0, LwipNativeBindings.tcpClose(h, stream)); assertEquals(-1, LwipNativeBindings.tcpClose(h, stream))
+            assertEquals(0, LwipNativeBindings.tcpListenerClose(h, listener))
+        } finally { assertEquals(0, LwipNativeBindings.destroy(h)) }
+    }
+
+    @Test fun tcpJniActiveConnectShortWriteAndStaleTokens() {
+        LwipNativeBindings.ensureLoaded()
+        val entropy = ByteArray(1024).also { SecureRandom().nextBytes(it) }
+        val h = LwipNativeBindings.create(mac, ip, 1500, 100, entropy)
+        var stale = 0L
+        try {
+            val peer = ip.copyOf().also { it[15] = 2 }; val handle = LongArray(1)
+            assertEquals(-11, LwipNativeBindings.tcpConnect(h, peer, 9000, handle)); assertEquals(0L, handle[0])
+            rawReady(h)
+            assertEquals(-1, LwipNativeBindings.tcpConnect(h, ByteArray(15), 9000, handle))
+            assertEquals(-1, LwipNativeBindings.tcpConnect(h, peer, 9000, LongArray(0)))
+            assertEquals(0, LwipNativeBindings.tcpConnect(h, peer, 9000, handle))
+            val stream = handle[0]; val local = ByteArray(16); val remote = ByteArray(16); val ports = IntArray(2)
+            assertEquals(-11, LwipNativeBindings.tcpConnectStatus(h, stream, local, remote, ports))
+            assertEquals(-1, LwipNativeBindings.tcpConnectStatus(h, stream, local, local, ports))
+            val syn = rawDrain(h).first { it[20] == 6.toByte() }
+            val port = read16(syn, 54); val sequence = read32(syn, 58)
+            assertEquals(0, LwipNativeBindings.input(h, tcpPacket(9000, port, 18, 7000, sequence + 1)))
+            assertEquals(0, LwipNativeBindings.tcpConnectStatus(h, stream, local, remote, ports))
+            assertArrayEquals(intArrayOf(port, 9000), ports); assertArrayEquals(peer, remote)
+            val source = ByteArray(100000) { 90 }; val count = IntArray(1)
+            assertEquals(0, LwipNativeBindings.tcpWrite(h, stream, source, 0, source.size, count)); assertEquals(32768, count[0])
+            source.fill(0)
+            assertEquals(-11, LwipNativeBindings.tcpWrite(h, stream, source, 0, 1, count)); assertEquals(0, count[0])
+            assertEquals(0, LwipNativeBindings.supply(h, 10000, null)); assertEquals(0, LwipNativeBindings.poll(h))
+            val payloads = rawDrain(h).filter { it[20] == 6.toByte() && it.size > 54 + ((it[66].toInt() and 255) ushr 4) * 4 }
+            assertTrue(payloads.isNotEmpty())
+            for (frame in payloads) assertTrue(frame.copyOfRange(54 + ((frame[66].toInt() and 255) ushr 4) * 4, frame.size).all { it == 90.toByte() })
+            assertEquals(0, LwipNativeBindings.input(h, tcpPacket(9000, port, 20, 7001, sequence + 1)))
+            assertEquals(-13, LwipNativeBindings.tcpConnectStatus(h, stream, local, remote, ports))
+            assertEquals(0, LwipNativeBindings.tcpClose(h, stream))
+            assertEquals(0, LwipNativeBindings.tcpConnect(h, peer, 9000, handle)); stale = handle[0]
+            assertNotEquals(stream, stale)
+            assertEquals(-1, LwipNativeBindings.tcpClose(h, stream))
+            assertEquals(-8, LwipNativeBindings.supply(h, 9999, null))
+            assertEquals(0, LwipNativeBindings.tcpClose(h, stale))
+        } finally { assertEquals(0, LwipNativeBindings.destroy(h)) }
+        val fresh = LwipNativeBindings.create(mac, ip, 1500, 100, entropy)
+        try { assertEquals(-1, LwipNativeBindings.tcpClose(fresh, stale)) }
+        finally { assertEquals(0, LwipNativeBindings.destroy(fresh)) }
+    }
     @Test fun publicUdpAdapterTraversesOwnedRunnerAndNativeEndpointLifecycle() {
         val incoming = LinkedBlockingQueue<ByteArray>()
         val outgoing = LinkedBlockingQueue<ByteArray>()
@@ -89,7 +184,7 @@ class NativePrototypeInstrumentationTest {
     }
     @Test fun nativeUdpBindingsPreserveDatagramsAndRejectStaleTokens() {
         LwipNativeBindings.ensureLoaded()
-        assertEquals(2, LwipNativeBindings.abiVersion())
+        assertEquals(3, LwipNativeBindings.abiVersion())
         val entropy = ByteArray(1024).also { SecureRandom().nextBytes(it) }
         val context = LwipNativeBindings.create(mac, ip, 1500, 100, entropy)
         assertTrue(context > 0)
@@ -309,6 +404,34 @@ class NativePrototypeInstrumentationTest {
     }
 
     companion object {
+        private fun read32(frame: ByteArray, at: Int) = (read16(frame, at).toLong() shl 16) or read16(frame, at + 2).toLong()
+        private fun tcpPacket(source: Int, destination: Int, flags: Int, seq: Long, ack: Long, data: ByteArray = byteArrayOf()) = packet(6, 20 + data.size).also {
+            write16(it, 54, source); write16(it, 56, destination); write32(it, 58, seq); write32(it, 62, ack)
+            it[66] = 0x50; it[67] = flags.toByte(); write16(it, 68, 32768)
+            data.copyInto(it, 74); checksum(it, 6, 70)
+        }
+        private fun rawDrain(context: Long): List<ByteArray> {
+            val frames = mutableListOf<ByteArray>(); val target = ByteArray(1514)
+            while (true) {
+                val count = LwipNativeBindings.takeOutput(context, target)
+                assertTrue(count >= 0)
+                if (count == 0) return frames
+                frames.add(target.copyOf(count))
+            }
+        }
+        private fun rawReady(context: Long) {
+            assertEquals(0, LwipNativeBindings.setReady(context, true))
+            repeat(16) { n ->
+                assertEquals(0, LwipNativeBindings.supply(context, 350L + n * 250, null))
+                assertEquals(0, LwipNativeBindings.poll(context))
+            }
+            rawDrain(context)
+            val solicitation = packet(58, 32)
+            solicitation[21] = 255.toByte(); solicitation[54] = 135.toByte()
+            ip.copyInto(solicitation, 62); solicitation[78] = 1; solicitation[79] = 1
+            peerMac.copyInto(solicitation, 80); checksum(solicitation, 58, 56)
+            assertEquals(0, LwipNativeBindings.input(context, solicitation)); rawDrain(context)
+        }
         private val mac = byteArrayOf(2, 0, 0, 0, 0, 1)
         private val peerMac = byteArrayOf(2, 0, 0, 0, 0, 2)
         private val ip = ByteArray(16).also { it[0] = 0xfe.toByte(); it[1] = 0x80.toByte(); it[15] = 1 }

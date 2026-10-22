@@ -15,7 +15,7 @@ struct prototype {
     uint64_t handle, now, rejected;
     uint32_t entropy[DP_PROTO_ENTROPY_BYTES / 4], entropy_at, entropy_count;
     struct frame frames[DP_PROTO_TX_FRAMES];
-    uint8_t udp_scratch[DP_UDP_MAX_PAYLOAD];
+    uint8_t copy_scratch[DP_PROTO_COPY_BYTES];
     uint32_t head, count;
     int echo_started;
     dp_result failure;
@@ -238,12 +238,12 @@ dp_result dp_proto_destroy(uint64_t *handle) {
     free(p);
     return DP_OK;
 }
-dp_result dp_proto_udp_buffer(uint64_t h, uint8_t **bytes) {
+dp_result dp_proto_copy_buffer(uint64_t h, uint8_t **bytes) {
     if (!bytes) return DP_INVALID_ARGUMENT;
     *bytes = NULL;
     struct prototype *p;
     dp_result s = lookup(h, &p, 0);
-    if (s == DP_OK) *bytes = p->udp_scratch;
+    if (s == DP_OK) *bytes = p->copy_scratch;
     return s;
 }
 dp_result dp_proto_udp_bind(uint64_t h, uint16_t port, uint64_t *endpoint, uint16_t *actual) {
@@ -273,6 +273,50 @@ int32_t dp_proto_entropy_remaining(uint64_t h) {
     struct prototype *p;
     dp_result s = lookup(h, &p, 0);
     return s == DP_OK ? (int32_t)(p->entropy_count - p->entropy_at) : s;
+}
+dp_result dp_proto_tcp_listen(uint64_t h, uint16_t port, unsigned backlog, uint64_t *endpoint, uint16_t *actual) {
+    if (endpoint) *endpoint = 0;
+    if (actual) *actual = 0;
+    struct prototype *p; dp_result s = lookup(h, &p, 0);
+    return s == DP_OK ? finish(p, dp_tcp_listen(p->core, port, backlog, endpoint, actual)) : s;
+}
+dp_result dp_proto_tcp_accept(uint64_t h, uint64_t listener, uint64_t *endpoint, dp_tcp_info *info) {
+    if (endpoint) *endpoint = 0;
+    struct prototype *p; dp_result s = lookup(h, &p, 0);
+    return s == DP_OK ? finish(p, dp_tcp_accept(p->core, listener, endpoint, info)) : s;
+}
+dp_result dp_proto_tcp_connect(uint64_t h, const uint8_t address[16], uint16_t port, uint64_t *endpoint) {
+    if (endpoint) *endpoint = 0;
+    struct prototype *p; dp_result s = lookup(h, &p, 0);
+    return s == DP_OK ? finish(p, dp_tcp_connect(p->core, address, port, endpoint)) : s;
+}
+dp_result dp_proto_tcp_connect_status(uint64_t h, uint64_t endpoint, dp_tcp_info *info) {
+    struct prototype *p; dp_result s = lookup(h, &p, 0);
+    return s == DP_OK ? finish(p, dp_tcp_connect_status(p->core, endpoint, info)) : s;
+}
+dp_result dp_proto_tcp_read(uint64_t h, uint64_t endpoint, uint8_t *bytes, size_t capacity, size_t *copied) {
+    if (copied) *copied = 0;
+    struct prototype *p; dp_result s = lookup(h, &p, 0);
+    return s == DP_OK ? finish(p, dp_tcp_read(p->core, endpoint, bytes, capacity, copied)) : s;
+}
+dp_result dp_proto_tcp_write(uint64_t h, uint64_t endpoint, const uint8_t *bytes, size_t length, size_t *copied) {
+    if (copied) *copied = 0;
+    struct prototype *p; dp_result s = lookup(h, &p, 0);
+    return s == DP_OK ? finish(p, dp_tcp_write(p->core, endpoint, bytes, length, copied)) : s;
+}
+dp_result dp_proto_tcp_shutdown_output(uint64_t h, uint64_t endpoint) {
+    struct prototype *p; dp_result s = lookup(h, &p, 0);
+    return s == DP_OK ? finish(p, dp_tcp_shutdown_output(p->core, endpoint)) : s;
+}
+dp_result dp_proto_tcp_close(uint64_t h, uint64_t endpoint) {
+    struct prototype *p; dp_result s = lookup(h, &p, 1);
+    if (s == DP_OK && p->failure != DP_OK) dp_core_set_link_ready(p->core, 0);
+    return s == DP_OK ? dp_tcp_close(p->core, endpoint) : s;
+}
+dp_result dp_proto_tcp_listener_close(uint64_t h, uint64_t endpoint) {
+    struct prototype *p; dp_result s = lookup(h, &p, 1);
+    if (s == DP_OK && p->failure != DP_OK) dp_core_set_link_ready(p->core, 0);
+    return s == DP_OK ? dp_tcp_listener_close(p->core, endpoint) : s;
 }
 #ifdef DP_PROTO_TESTING
 dp_tx_result dp_proto_test_emit(uint64_t h, const uint8_t *bytes, size_t length) {

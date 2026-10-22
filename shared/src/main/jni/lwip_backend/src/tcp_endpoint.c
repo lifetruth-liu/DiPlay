@@ -225,6 +225,7 @@ dp_result dp_tcp_read(dp_core *core, uint64_t handle, uint8_t *bytes, size_t cap
 static dp_result close_handle(dp_core *core, uint64_t handle, dp_endpoint_kind kind) {
     dp_result status = dp_enter(core, 1);
     if (status != DP_OK) return status;
+    if (core->failure != DP_OK) core->link_ready = 0; /* Cleanup must not create a new output failure. */
     status = dp_endpoint_remove(&core->endpoints, handle, kind);
     return leave(core, status);
 }

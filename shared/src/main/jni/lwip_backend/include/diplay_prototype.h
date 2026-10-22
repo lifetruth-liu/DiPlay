@@ -2,6 +2,8 @@
 #define DIPLAY_PROTOTYPE_H
 #include "diplay_lwip.h"
 #include "diplay_endpoints.h"
+#include "diplay_tcp.h"
+#define DP_PROTO_COPY_BYTES DP_UDP_MAX_PAYLOAD
 #define DP_PROTO_ENTROPY_BYTES 1024
 #define DP_PROTO_TX_FRAMES 128
 typedef struct {
@@ -33,6 +35,15 @@ DP_API dp_result dp_proto_udp_send(uint64_t context, uint64_t endpoint, const ui
                                    const uint8_t *payload, size_t length);
 DP_API dp_result dp_proto_udp_receive(uint64_t context, uint64_t endpoint, uint8_t *target, size_t capacity, dp_udp_datagram *info);
 DP_API dp_result dp_proto_udp_close(uint64_t context, uint64_t endpoint);
+DP_API dp_result dp_proto_tcp_listen(uint64_t, uint16_t, unsigned, uint64_t *, uint16_t *);
+DP_API dp_result dp_proto_tcp_accept(uint64_t, uint64_t, uint64_t *, dp_tcp_info *);
+DP_API dp_result dp_proto_tcp_connect(uint64_t, const uint8_t[16], uint16_t, uint64_t *);
+DP_API dp_result dp_proto_tcp_connect_status(uint64_t, uint64_t, dp_tcp_info *);
+DP_API dp_result dp_proto_tcp_read(uint64_t, uint64_t, uint8_t *, size_t, size_t *);
+DP_API dp_result dp_proto_tcp_write(uint64_t, uint64_t, const uint8_t *, size_t, size_t *);
+DP_API dp_result dp_proto_tcp_shutdown_output(uint64_t, uint64_t);
+DP_API dp_result dp_proto_tcp_close(uint64_t, uint64_t);
+DP_API dp_result dp_proto_tcp_listener_close(uint64_t, uint64_t);
 #ifdef DP_PROTO_TESTING
 dp_tx_result dp_proto_test_emit(uint64_t handle, const uint8_t *bytes, size_t length);
 uint32_t dp_proto_test_random(uint64_t handle);

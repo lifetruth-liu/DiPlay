@@ -29,7 +29,7 @@ JNIEXPORT jint JNICALL JNI_NAME(udpSend)(JNIEnv *env, jobject self, jlong contex
                                         jbyteArray destination, jint port, jbyteArray payload, jint offset, jint length) {
     (void)self;
     uint8_t *scratch = NULL, address[16];
-    dp_result s = dp_proto_udp_buffer((uint64_t)context, &scratch);
+    dp_result s = dp_proto_copy_buffer((uint64_t)context, &scratch);
     if (s != DP_OK) return s;
     jsize size;
     s = array_size(env, destination, &size);
@@ -49,7 +49,7 @@ JNIEXPORT jint JNICALL JNI_NAME(udpReceive)(JNIEnv *env, jobject self, jlong con
                                            jbyteArray target, jbyteArray source, jintArray metadata) {
     (void)self;
     uint8_t *scratch = NULL;
-    dp_result s = dp_proto_udp_buffer((uint64_t)context, &scratch);
+    dp_result s = dp_proto_copy_buffer((uint64_t)context, &scratch);
     if (s != DP_OK) return s;
     jsize capacity, size;
     s = array_size(env, target, &capacity);

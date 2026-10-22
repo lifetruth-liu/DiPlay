@@ -46,6 +46,23 @@ static void udp_lifecycle(void) {
     CHECK(dp_proto_udp_close(context, endpoint) == DP_OK); /* Cleanup after context failure. */
     CHECK(dp_proto_destroy(&context) == DP_OK);
 }
+static void tcp_lifecycle(void) {
+    uint64_t context = create(), listener = 0, stream = 99;
+    uint16_t port = 0;
+    dp_tcp_info info;
+    const uint8_t peer[16] = {0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2};
+    CHECK(dp_proto_tcp_connect(context, peer, 9000, &stream) == DP_WOULD_BLOCK && stream == 0);
+    CHECK(dp_proto_tcp_listen(context, 0, 2, &listener, &port) == DP_OK && listener && port);
+    CHECK(dp_proto_tcp_accept(context, listener, &stream, &info) == DP_WOULD_BLOCK && stream == 0);
+    CHECK(dp_proto_tcp_close(context, listener) == DP_INVALID_ARGUMENT);
+    CHECK(dp_proto_supply(context, 99, NULL, 0) == DP_CLOCK_REVERSED);
+    CHECK(dp_proto_tcp_listener_close(context, listener) == DP_OK);
+    CHECK(dp_proto_destroy(&context) == DP_OK);
+    context = create();
+    CHECK(dp_proto_tcp_listener_close(context, listener) == DP_INVALID_ARGUMENT);
+    CHECK(dp_proto_tcp_listen(context, 0, 2, &listener, &port) == DP_OK);
+    CHECK(dp_proto_destroy(&context) == DP_OK); /* Owned, unclosed listener must be reclaimed. */
+}
 static void lifecycle(void) {
     uint64_t previous = 0;
     for (int i = 0; i < 100; i++) {
@@ -64,6 +81,7 @@ static void lifecycle(void) {
         CHECK(dp_proto_destroy(&h) == DP_OK);
     }
     udp_lifecycle();
+    tcp_lifecycle();
 }
 static void queue(void) {
     uint64_t h = create();
