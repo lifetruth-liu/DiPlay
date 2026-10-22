@@ -67,9 +67,11 @@ class FuzzDriverTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             binary = root / 'fake-fuzzer'
-            binary.write_text('#!/usr/bin/env python3\nraise SystemExit(3)\n')
+            binary.write_text('#!/usr/bin/env python3\nsum(range(20000000))\nraise SystemExit(3)\n')
             binary.chmod(0o755)
             output = root / 'output'
+            output.mkdir()
+            (output / 'build-metadata.json').write_text('{"compiler_version":"Clang 18"}')
             code = self.driver.main(['--target', 'commands', '--output', str(output),
                                      '--binary', str(binary), '--runs', '1'])
             report = json.loads(next(output.glob('campaign-*/report.json')).read_text())
@@ -79,6 +81,7 @@ class FuzzDriverTest(unittest.TestCase):
             self.assertFalse(report['cpu_budget_complete'])
             self.assertGreater(report['measured_cpu_seconds'], 0)
             self.assertTrue(Path(report['batches'][0]['log']).is_file())
+            self.assertEqual('Clang 18', report['build_metadata']['compiler_version'])
 
 
 if __name__ == '__main__':

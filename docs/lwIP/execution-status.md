@@ -1723,5 +1723,32 @@ Windows7项，5通过/2个Linux专用跳过，0.041s：TEMP/diplay-fuzz-driver-f
 12执行/238缓存：TEMP/diplay-fuzz-driver-ci.log；单元任务UP-TO-DATE，不记新执行。
 四ABI APK/源码检查通过：TEMP/diplay-fuzz-driver-apk.log，APK摘要仍
 e2264833b46149a1d893acd98c3c3acc56035791b47a00f18923bd82ac4e3fc2。
-public tree及diff检查通过。本轮无设备/native栈运行证据；真实三target、插桩、
+public tree及diff检查通过。该阶段没有设备/native栈运行证据；真实三target、插桩、
 有效种子、fuzz_lwip.sh和实际活动仍待实现，累计24 CPU小时尚未开始计入，目标继续。
+
+### Native lwIP fuzz targets与种子smoke（2026-10-23）
+
+完成三类Clang/libFuzzer target：Ethernet帧、端点命令和core生命周期。新增可选
+`DIPLAY_FUZZ` CMake配置，只在Linux Clang且ASan/UBSan开启时构建；正常Android与普通
+host配置仍关闭coverage插桩。target使用真实lwIP stack/port，每次输入检查core销毁、
+netif/默认路由、堆和memp池基线。可复现种子包含IPv6 UDP、TCP SYN、ICMPv6 echo、
+有效TCP/UDP命令、嵌套帧、stale token和重复重建序列。
+
+`scripts/fuzz_lwip.sh`已完成Clang构建、种子初始化、smoke/CPU预算/replay入口；报告
+包含真实子进程wait4 CPU时间和墙钟/RSS、binary/source摘要、compiler/CMake版本、构建
+命令、sanitizer选项、corpus摘要和故障目录。Git在WSL挂载的Windows worktree中不可用，
+报告明确记下这一点，并保留实际source SHA-256。CI现对每类target运行100次种子smoke，
+上传report、日志、corpus和构建元数据。
+
+WSL Ubuntu 20.04 / Clang 10 / CMake 3.16三target各100次均exit 0：
+`build/lwip-fuzz-smoke/ethernet/campaign-20261022T172026.866933Z/report.json`，CPU
+2.20秒；`build/lwip-fuzz-smoke/commands/campaign-20261022T172108.646217Z/report.json`，
+CPU 2.58秒；`build/lwip-fuzz-smoke/lifecycle/campaign-20261022T172108.761897Z/report.json`，
+CPU 5.48秒。三份batch日志均有100次完成且无ASan/UBSan错误。生命周期代表种子单文件
+replay也exit 0，实际执行1个输入：
+`build/lwip-fuzz-smoke/lifecycle/campaign-20261022T172253.393946Z/report.json`，CPU
+0.14秒。smoke与replay报告的 `cpu_budget_complete` 均为false，不计入长时验收。
+
+该证据只覆盖本机x86_64短时native fuzz。测试计划要求的三个target各8 CPU小时、合计
+24 CPU小时仍未完成；用户确认目前没有参考设备或脱敏基线报告，G0/G1真机验证也仍缺失。
+Android完整CI、public-tree/APK核验和最终diff检查在本实现后继续执行；生产后端选择保持不变。

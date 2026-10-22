@@ -14,10 +14,16 @@ jobs:
       - uses: actions/checkout@v4
       - name: Verify native source and ELF checker contracts
         run: python3 -m unittest discover -s scripts/tests -p 'test_check_lwip_native.py'
-      - name: Verify fuzz driver CPU accounting and replay contracts
-        run: python3 -m unittest discover -s scripts/tests -p 'test_lwip_fuzz_driver.py'
+      - name: Verify fuzz seeds, entry point, CPU accounting and replay contracts
+        run: python3 -m unittest discover -s scripts/tests -p 'test_lwip_fuzz*.py'
       - name: Native frame tests with ASan, UBSan and lwIP pool guards
         run: bash scripts/test_lwip_host.sh --sanitize
+      - name: Run seeded sanitizer smoke for all native fuzz targets
+        run: |
+          for target in ethernet commands lifecycle; do
+            bash scripts/fuzz_lwip.sh --target "$target" \
+              --output "build/lwip-fuzz/$target" --runs 100 --seed 7
+          done
       - name: Native test reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -26,6 +32,22 @@ jobs:
           path: |
             build/lwip-host-linux/ctest.log
             build/lwip-host-linux/Testing/
+      - name: Fuzz smoke corpus, logs and build metadata
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lwip-fuzz-smoke
+          if-no-files-found: warn
+          path: |
+            build/lwip-fuzz/*/compiler-version.txt
+            build/lwip-fuzz/*/cmake-version.txt
+            build/lwip-fuzz/*/configure.log
+            build/lwip-fuzz/*/build.log
+            build/lwip-fuzz/*/build-metadata.json
+            build/lwip-fuzz/*/corpus/
+            build/lwip-fuzz/*/campaign-*/report.json
+            build/lwip-fuzz/*/campaign-*/batch-*.log
+            build/lwip-fuzz/*/campaign-*/crashes/
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 30

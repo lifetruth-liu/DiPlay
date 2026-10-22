@@ -1,23 +1,43 @@
-# Native fuzz驱动与CPU计量
+# Native lwIP fuzz入口与CPU计量
 
-`scripts/lwip_fuzz_driver.py`是Linux libFuzzer活动的报告驱动。它尚未提供三个
-native target或fuzz_lwip.sh构建入口；这些仍按实施计划继续，不把此组件交付当作
-完整fuzz工具或24 CPU小时验收通过。
+`scripts/fuzz_lwip.sh`会用Linux Clang/libFuzzer为真实lwIP栈和DiPlay port构建一个
+target，再执行 `scripts/lwip_fuzz_driver.py`。CMake通过 `DIPLAY_FUZZ=ON` 显式开启
+SanitizerCoverage；同一次构建开启ASan、UBSan和lwIP pool guards。默认Android和普通
+host构建不启用fuzzer编译或链接参数。
 
-命令要求target、output，以及三种互斥模式之一：cpu-hours、runs、replay。
-seed必须1..2147483647，预算必须正且有限。cpu-hours模式反复运行10秒墙钟上限
-批次，每批通过wait4记录实际子进程user+system CPU；累计达到请求值且子进程
-成功才设置cpu_budget_complete。runs是冒烟、replay只执行一个文件，两者始终
-不授予CPU预算通过。崩溃/非零退出使驱动非零退出，保留日志和crashes目录。
+三个target分别覆盖：
 
-每次活动创建唯一campaign目录，逐批原子保存report.json，保留命令、seed、CPU/
-墙钟用量、RSS、binary SHA-256、实际source SHA-256、平台和sanitizer选项。
-可访问Git时附commit及dirty；源码归档或WSL无法解析Windows worktree时明确记录
-Git不可用，仍保存实际源码和二进制摘要。共享corpus保留并记录逐文件摘要；默认
-不导入真实媒体或抓包。
+- `ethernet`：对真实IPv6以太网帧输入模糊测试，含UDP、TCP SYN、ICMPv6 echo和短帧种子。
+- `commands`：执行有界端点命令序列，覆盖UDP收发/统计/排队年龄、TCP读写/关闭、
+  stale token、link状态、时钟推进及嵌入的以太网帧。
+- `lifecycle`：在命令序列中反复销毁和重建core，验证旧token及资源回收。
 
-单元测试覆盖参数、重放命令、seed、失败/不足时不通过预算、实际Linux子进程CPU
-计量和失败活动报告。测试中的假子进程只验证驱动报告，不是lwIP fuzz证据。
-CI已接入这些测试；三个真实target、coverage插桩、有效协议种子、短时冒烟和完整
-24 CPU小时活动仍未完成。实施步骤见
-../superpowers/plans/2026-10-23-lwip-native-fuzz.md。
+每个输入都创建真实native core，固定接口、地址、时钟和随机源；输入最多触发128条
+命令，单命令payload最多255字节。target在销毁后检查netif、堆和lwIP池计数，容许
+TCP全局定时器至多一个延迟回收项。它们不调用Android JNI、USB或设备网络驱动。
+
+每种target在首次运行时由 `scripts/generate_lwip_fuzz_seeds.py` 添加确定性种子；已有
+corpus文件保持原样。libFuzzer随后把发现的输入继续写入corpus。建议每种target使用
+独立输出目录：
+
+```sh
+bash scripts/fuzz_lwip.sh --target ethernet --runs 100 --seed 7 --output build/lwip-fuzz/ethernet
+bash scripts/fuzz_lwip.sh --target commands --cpu-hours 8 --seed 7 --output build/lwip-fuzz/commands
+bash scripts/fuzz_lwip.sh --target lifecycle --cpu-hours 8 --seed 7 --output build/lwip-fuzz/lifecycle
+```
+
+`--runs`只做短时冒烟，`--replay FILE`只执行指定输入；这两种模式都不计入CPU门槛。
+`--cpu-hours`按Linux `wait4`返回的真实子进程user+system CPU时间累计，每个子进程以
+最多10秒墙钟时间分批运行。只有子进程成功且累计CPU达到请求值，报告才会把
+`cpu_budget_complete`设为true。墙钟时间、CI smoke或假子进程都不能代替CPU验收。
+
+每次活动创建独立 `campaign-*` 目录，逐批原子写 `report.json`，记录实际binary和源码
+SHA-256、种子、命令、每批CPU/墙钟/RSS、sanitizer选项、corpus摘要及失败日志。构建目录
+另存Clang/CMake版本、配置/构建命令和日志。Git不可用时记录错误并保留源码摘要，不伪报
+commit或clean状态。崩溃输入保存在该活动的 `crashes/`；脚本不会自动导入真实媒体或设备抓包。
+
+CI会对三个真实target各运行100次种子smoke，并上传corpus、报告、构建元数据和日志。
+这只证明入口、种子与短期运行可用，不满足测试计划要求的三类target各8 CPU小时、
+总计至少24 CPU小时。该长时门槛仍未运行；真机NCM/iPhone及低配ARM验收也未覆盖。
+完整目标与剩余门槛见 [test-plan.md](test-plan.md) 和
+[execution-status.md](execution-status.md)。

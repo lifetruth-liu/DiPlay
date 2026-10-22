@@ -100,7 +100,8 @@ def metadata(binary):
     # Linux Git metadata. Always identify the actual source bytes, including dirty edits.
     source = hashlib.sha256()
     paths = list((root / 'shared/src/main/jni/lwip_backend').rglob('*'))
-    paths += [Path(__file__).resolve()]
+    paths += [Path(__file__).resolve(), root / 'scripts/generate_lwip_fuzz_seeds.py',
+              root / 'scripts/fuzz_lwip.sh']
     for path in sorted(p for p in paths if p.is_file()):
         source.update(path.relative_to(root).as_posix().encode('utf-8') + b'\0')
         source.update(bytes.fromhex(digest(path)))
@@ -128,9 +129,12 @@ def main(argv=None):
     environment.setdefault('ASAN_OPTIONS', 'detect_leaks=1:halt_on_error=1')
     environment.setdefault('UBSAN_OPTIONS', 'halt_on_error=1:print_stacktrace=1')
     requested = args.cpu_hours * 3600 if args.cpu_hours is not None else None
+    build_metadata_file = output / 'build-metadata.json'
+    build_metadata = json.loads(build_metadata_file.read_text(encoding='utf-8')) if build_metadata_file.is_file() else None
     report = dict(metadata(binary), target=args.target, seed=args.seed, requested_cpu_seconds=requested,
                   mode='replay' if args.replay else ('smoke' if args.runs else 'cpu-budget'),
                   started_utc=stamp, batches=[], measured_cpu_seconds=0.0, cpu_budget_complete=False,
+                  build_metadata=build_metadata,
                   sanitizer_options={key: environment[key] for key in ('ASAN_OPTIONS', 'UBSAN_OPTIONS')})
     report_file = campaign / 'report.json'
     def save():
