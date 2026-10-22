@@ -1509,3 +1509,25 @@ Linux ASan/UBSan/池检查及默认LSan54/54、9.27s，单项0.06s：
 三个单元任务UP-TO-DATE，不记重新执行。public tree及staged diff检查通过。
 本轮未启动模拟器或重跑JNI，不借用历史设备结果扩大当前验证范围。
 完整故障/安全矩阵、进程峰值、实际NCM/iPhone/ARM及性能长稳仍缺，整体目标继续。
+
+### TCP监听分配失败、重试与端口回滚
+
+新增测试专用tcp_listen_allocation_failures，reuse开/关各测得3处分配：监听记录
+calloc、普通PCB、监听PCB。分别逐点瞬时失败及从第k次持续失败，共12个场景位置。
+原测试假定任何单次失败都返回RESOURCE_LIMIT，红测记录在TEMP/
+diplay-listen-allocation-diagnostic.log：reuse=0 fail_at=2 calls=4 status=OK。
+核对tcp_alloc确认其会回收/重试PCB分配；该恢复成功不是产品缺陷，未改库行为。
+
+最终瞬时模式每种reuse均1例恢复成功、2例RESOURCE_LIMIT；持续模式各3例明确
+RESOURCE_LIMIT。成功句柄实际握手/accept/读数据后关闭，失败输出清零；每项核对
+heap、活动/监听PCB及所有MEMP pool回基线，再同端口重绑并连接。按需TCP计时器
+通过受控500ms poll退休后比较。包装增加真实heap/pool错误计数，配合库重试成功
+后的统计修正，避免测试注入制造错误计数下溢。产品源、vendor摘要与ABI不变。
+
+Windows55/55、1.25s，单项0.02s：TEMP/diplay-listen-allocation-final-host.log。
+Linux ASan/UBSan/池检查及默认LSan55/55、9.16s，单项0.13s：
+/tmp/diplay-listen-allocation-final-sanitize.log。两边LastTest.log打印四组一致结果。
+完整九项CI exit0、日志TEMP/diplay-listen-allocation-final-ci.log；三个单元任务
+UP-TO-DATE，不记重新执行。public tree及staged diff检查通过；本轮未运行新JNI/
+设备测试。没有其他活动连接时的监听矩阵，不代表PCB回收其他连接、全部accept/
+connect/发送/冷定时器及并发故障；独立安全评审、峰值和真机/长稳仍缺，目标继续。

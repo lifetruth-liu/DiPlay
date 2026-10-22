@@ -27,7 +27,7 @@
     } while (0)
 #define FRAME_MAX 1514
 #ifdef DP_WRAP_ALLOCATION
-static struct { size_t calls, fail_at, calloc_calls; int armed; } allocation_fault;
+static struct { size_t calls, fail_at, calloc_calls, rejected; int armed, persistent; } allocation_fault;
 void *__real_mem_malloc(mem_size_t size);
 void *__real_calloc(size_t count, size_t size);
 #if MEMP_OVERFLOW_CHECK
@@ -36,10 +36,18 @@ void *__real_memp_malloc_fn(memp_t type, const char *file, int line);
 void *__real_memp_malloc(memp_t type);
 #endif
 static int reject_allocation(void) {
-    return allocation_fault.armed && ++allocation_fault.calls == allocation_fault.fail_at;
+    if (!allocation_fault.armed) return 0;
+    ++allocation_fault.calls;
+    if (allocation_fault.fail_at && (allocation_fault.calls == allocation_fault.fail_at ||
+        (allocation_fault.persistent && allocation_fault.calls > allocation_fault.fail_at))) {
+        allocation_fault.rejected++;
+        return 1;
+    }
+    return 0;
 }
 void *__wrap_mem_malloc(mem_size_t size) {
-    return reject_allocation() ? NULL : __real_mem_malloc(size);
+    if (reject_allocation()) { MEM_STATS_INC(err); return NULL; }
+    return __real_mem_malloc(size);
 }
 void *__wrap_calloc(size_t count, size_t size) {
     if (allocation_fault.armed) allocation_fault.calloc_calls++;
@@ -47,11 +55,13 @@ void *__wrap_calloc(size_t count, size_t size) {
 }
 #if MEMP_OVERFLOW_CHECK
 void *__wrap_memp_malloc_fn(memp_t type, const char *file, int line) {
-    return reject_allocation() ? NULL : __real_memp_malloc_fn(type, file, line);
+    if (reject_allocation()) { STATS_INC(memp[type]->err); return NULL; }
+    return __real_memp_malloc_fn(type, file, line);
 }
 #else
 void *__wrap_memp_malloc(memp_t type) {
-    return reject_allocation() ? NULL : __real_memp_malloc(type);
+    if (reject_allocation()) { STATS_INC(memp[type]->err); return NULL; }
+    return __real_memp_malloc(type);
 }
 #endif
 #endif
@@ -1682,6 +1692,71 @@ static void test_core_allocation_failures(void) {
     printf("Core create traversed 1 cold calloc and %lu warm allocation failure points\n",
            (unsigned long)allocations);
 }
+static void exercise_and_close_listener(struct fixture *f, uint64_t listener) {
+    uint32_t server = establish(f, 50000);
+    uint64_t stream = accept_stream(f, listener);
+    send_tcp(f, 24, 1001, server + 1, "abc");
+    uint8_t received[3]; size_t copied = 0;
+    CHECK(dp_tcp_read(f->core, stream, received, sizeof(received), &copied) == DP_OK);
+    CHECK(copied == 3 && !memcmp(received, "abc", 3));
+    CHECK(dp_tcp_close(f->core, stream) == DP_OK);
+    CHECK(dp_tcp_listener_close(f->core, listener) == DP_OK);
+    advance(f, 500); /* Let the on-demand TCP timer retire after abort. */
+}
+static void test_tcp_listen_allocation_failures(void) {
+    for (int profile = 0; profile < 4; ++profile) {
+        int reuse = profile % 2, persistent = profile / 2;
+        size_t allocations = 0;
+        unsigned recovered = 0, rejected = 0;
+        for (size_t fail_at = 0; fail_at <= allocations; ++fail_at) {
+            struct fixture f;
+            ready_core(&f);
+            dp_stats before, after;
+            CHECK(dp_core_get_stats(f.core, &before) == DP_OK);
+            uint32_t pools_before[MEMP_MAX];
+            for (unsigned pool = 0; pool < MEMP_MAX; ++pool) pools_before[pool] = lwip_stats.memp[pool]->used;
+            uint64_t listener = UINT64_MAX; uint16_t port = UINT16_MAX;
+            allocation_fault.calls = 0; allocation_fault.calloc_calls = 0;
+            allocation_fault.rejected = 0; allocation_fault.persistent = persistent;
+            allocation_fault.fail_at = fail_at; allocation_fault.armed = 1;
+            dp_result result = dp_tcp_listen_with_options(f.core, 7000, 2, reuse, &listener, &port);
+            allocation_fault.armed = 0;
+            if (!fail_at) {
+                CHECK(result == DP_OK && listener && port == 7000 && allocation_fault.calloc_calls == 1);
+                allocations = allocation_fault.calls;
+                CHECK(allocations > 0 && allocations <= 16);
+            } else {
+                CHECK(allocation_fault.rejected > 0 && allocation_fault.calls >= fail_at);
+                if (!persistent) CHECK(allocation_fault.rejected == 1);
+            }
+            if (result == DP_OK) {
+                CHECK(!fail_at || !persistent);
+                CHECK(listener && port == 7000);
+                if (fail_at) recovered++;
+                exercise_and_close_listener(&f, listener);
+            } else {
+                CHECK(fail_at && result == DP_RESOURCE_LIMIT);
+                CHECK(listener == 0 && port == 0);
+                rejected++;
+            }
+            CHECK(dp_core_get_stats(f.core, &after) == DP_OK);
+            CHECK(after.failure == DP_OK && after.heap_used == before.heap_used &&
+                  after.tcp_active == before.tcp_active && after.tcp_listeners == before.tcp_listeners);
+            for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == pools_before[pool]);
+            CHECK(dp_tcp_listen_with_options(f.core, 7000, 2, reuse, &listener, &port) == DP_OK && port == 7000);
+            exercise_and_close_listener(&f, listener);
+            CHECK(dp_core_get_stats(f.core, &after) == DP_OK);
+            CHECK(after.failure == DP_OK && after.heap_used == before.heap_used &&
+                  after.tcp_active == before.tcp_active && after.tcp_listeners == before.tcp_listeners);
+            for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == pools_before[pool]);
+            close_core(&f);
+        }
+        CHECK(recovered + rejected == allocations);
+        if (persistent) CHECK(recovered == 0 && rejected == allocations);
+        printf("TCP listen reuse=%d persistent=%d points=%lu recovered=%u resource_limit=%u\n",
+               reuse, persistent, (unsigned long)allocations, recovered, rejected);
+    }
+}
 #endif
 static void test_tx_failed(void) {
     struct fixture f;
@@ -1812,6 +1887,8 @@ int main(int argc, char **argv) {
         test_udp_bind_allocation_failures();
     else if (!strcmp(argv[1], "core_allocation_failures"))
         test_core_allocation_failures();
+    else if (!strcmp(argv[1], "tcp_listen_allocation_failures"))
+        test_tcp_listen_allocation_failures();
 #endif
     else if (!strcmp(argv[1], "api"))
         test_api();
