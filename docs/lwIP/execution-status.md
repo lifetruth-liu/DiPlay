@@ -1443,3 +1443,29 @@ atomic/重组、顺序/逆序负例。没有将该中间修复引入的问题描
 
 public tree及staged diff检查通过。未知选项动作、更多路由/畸形长度、分配故障矩阵、
 独立安全评审、进程峰值、实际NCM/iPhone/ARM和性能长稳仍缺，G2/G3和整体目标未完成。
+
+### UDP发送逐点分配失败回归
+
+新增CMake测试专用frame_allocation_tests，使用GNU兼容链接器--wrap包装lwIP
+mem_malloc/memp_malloc；溢出检查构建使用memp_malloc_fn，保留file/line参数。
+产品Android.mk不包含测试目标/注入开关，生产及vendor代码、ABI均未修改。
+
+成功路径动态计数后逐一使第k次heap/pool分配返回NULL。已解析邻居/可写输出下，
+1200字节1点，65487/65488/65527各93点，共280个失败位置。MinGW普通及Linux池
+检查构建计数一致。每个失败须RESOURCE_LIMIT、无完整末片输出、核心failure仍OK，
+heap及全部MEMP pool使用量回到发送前基线；随后同一端点可完整重发，捕获帧重组
+核对地址、端口、非重叠/边界、负载与校验和，资源再次回到基线。
+
+初次sanitizer链接失败暴露memp_malloc在MEMP_OVERFLOW_CHECK下是memp_malloc_fn
+宏入口，原包装未覆盖；修正两种构建入口后通过，没有把缺失注入视为通过。
+
+最终Windows52/52、1.20s：TEMP/diplay-udp-allocation-final-host.log，单项0.19s。
+Linux ASan/UBSan/池检查及默认LSan52/52、9.09s，注入单项3.92s：
+/tmp/diplay-udp-allocation-final-sanitize.log。两个CTest LastTest.log均打印1/93/93/93。
+完整九项Android CI exit0、15s、250任务12执行：TEMP/diplay-udp-allocation-final-ci.log。
+三个单元任务均UP-TO-DATE，不记重新执行。本轮未重新运行JNI/设备用例；仅宿主
+测试/文档变化，不借用历史设备结果声称本轮覆盖。public tree及staged diff检查通过。
+
+仅R01的UDP发送子集，未遍历上下文/绑定libc分配、JNI异常、未知邻居排队及全部
+TCP/重组分配路径；并发、独立安全评审、完整进程峰值、真机及性能长稳仍缺。
+生产后端未切换，G2/G3与整体目标保持未完成。

@@ -98,3 +98,29 @@ IPV6_HOPOPTS生成真实HBH，TAP/veth endpoints和旧echo均完成普通8组及
 UDP往返；HBH最大payload为65519，为其8字节头保留空间。该socket选项要求工具
 的CAP_NET_RAW，现有root namespace harness满足，产品不新增权限或raw socket。
 Android工具使用ASan/UBSan、detect_leaks=0；不据此声称LSan或全面扩展头审计。
+
+## 逐点发送分配失败（宿主）
+
+新增CMake专用frame_allocation_tests，不向产品编译故障开关。链接器包装mem_malloc
+及memp_malloc；开启MEMP_OVERFLOW_CHECK时改包装memp_malloc_fn，保留调用来源参数。
+先在已解析邻居、可写输出的固定夹具内计数成功发送的分配点，再逐一让第k次返回NULL。
+
+| UDP payload | 实际分配点及注入次数 |
+| --- | --- |
+| 1200 | 1 |
+| 65487 | 93 |
+| 65488 | 93 |
+| 65527 | 93 |
+
+共280个失败位置，在普通MinGW及Linux sanitizer构建得到相同计数。每次须返回
+RESOURCE_LIMIT、核心仍正常，已输出片不能包含末片；lwIP heap和所有MEMP pool
+使用量回到发送前基线（包括普通统计未单列的分片引用池）。解除故障后用同一端点
+完整发送，独立重组捕获帧核对非重叠、边界、端口、负载及校验和，再检查基线。
+
+执行scripts/test_lwip_host.ps1或bash scripts/test_lwip_host.sh --sanitize会注册并
+运行udp_allocation_failures；也可直接运行frame_allocation_tests udp_allocation_failures。
+最终原生52/52通过，Linux启用ASan/UBSan/池边界检查及默认LSan。
+
+这是R01的UDP发送子集：未覆盖上下文/绑定的libc malloc/calloc、JNI复制异常、未知
+邻居排队、所有TCP/接收重组分配点、并发取消或实际设备。不将280次注入称为完整
+R01验收，也不将宿主52项作为新一轮JNI/真机证据。产品源代码、vendor摘要和ABI不变。

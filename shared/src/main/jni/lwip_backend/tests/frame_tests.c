@@ -7,6 +7,8 @@
 #include "lwip/nd6.h"
 #include "lwip/netif.h"
 #include "lwip/memp.h"
+#include "lwip/mem.h"
+#include "lwip/stats.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,6 +26,30 @@
         }                                                                                          \
     } while (0)
 #define FRAME_MAX 1514
+#ifdef DP_WRAP_ALLOCATION
+static struct { size_t calls, fail_at; int armed; } allocation_fault;
+void *__real_mem_malloc(mem_size_t size);
+#if MEMP_OVERFLOW_CHECK
+void *__real_memp_malloc_fn(memp_t type, const char *file, int line);
+#else
+void *__real_memp_malloc(memp_t type);
+#endif
+static int reject_allocation(void) {
+    return allocation_fault.armed && ++allocation_fault.calls == allocation_fault.fail_at;
+}
+void *__wrap_mem_malloc(mem_size_t size) {
+    return reject_allocation() ? NULL : __real_mem_malloc(size);
+}
+#if MEMP_OVERFLOW_CHECK
+void *__wrap_memp_malloc_fn(memp_t type, const char *file, int line) {
+    return reject_allocation() ? NULL : __real_memp_malloc_fn(type, file, line);
+}
+#else
+void *__wrap_memp_malloc(memp_t type) {
+    return reject_allocation() ? NULL : __real_memp_malloc(type);
+}
+#endif
+#endif
 struct frame {
     size_t length;
     uint8_t bytes[FRAME_MAX];
@@ -1438,6 +1464,91 @@ static void test_udp_extension_fragments(void) {
         }
     }
 }
+#ifdef DP_WRAP_ALLOCATION
+static void check_complete_udp_output(struct fixture *f, uint16_t port,
+                                      const uint8_t *payload, size_t length) {
+    uint8_t reply[65535] = {0}, seen[65535] = {0}, pseudo[40] = {0};
+    size_t copied = 0;
+    int last = 0;
+    uint32_t id = 0;
+    for (size_t n = 0; n < f->count; ++n) {
+        const uint8_t *ip = f->frames[n].bytes + 14;
+        CHECK(!memcmp(ip + 8, local_ip, 16) && !memcmp(ip + 24, peer_ip, 16));
+        CHECK(u16(ip + 4) + 54u == f->frames[n].length);
+        if (ip[6] == 17) {
+            CHECK(f->count == 1 && u16(ip + 4) == length + 8);
+            memcpy(reply, ip + 40, length + 8); copied = length + 8; last = 1;
+            break;
+        }
+        CHECK(ip[6] == 44);
+        const uint8_t *fragment = ip + 40;
+        size_t at = u16(fragment + 2) & 0xfff8, count = u16(ip + 4) - 8;
+        CHECK(fragment[0] == 17 && at + count <= length + 8);
+        if (n == 0) id = u32(fragment + 4);
+        else CHECK(id == u32(fragment + 4));
+        if (u16(fragment + 2) & 1) CHECK(count % 8 == 0);
+        else { CHECK(!last && at + count == length + 8); last = 1; }
+        for (size_t byte = at; byte < at + count; ++byte) { CHECK(!seen[byte]); seen[byte] = 1; }
+        memcpy(reply + at, fragment + 8, count); copied += count;
+    }
+    CHECK(last && copied == length + 8);
+    CHECK(u16(reply) == port && u16(reply + 2) == 50000 && u16(reply + 4) == length + 8);
+    CHECK(!memcmp(reply + 8, payload, length));
+    memcpy(pseudo + 8, local_ip, 16); memcpy(pseudo + 24, peer_ip, 16);
+    CHECK(checksum(pseudo, reply, length + 8, 17) == 0);
+}
+static void test_udp_allocation_failures(void) {
+    const size_t lengths[] = {1200, 65487, 65488, 65527};
+    uint8_t payload[65527];
+    for (size_t byte = 0; byte < sizeof(payload); ++byte) payload[byte] = (uint8_t)(byte ^ (byte >> 8));
+    for (size_t vector = 0; vector < sizeof(lengths) / sizeof(lengths[0]); ++vector) {
+        size_t allocations = 0;
+        for (size_t fail_at = 0; fail_at <= allocations; ++fail_at) {
+            struct fixture f;
+            ready_core(&f);
+            uint64_t handle; uint16_t port;
+            CHECK(dp_udp_bind(f.core, 0, &handle, &port) == DP_OK);
+            dp_stats before, after;
+            CHECK(dp_core_get_stats(f.core, &before) == DP_OK);
+            uint32_t pool_usage[MEMP_MAX];
+            for (unsigned pool = 0; pool < MEMP_MAX; ++pool) pool_usage[pool] = lwip_stats.memp[pool]->used;
+            allocation_fault.calls = 0; allocation_fault.fail_at = fail_at; allocation_fault.armed = 1;
+            dp_result result = dp_udp_send(f.core, handle, peer_ip, 50000, payload, lengths[vector]);
+            allocation_fault.armed = 0;
+            if (!fail_at) {
+                CHECK(result == DP_OK);
+                allocations = allocation_fault.calls;
+                CHECK(allocations > 0 && allocations <= 256);
+                check_complete_udp_output(&f, port, payload, lengths[vector]);
+            } else {
+                if (result != DP_RESOURCE_LIMIT)
+                    fprintf(stderr, "UDP allocation failure index=%lu calls=%lu length=%lu status=%d\n",
+                            (unsigned long)fail_at, (unsigned long)allocation_fault.calls,
+                            (unsigned long)lengths[vector], result);
+                CHECK(result == DP_RESOURCE_LIMIT && allocation_fault.calls == fail_at);
+                /* No final fragment: a failed call must not publish a whole datagram. */
+                for (size_t n = 0; n < f.count; ++n) {
+                    const uint8_t *ip = f.frames[n].bytes + 14;
+                    CHECK(ip[6] == 44 && (u16(ip + 42) & 1));
+                }
+            }
+            CHECK(dp_core_get_stats(f.core, &after) == DP_OK);
+            CHECK(after.failure == DP_OK && after.heap_used == before.heap_used && after.pbuf_used == before.pbuf_used);
+            for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == pool_usage[pool]);
+            f.count = 0;
+            CHECK(dp_udp_send(f.core, handle, peer_ip, 50000, payload, lengths[vector]) == DP_OK);
+            check_complete_udp_output(&f, port, payload, lengths[vector]);
+            CHECK(dp_core_get_stats(f.core, &after) == DP_OK);
+            CHECK(after.heap_used == before.heap_used && after.pbuf_used == before.pbuf_used);
+            for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == pool_usage[pool]);
+            CHECK(dp_udp_close(f.core, handle) == DP_OK);
+            close_core(&f);
+        }
+        printf("UDP length=%lu traversed %lu allocation failure points\n",
+               (unsigned long)lengths[vector], (unsigned long)allocations);
+    }
+}
+#endif
 static void test_tx_failed(void) {
     struct fixture f;
     open_core(&f, 1);
@@ -1560,6 +1671,10 @@ int main(int argc, char **argv) {
         test_udp_endpoint_fragments();
     else if (!strcmp(argv[1], "udp_extension_fragments"))
         test_udp_extension_fragments();
+#ifdef DP_WRAP_ALLOCATION
+    else if (!strcmp(argv[1], "udp_allocation_failures"))
+        test_udp_allocation_failures();
+#endif
     else if (!strcmp(argv[1], "api"))
         test_api();
     else if (!strcmp(argv[1], "thread"))
