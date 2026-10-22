@@ -8,4 +8,6 @@ internal interface LwipUdpCore : LwipPrototypeCore {
     fun udpSend(token: Long, address: ByteArray, port: Int, bytes: ByteArray): CoreAttempt<Unit>
     fun udpReceive(token: Long, bytes: ByteArray, source: ByteArray, metadata: IntArray): CoreAttempt<Unit>
     fun udpClose(token: Long)
+    fun udpSetQueueMaxAge(token: Long, maxAgeMillis: Long)
+    fun udpExpiredCount(token: Long): Long
 }

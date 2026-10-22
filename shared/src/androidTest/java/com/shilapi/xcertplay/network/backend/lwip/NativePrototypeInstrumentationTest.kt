@@ -31,6 +31,10 @@ class NativePrototypeInstrumentationTest {
             // These are the prototype echo ports. Both must be free in a session core.
             val listener = network.listen(NetworkEndpoint(ip, 7000, "session"), reuseAddress = true)
             val udp = network.bindUdp(NetworkEndpoint(ip, 6000, "session"))
+            val queueAge = udp as com.shilapi.xcertplay.network.backend.UdpQueueAgeControl
+            queueAge.setReceiveMaxAge(100)
+            assertEquals(0L, queueAge.expiredDatagrams())
+            queueAge.setReceiveMaxAge(0)
             try { network.listen(listener.localEndpoint, reuseAddress = true); fail("duplicate listener") }
             catch (error: BackendFailure) { assertEquals(BackendFailure.Kind.ADDRESS_CONFLICT, error.kind) }
             val acceptError = AtomicReference<Throwable>(); val receiveError = AtomicReference<Throwable>()
@@ -43,6 +47,8 @@ class NativePrototypeInstrumentationTest {
             assertEquals(BackendFailure.Kind.CANCELLED, (acceptError.get() as BackendFailure).kind)
             assertEquals(BackendFailure.Kind.CANCELLED, (receiveError.get() as BackendFailure).kind)
             listener.close(); udp.close()
+            assertEquals(BackendFailure.Kind.CANCELLED,
+                (runCatching { queueAge.expiredDatagrams() }.exceptionOrNull() as BackendFailure).kind)
         } finally { network.close() }
     }
 
@@ -391,6 +397,20 @@ class NativePrototypeInstrumentationTest {
             assertNotNull(sent)
             assertEquals(udp.localEndpoint.port, read16(sent!!, 54))
             assertArrayEquals("reply".toByteArray(), sent!!.copyOfRange(62, sent!!.size))
+            val queueAge = udp as com.shilapi.xcertplay.network.backend.UdpQueueAgeControl
+            queueAge.setReceiveMaxAge(1000)
+            val stale = packet(17, 9).also {
+                write16(it, 54, 50000); write16(it, 56, udp.localEndpoint.port); write16(it, 58, 9)
+                it[62] = 1; checksum(it, 17, 60)
+            }
+            runner.executeCommand { core -> core.input(stale); CoreAttempt.Ready(Unit) }
+            offset.addAndGet(1001)
+            assertEquals(1L, queueAge.expiredDatagrams())
+            sendPacket(byteArrayOf(7))
+            val live = ByteArray(1)
+            assertEquals(1, udp.receive(live, clock.nowMillis() + 2000).copiedLength)
+            assertArrayEquals(byteArrayOf(7), live)
+            queueAge.setReceiveMaxAge(0)
             val failure = AtomicReference<Throwable>()
             val waiter = Thread { failure.set(runCatching { udp.receive(ByteArray(1)) }.exceptionOrNull()) }
             waiter.start()

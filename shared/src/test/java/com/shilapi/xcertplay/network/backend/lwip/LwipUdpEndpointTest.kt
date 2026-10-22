@@ -13,6 +13,49 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class LwipUdpEndpointTest {
+    @Test(timeout = 10_000) fun queueAgeConfigurationAndCountersRunOnOwnerAndRespectClose() = Fixture().use { f ->
+        val udp = f.bind()
+        val age = udp as UdpQueueAgeControl
+        age.setReceiveMaxAge(100)
+        assertEquals(100L, f.core.maxAge)
+        f.core.expired = 42
+        assertEquals(42L, age.expiredDatagrams())
+        age.setReceiveMaxAge(0xffff_ffffL)
+        assertEquals(0xffff_ffffL, f.core.maxAge)
+        for (invalid in listOf(-1L, 0x1_0000_0000L)) {
+            assertTrue(runCatching { age.setReceiveMaxAge(invalid) }.exceptionOrNull() is IllegalArgumentException)
+            assertEquals(0xffff_ffffL, f.core.maxAge)
+        }
+        age.setReceiveMaxAge(0)
+        assertEquals(0L, f.core.maxAge)
+        udp.close()
+        failure(BackendFailure.Kind.CANCELLED) { age.setReceiveMaxAge(1) }
+        failure(BackendFailure.Kind.CANCELLED) { age.expiredDatagrams() }
+    }
+    @Test(timeout = 10_000) fun queueAgeControlsCanRunWhileReceiveWaits() = Fixture().use { f ->
+        val udp = f.bind()
+        val receive = Call { udp.receive(ByteArray(1)) }
+        assertTrue(f.core.receiving.await(2, TimeUnit.SECONDS))
+        val age = udp as UdpQueueAgeControl
+        age.setReceiveMaxAge(100)
+        assertEquals(0L, age.expiredDatagrams())
+        f.packet(byteArrayOf(9))
+        assertEquals(1, receive.finish().getOrThrow().copiedLength)
+        udp.close()
+    }
+    @Test(timeout = 10_000) fun queueAgeFailuresAreStructuredAndEndpointRemainsUsable() = Fixture().use { f ->
+        val udp = f.bind()
+        val age = udp as UdpQueueAgeControl
+        f.core.ageFailure.set(OutOfMemoryError("injected"))
+        failure(BackendFailure.Kind.RESOURCE_LIMIT) { age.setReceiveMaxAge(100) }
+        f.core.expired = -1
+        failure(BackendFailure.Kind.PROTOCOL) { age.expiredDatagrams() }
+        f.core.expired = 1
+        age.setReceiveMaxAge(100)
+        assertEquals(1L, age.expiredDatagrams())
+        assertNull(f.runner.snapshot().failure)
+        udp.close()
+    }
     @Test(timeout = 10_000) fun bindAllocationFailureIsStructuredAndLeavesRunnerUsable() = Fixture().use { f ->
         f.core.bindFailure.set(OutOfMemoryError("injected"))
         failure(BackendFailure.Kind.RESOURCE_LIMIT) { f.bind() }
@@ -151,6 +194,9 @@ class LwipUdpEndpointTest {
         val sending = CountDownLatch(1)
         val receiving = CountDownLatch(1)
         val bindFailure = AtomicReference<Throwable>()
+        @Volatile var maxAge = 0L
+        @Volatile var expired = 0L
+        val ageFailure = AtomicReference<Throwable>()
         private var next = 1L
         private fun checkOwner() { assertSame(owner, Thread.currentThread()) }
         override val udpLocalAddress: ByteArray get() { checkOwner(); return ip.copyOf() }
@@ -176,6 +222,10 @@ class LwipUdpEndpointTest {
             return CoreAttempt.Ready(Unit)
         }
         override fun udpClose(token: Long) { checkOwner(); assertNotNull(bound.remove(token)); closes.incrementAndGet() }
+        override fun udpSetQueueMaxAge(token: Long, maxAgeMillis: Long) {
+            checkOwner(); assertTrue(bound.containsKey(token)); ageFailure.getAndSet(null)?.let { throw it }; maxAge = maxAgeMillis
+        }
+        override fun udpExpiredCount(token: Long): Long { checkOwner(); assertTrue(bound.containsKey(token)); return expired }
         override fun prepare() = checkOwner()
         override fun input(frame: ByteArray) = checkOwner()
         override fun poll() = checkOwner()

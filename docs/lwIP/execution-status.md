@@ -1680,3 +1680,25 @@ debug.checkjni属性为空，不将本次记录成已显式启用CheckJNI的验�
 7c5dd5a16375a4275c944a7fcaca806876c49ff2bd1e11f7b7724cc122f2e763。
 public tree及diff检查通过。仅运行自建AVD，无新NCM/iPhone/ARM或内核证据。
 仍需接通类型化公共接口和媒体通道配置；生产选择不变，完整R04和整体目标继续。
+
+### UDP排队年龄的公共可选能力
+
+新增UdpQueueAgeControl，显式lwIP UdpEndpoint实现setReceiveMaxAge及expiredDatagrams；
+调用在端点scope中排队，只有owner访问native token。LwipUdpCore和NativePrototypeCore
+接通JNI ABI7，System端点不声明支持；默认关闭策略不变，没有启用媒体通道。
+范围校验、OOM映射和负计数协议校验与关闭取消均保留；接收等待不阻塞配置命令。
+本轮没有修改C/JNI源码、ABI或vendor，未重复原生宿主/sanitizer验证。
+
+先加测试，TEMP/diplay-udp-age-api-red.log记录未实现接口编译失败。实现后新增
+3项适配测试覆盖范围/关闭、等待接收时配置、OOM/非法统计及恢复。定向15/15：
+TEMP/diplay-udp-age-api-final-tests.log。真实Android API28 x86_64 JNI36/36，
+69s：TEMP/diplay-udp-age-api-jni.log；公共SessionNetwork能力可调用，实际UDP
+端点入队旧包后推进单调时钟，过期计数1、新包可读；关闭后统计查询CANCELLED。
+
+九项CI通过、7m11s、43执行/207缓存：TEMP/diplay-udp-age-api-ci.log。shared1793、
+common1578重新执行零失败/错误，home6为UP-TO-DATE，XML总3377。四ABI APK/源码
+校验：TEMP/diplay-udp-age-api-apk.log；APK SHA-256：
+e2264833b46149a1d893acd98c3c3acc56035791b47a00f18923bd82ac4e3fc2。
+public tree及diff检查通过，测试用AVD已关闭。无参考NCM/iPhone/ARM设备证据。
+年龄检查只覆盖原生出队，已进入命令结果和媒体层的数据仍待完整暂停恢复验证；
+实际媒体策略、G0/G1与整体方案保持未完成，生产选择不变。

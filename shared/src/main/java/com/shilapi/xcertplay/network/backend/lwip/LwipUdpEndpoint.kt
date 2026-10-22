@@ -10,7 +10,7 @@ internal class LwipUdpEndpoint private constructor(
     private val scope: CoreCommandQueue.Scope,
     private val token: AtomicLong,
     override val localEndpoint: NetworkEndpoint,
-) : UdpEndpoint {
+) : UdpEndpoint, UdpQueueAgeControl {
     private val closed = AtomicBoolean()
     private val sending = AtomicBoolean()
     private val receiving = AtomicBoolean()
@@ -70,6 +70,22 @@ internal class LwipUdpEndpoint private constructor(
 
     override fun close() {
         if (closed.compareAndSet(false, true)) runner.closeResourceScope(scope)
+    }
+    override fun setReceiveMaxAge(maxAgeMillis: Long) = allocation {
+        require(maxAgeMillis in 0..0xffff_ffffL)
+        if (closed.get()) throw BackendFailure(BackendFailure.Kind.CANCELLED)
+        runner.executeCommand(scope = scope) { core -> allocation {
+            udp(core).udpSetQueueMaxAge(token.get(), maxAgeMillis)
+            CoreAttempt.Ready(Unit)
+        } }
+    }
+    override fun expiredDatagrams(): Long = allocation {
+        if (closed.get()) throw BackendFailure(BackendFailure.Kind.CANCELLED)
+        runner.executeCommand(scope = scope) { core -> allocation {
+            val count = udp(core).udpExpiredCount(token.get())
+            if (count < 0) throw BackendFailure(BackendFailure.Kind.PROTOCOL)
+            CoreAttempt.Ready(count)
+        } }
     }
 
     companion object {

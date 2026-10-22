@@ -13,7 +13,8 @@ native核心或复制区；端点查找再次验证UDP类型和该核心注册�
 ABI 7新增udpSetQueueMaxAge(context, endpoint, millis)及udpExpiredCount(context,
 endpoint, LongArray(1))，连接原生按端点排队年龄预算。millis范围0..UINT32_MAX，
 负值/越界及统计数组形状不符在操作前拒绝。统计仅成功时复制结果，失败保留调用方
-数组；接口遵循上下文线程/代数边界。尚未接入公共端点配置及真实媒体通道。
+数组；接口遵循上下文线程/代数边界。公共端点通过UdpQueueAgeControl接通配置及
+统计，见udp-adapter.md；尚未启用真实媒体通道策略。
 
 - udpBind使用调用者的两项LongArray返回端点token和实际端口。结果形状及端口先校验；
   Java发布结果出错时用native close撤销端点，不在异常挂起时继续访问Java对象。

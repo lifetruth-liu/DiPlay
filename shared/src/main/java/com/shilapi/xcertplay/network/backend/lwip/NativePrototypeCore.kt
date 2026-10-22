@@ -90,6 +90,17 @@ internal class NativePrototypeCore private constructor(private val clockMillis: 
     override fun udpClose(token: Long) = nativeCall {
         supply(); checkResult(LwipNativeBindings.udpClose(handle, token))
     }
+    override fun udpSetQueueMaxAge(token: Long, maxAgeMillis: Long) = nativeCall {
+        require(maxAgeMillis in 0..0xffff_ffffL)
+        supply(); checkResult(LwipNativeBindings.udpSetQueueMaxAge(handle, token, maxAgeMillis))
+    }
+    override fun udpExpiredCount(token: Long): Long = nativeCall {
+        supply()
+        val result = LongArray(1)
+        checkResult(LwipNativeBindings.udpExpiredCount(handle, token, result))
+        if (result[0] < 0) throw BackendFailure(BackendFailure.Kind.PROTOCOL)
+        result[0]
+    }
     override val tcpLocalAddress: ByteArray get() { checkOwner(); return address.copyOf() }
     override fun tcpListen(port: Int, backlog: Int, reuseAddress: Boolean): LwipTcpCore.Listener = nativeCall {
         require(port in 0..65535 && backlog in 1..32)

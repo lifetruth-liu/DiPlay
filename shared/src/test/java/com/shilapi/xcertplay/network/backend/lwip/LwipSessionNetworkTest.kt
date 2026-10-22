@@ -103,6 +103,8 @@ class LwipSessionNetworkTest {
         override fun udpReceive(token: Long, bytes: ByteArray, source: ByteArray, metadata: IntArray): CoreAttempt<Unit> { valid(token); return CoreAttempt.Pending }
         override fun udpSend(token: Long, address: ByteArray, port: Int, bytes: ByteArray): CoreAttempt<Unit> { valid(token); return CoreAttempt.Pending }
         override fun udpClose(token: Long) = tcpClose(token)
+        override fun udpSetQueueMaxAge(token: Long, maxAgeMillis: Long) { valid(token) }
+        override fun udpExpiredCount(token: Long): Long { valid(token); return 0 }
         override fun prepare() = owner()
         override fun input(frame: ByteArray) = owner()
         override fun poll() = owner()

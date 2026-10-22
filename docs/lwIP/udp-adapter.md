@@ -3,7 +3,13 @@
 `LwipUdpEndpoint`实现现有`UdpEndpoint`，通过显式`LwipPrototype`绑定；后续已由
 显式`LwipSessionNetwork`组合，见session-network-adapter.md；
 仍不改变生产后端选择。`LwipUdpCore`是仅限核心线程的
-非阻塞接口，`NativePrototypeCore`将其转发给既有UDP JNI（当前整体ABI 6），不新增C接口。
+非阻塞接口，`NativePrototypeCore`将其转发给UDP JNI（当前整体ABI 7）。
+
+显式lwIP端点另外实现可选`UdpQueueAgeControl`，通过setReceiveMaxAge配置0..
+4294967295毫秒预算、expiredDatagrams读取过期计数，均在端点scope中排队到owner。
+0表示关闭过期，默认也是0；System端点不声明这项能力，通道应先检查支持。
+配置可与等待中的receive并存，关闭后配置/查询返回CANCELLED；不从消费者线程
+访问native token。策略尚未接入实际音频通道，不据此宣称R04或完整媒体恢复通过。
 
 bind在登记资源前检查运行状态和调用线程；IPv6本地地址只能是虚拟netif实际地址
 或全零通配地址。结果报告实际地址、实际分配端口和调用者的会话linkId，不使用
