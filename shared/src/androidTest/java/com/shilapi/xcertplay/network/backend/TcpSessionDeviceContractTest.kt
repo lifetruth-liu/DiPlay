@@ -227,8 +227,16 @@ class TcpSessionDeviceContractTest(private val backend: String) {
             val deadline = peer.network.clock.nowMillis() + 30000
             val random = Random(91)
             var offset = 0
-            // Includes one-byte and larger-than-native-write-chunk calls, with nonzero offsets.
-            for (size in listOf(1, 32769, payload.size - 32770)) {
+            // Pin the one-byte and >native-chunk boundaries, then vary the remaining write sizes.
+            val writeSizes = mutableListOf(1, 32769)
+            var remaining = payload.size - 32770
+            val writeRandom = Random(93)
+            while (remaining > 0) {
+                val size = minOf(remaining, 1 + writeRandom.nextInt(8192))
+                writeSizes += size
+                remaining -= size
+            }
+            for (size in writeSizes) {
                 val padded = ByteArray(size + 6) { 0x55 }
                 payload.copyInto(padded, 3, offset, offset + size)
                 stream.write(padded, 3, size, deadline)

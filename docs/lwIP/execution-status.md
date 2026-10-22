@@ -121,12 +121,14 @@ NIO 同步关闭、批量关闭异常等回归均已修正；独立源码复审�
 
 日志副本保存在本工作树 `build/reports/lwip/`（忽略的构建产物，不作为源码依赖）。
 
-P1.1 仍需补齐 RST、真实 IPv6 scope、初始化/关闭竞态与完整 T01–T08
-两后端共用运行器等覆盖；IPv4/IPv6 数据报各自的最大长度边界也需补测。
+P1.1 仍需补齐真实 IPv6 scope、初始化/关闭竞态以及 IPv4 数据报最大长度边界。T01–T08
+核心合同现由 Android 参数化测试同时跑系统与 lwip-jni 后端，2026-10-23 AVD 40/40通过；
+这不证明真机 scope、全进程资源峰值或所有故障注入矩阵。
 公共宿主与普通服务已接入生产控制器；P1.2 把 AirPlay/媒体的系统 Socket
 边界改为显式注入 SessionNetwork 的源码工作已完成，仍需补齐各变体的全通道契约
 与设备基线比较，不能仅凭本批虚拟协商测试通过 G1。
-P2 已新增固定版本 native 核心与宿主帧测试（见下节）；NCM 原型、JNI、native 端点联调、选择设置及 P3–P7 发布工作仍未交付。
+P2 已新增固定版本 native 核心与宿主帧测试（见下节）；实际 NCM 门槛仍未过。P3 JNI端点合同继续补齐
+错误路径资源证明、完整native/进程内存峰值及真机并发拔插；选择设置及P4–P7发布工作仍未交付。
 
 后续宿主工具预检：Windows 的 Python cmake 包内真实二进制为 CMake 3.15.3，
 PATH 上的启动器不能作为可用性证据；缓存 lwIP archive 再次核对 SHA-256 一致。
@@ -1811,3 +1813,18 @@ Ethernet/IPv6 CTest 加既有 NDP、选项和 DAD 测试，共 13/13 通过；�
 关闭取消、TCP 半关闭/重置/超时、10 秒接收暂停后的背压恢复，以及原生 JNI 与 runner 生命周期。
 原生 AVD 控制台的旧 ddmlib `getAvdPath` 子命令告警未影响设备测试，Gradle 任务 exit 0。
 这是模拟器证据，不覆盖物理设备、iPhone/NCM、VPN/无线基线或低配 ARM 性能；G0/G1/G2 仍未通过。
+
+### P3 端点级关闭合同加固（2026-10-23）
+
+扩展参数化 `SessionNetworkDeviceContractTest`：两个后端分别验证只关闭 listener 能取消已进入
+accept 的调用，只关闭 UDP endpoint 能取消已进入 receive 的调用；调用返回 `CANCELLED`，重复
+关闭安全，原会话仍可绑定新端点。通过观察工作线程进入对应后端栈帧后再关闭，避免把线程启动
+信号当作阻塞已发生。T02 的共同 TCP 合同固定保留 1 字节与 32769 字节边界，其余写入
+采用固定种子的随机分段。T08 增加 TCP connect 与 UDP send 对远端 port 0 的预校验断言。
+
+API 28 x86_64 AVD、`debug.checkjni=1` 上复跑 `./gradlew :shared:connectedDebugAndroidTest
+--stacktrace`，40/40 通过、0 失败、0 跳过：SessionNetworkDeviceContractTest 12 项、
+TcpSessionDeviceContractTest 14 项、NativePrototypeInstrumentationTest 14 项。会话关闭原有
+并发测试仍只同步到调用启动；新增端点关闭测试提供了单独的确切进入等待证据。这仍是模拟器
+验证，不代表真机/NCM/ARM 或全套 G3 失败路径完成。AGENTS.md 要求的完整 Gradle 检查亦成功：
+250 个任务中 14 个执行、236 个缓存命中。

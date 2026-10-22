@@ -106,11 +106,11 @@
 
 新增 `backend/lwip/LwipSessionNetwork.kt`、`LwipTcpStream.kt`、`LwipTcpListener.kt`、`LwipUdpEndpoint.kt`、`LwipNative.kt`；native 按职责拆为 `src/endpoints.c`、`src/buffers.c`、`src/jni_bridge.c`。
 
-- [ ] 将 T01–T08 作为参数化合同同时运行系统和 lwIP 后端。
+- [x] 将 T01–T08 作为参数化合同同时运行系统和 lwIP 后端。
 - [ ] 先加入失效 handle、重复关闭、ABA 复用和取消竞态测试，再实现 generation + handle 注册表；禁止向 Kotlin 暴露裸指针。
 - [ ] 实现有界命令/接收/发送队列和 pbuf/DirectByteBuffer 所有权；错误路径与成功路径都核对计数归零。
-- [ ] TCP 应用消费进度驱动背压；测试暂停 10 秒后恢复仍保持字节完整和顺序。
-- [ ] 实现 UDP 原始长度、截断和来源元数据，测试零长度数据报。
+- [x] TCP 应用消费进度驱动背压；测试暂停 10 秒后恢复仍保持字节完整和顺序。
+- [x] 实现 UDP 原始长度、截断和来源元数据，测试零长度数据报。
 - [ ] JNI 检查异常、局部/全局引用释放和线程 attach/detach；不得在 Java 异常挂起时继续调用 JNI。
 - [ ] 实现关闭状态机、有限 join、native context 销毁屏障及结构化错误映射。
 - [ ] 使用配置限制测试 OOM、端点耗尽、pbuf 分配失败，不能依赖耗尽宿主物理内存模拟。

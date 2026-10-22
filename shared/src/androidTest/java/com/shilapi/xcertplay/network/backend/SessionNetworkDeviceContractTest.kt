@@ -13,6 +13,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import java.net.DatagramSocket
 import java.net.DatagramPacket
 import java.net.InetAddress
@@ -279,6 +280,15 @@ class SessionNetworkDeviceContractTest(private val backend: String) {
             assertThrows(IllegalArgumentException::class.java) { network.listen(foreign) }
             assertThrows(IllegalArgumentException::class.java) { network.bindUdp(foreign) }
             assertThrows(IllegalArgumentException::class.java) { network.connect(foreign) }
+            val zeroPort = NetworkEndpoint(ByteArray(16), 0, network.linkId)
+            assertThrows(IllegalArgumentException::class.java) {
+                network.connect(zeroPort, network.clock.nowMillis() + 3000)
+            }
+            network.bindUdp(local(network)).use { endpoint ->
+                assertThrows(IllegalArgumentException::class.java) {
+                    endpoint.send(byteArrayOf(1), zeroPort, network.clock.nowMillis() + 3000)
+                }
+            }
             network.listen(local(network)).use { listener ->
                 assertThrows(IllegalArgumentException::class.java) { listener.accept(-1) }
                 assertEquals(BackendFailure.Kind.TIMEOUT,
@@ -316,6 +326,62 @@ class SessionNetworkDeviceContractTest(private val backend: String) {
             assertEquals(BackendFailure.Kind.CANCELLED,
                 assertThrows(BackendFailure::class.java) { network.bindUdp(local(network)) }.kind)
         } finally { network.close(); executor.shutdownNow() }
+    }
+
+    @Test fun endpointCloseCancelsBlockedAcceptWithoutClosingSession() {
+        val network = network()
+        val listener = network.listen(local(network))
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            val started = CountDownLatch(1)
+            val worker = AtomicReference<Thread>()
+            val result = executor.submit<BackendFailure.Kind?> {
+                worker.set(Thread.currentThread())
+                started.countDown()
+                try { listener.accept(); null }
+                catch (error: BackendFailure) { error.kind }
+            }
+            assertTrue(started.await(2, TimeUnit.SECONDS))
+            awaitBackendEntry(worker.get(), "SystemSessionNetwork", "LwipTcpListener")
+            listener.close(); listener.close()
+            assertEquals(BackendFailure.Kind.CANCELLED, result.get(3, TimeUnit.SECONDS))
+            network.listen(local(network)).use { assertEquals(network.linkId, it.localEndpoint.linkId) }
+        } finally {
+            listener.close(); network.close(); executor.shutdownNow()
+        }
+    }
+
+    @Test fun endpointCloseCancelsBlockedReceiveWithoutClosingSession() {
+        val network = network()
+        val udp = network.bindUdp(local(network))
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            val started = CountDownLatch(1)
+            val worker = AtomicReference<Thread>()
+            val result = executor.submit<BackendFailure.Kind?> {
+                worker.set(Thread.currentThread())
+                started.countDown()
+                try { udp.receive(ByteArray(16)); null }
+                catch (error: BackendFailure) { error.kind }
+            }
+            assertTrue(started.await(2, TimeUnit.SECONDS))
+            awaitBackendEntry(worker.get(), "SystemSessionNetwork", "LwipUdpEndpoint")
+            udp.close(); udp.close()
+            assertEquals(BackendFailure.Kind.CANCELLED, result.get(3, TimeUnit.SECONDS))
+            network.bindUdp(local(network)).use { assertEquals(network.linkId, it.localEndpoint.linkId) }
+        } finally {
+            udp.close(); network.close(); executor.shutdownNow()
+        }
+    }
+
+    private fun awaitBackendEntry(worker: Thread, systemMarker: String, lwipMarker: String) {
+        val marker = if (backend == "system") systemMarker else lwipMarker
+        val end = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+        while (System.nanoTime() < end) {
+            if (worker.stackTrace.any { it.className.contains(marker) }) return
+            Thread.sleep(1)
+        }
+        fail("Worker did not enter $marker before endpoint close")
     }
 
     companion object {

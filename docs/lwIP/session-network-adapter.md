@@ -43,22 +43,26 @@ Android显式native会话可绑定原型echo端口，验证服务隔离、真实
 会话关闭唤醒等待者；既有完整TCP/UDP帧路径继续回归。
 
 SessionNetworkDeviceContractTest在Android上对系统socket和真实JNI会话运行相同的
-四项参数化合同：临时监听端口分配/冲突/关闭重绑，跨link拒绝及非法/到期deadline，
-会话关闭取消accept/UDP receive并拒绝新端点。lwIP使用断开的EthernetFramePort，
-不伪造JNI或core，但这组用例没有网络peer。并发用例覆盖关闭与调用起始的竞争，
-不声称精确证明每个等待者关闭前已进入原生阻塞状态。第四项UDP共同断言使用独立
+六项参数化合同：临时监听端口分配/冲突/关闭重绑，跨link拒绝及非法/到期deadline，
+会话关闭取消accept/UDP receive并拒绝新端点，以及单独关闭listener/UDP endpoint
+取消阻塞调用且会话仍可用。端点关闭用例先确认线程已进入对应后端，再关闭资源；
+lwIP使用断开的EthernetFramePort，不伪造JNI或core，但这些本地生命周期用例没有网络peer。
+会话关闭用例仍只同步调用启动，未单独证明关闭前每个等待者已进入底层阻塞。UDP共同断言使用独立
 夹具：系统侧IPv6内核socket，JNI侧确定性以太帧peer。接收覆盖0/1/1200字节、
 短缓冲及零容量缓冲、源地址/端口、原始/复制长度、缓冲未写部分及截断后下一报文；
-发送覆盖0/1/1200字节及65528字节拒绝。JNI发送到IPv6 multicast以避免依赖NDP，
+发送覆盖0/1/1200字节及65528字节拒绝。T08另覆盖port 0的TCP connect和UDP send拒绝。
+JNI发送到IPv6 multicast以避免依赖NDP，
 捕获真实输出帧验证端口、IPv6地址、负载及UDP校验和；不将此夹具当作独立kernel互通。
 
-独立kernel peer对原生端点API的验证见kernel-endpoint-peer.md。尚未完成全部两后端
-参数化合同（尤其共同TCP原生/进程内存峰值），所有分配/引用/竞态故障矩阵、
-真实NCM/iPhone/ARM及性能长稳验收。此层完成接口组合，不代表全部
+独立kernel peer对原生端点API的验证见kernel-endpoint-peer.md。当前Android测试已将
+T01–T08核心向量参数化运行在系统和lwip-jni后端；T05只抽样项目队列上限，未测完整
+native allocator与进程内存峰值。所有分配/引用/竞态故障矩阵、真实NCM/iPhone/ARM
+及性能长稳验收仍未完成。此层完成接口组合，不代表全部
 会话行为、业务集成或G2/G3已经验收。
 
 TcpSessionDeviceContractTest补充两后端共同TCP字节/半关闭合同：65537字节固定种子
-内容，1/32769/32767字节写调用、非零offset、1字节及随机容量read、完整字节及
+内容，首两个写调用固定为1/32769字节以覆盖边界，其余写分段由固定种子随机生成、均使用
+非零offset，read包含1字节及随机容量，完整字节及
 SHA-256核对、shutdownOutput后继续读取响应、重复EOF。系统侧为IPv6内核socket
 peer；JNI侧为有界Ethernet peer，真实握手后收集数据，收到FIN才分段回送并FIN。
 回送为逐段确认，不测试丢包/重传、窗口压力或并发读写；不替代原生独立内核peer。
