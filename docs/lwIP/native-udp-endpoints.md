@@ -21,13 +21,15 @@
   32端点耗尽及资源预算测试通过。额外libc对象内存加入heap_used、
   configured_bytes，heap_peak为栈峰值与端点峰值之和（保守上界，非同时峰值采样）。
 - close移除raw接收回调、PCB和队列；core销毁经注册表释放所有端点。旧token不能
-  访问复用槽或新core。私有重复close返回INVALID_ARGUMENT，未来Kotlin close需幂等。
+  访问复用槽或新core。私有重复close返回INVALID_ARGUMENT；Kotlin适配通过资源scope和
+  一次消费的token实现幂等关闭，见[UDP适配](udp-adapter.md)。
 
 真实帧测试 `udp_endpoint` 覆盖准备期绑定、动态/冲突端口、空队列/双向空包、来源、
 截断、常规发送、端点和全局队列上限、带序号的记录环回绕和共享块复用、32端点耗尽、带排队数据的整体
 销毁和新core零资源。`udp_endpoint_fragments` 覆盖32KiB乱序IPv6分片输入、完整接收、
 分片输出重组、UDP端口、字节内容与校验和。两项也在API28 x86_64模拟器原生运行。
 
-下一步是核心命令/完成队列、公共接口、阻塞调用的deadline/取消映射和TCP端点；
+上层已有有界核心命令、复制前准入、公共UDP接口及deadline/取消映射；仍需TCP端点、
+完整SessionNetwork与会话级接入。
 仍需真实NCM/iPhone、ARM、全部公共合同和会话级测试，不能把本C API测试当作已完成
 CarPlay集成或公共两后端契约。

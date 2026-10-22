@@ -2,17 +2,91 @@ package com.shilapi.xcertplay.network.backend.lwip
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.shilapi.xcertplay.network.backend.EthernetFramePort
+import com.shilapi.xcertplay.network.backend.BackendFailure
+import com.shilapi.xcertplay.network.backend.MonotonicClock
+import com.shilapi.xcertplay.network.backend.NetworkEndpoint
 import com.shilapi.xcertplay.transport.NcmSendResult
 import java.security.SecureRandom
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class NativePrototypeInstrumentationTest {
+    @Test fun publicUdpAdapterTraversesOwnedRunnerAndNativeEndpointLifecycle() {
+        val incoming = LinkedBlockingQueue<ByteArray>()
+        val outgoing = LinkedBlockingQueue<ByteArray>()
+        val port = object : EthernetFramePort {
+            override val hostMac = mac.copyOf()
+            override fun send(frame: ByteArray, timeoutMillis: Int): NcmSendResult {
+                outgoing.add(frame.copyOf()); return NcmSendResult.Sent
+            }
+            override fun recv(timeoutMillis: Long): ByteArray? = incoming.poll(timeoutMillis, TimeUnit.MILLISECONDS)
+            override fun close() { incoming.offer(ByteArray(14)) }
+        }
+        val base = coreCommandClock()
+        val offset = AtomicLong(100)
+        val clock = MonotonicClock { base.nowMillis() + offset.get() }
+        val runner = LwipPrototype(port, commandClock = clock) { NativePrototypeCore.create(mac, ip, 1500, clock::nowMillis) }
+        try {
+            runner.start()
+            val udp = LwipUdpEndpoint.bind(runner, NetworkEndpoint(ip, 0, "native-test"))
+            assertTrue(udp.localEndpoint.port in 1..65535)
+            runner.executeCommand { core -> core.setLinkReady(true); CoreAttempt.Ready(Unit) }
+            repeat(16) {
+                offset.addAndGet(250)
+                runner.executeCommand { core -> core.poll(); CoreAttempt.Ready(Unit) }
+            }
+            val solicitation = packet(58, 32)
+            solicitation[21] = 255.toByte(); solicitation[54] = 135.toByte()
+            ip.copyInto(solicitation, 62); solicitation[78] = 1; solicitation[79] = 1
+            peerMac.copyInto(solicitation, 80); checksum(solicitation, 58, 56)
+            incoming.put(solicitation)
+            fun sendPacket(payload: ByteArray) {
+                incoming.put(packet(17, 8 + payload.size).also {
+                    write16(it, 54, 50000); write16(it, 56, udp.localEndpoint.port); write16(it, 58, 8 + payload.size)
+                    payload.copyInto(it, 62); checksum(it, 17, 60)
+                })
+            }
+            sendPacket("hello".toByteArray())
+            val target = ByteArray(2)
+            val received = udp.receive(target, clock.nowMillis() + 2000)
+            assertArrayEquals("he".toByteArray(), target)
+            assertEquals(5, received.originalLength); assertEquals(2, received.copiedLength)
+            assertEquals(NetworkEndpoint(ip.copyOf().also { it[15] = 2 }, 50000, "native-test"), received.source)
+            sendPacket(byteArrayOf()); assertEquals(0, udp.receive(ByteArray(0), clock.nowMillis() + 2000).originalLength)
+            outgoing.clear()
+            udp.send("reply".toByteArray(), received.source, clock.nowMillis() + 2000)
+            val end = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+            var sent: ByteArray? = null
+            while (sent == null && System.nanoTime() < end) {
+                outgoing.poll(100, TimeUnit.MILLISECONDS)?.let { if (it.size >= 62 && it[20] == 17.toByte()) sent = it }
+            }
+            assertNotNull(sent)
+            assertEquals(udp.localEndpoint.port, read16(sent!!, 54))
+            assertArrayEquals("reply".toByteArray(), sent!!.copyOfRange(62, sent!!.size))
+            val failure = AtomicReference<Throwable>()
+            val waiter = Thread { failure.set(runCatching { udp.receive(ByteArray(1)) }.exceptionOrNull()) }
+            waiter.start()
+            val waitingUntil = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+            while (runner.snapshot().commandCount == 0 && System.nanoTime() < waitingUntil) Thread.sleep(1)
+            assertEquals(1, runner.snapshot().commandCount)
+            udp.close(); udp.close()
+            waiter.join(2000); assertFalse(waiter.isAlive)
+            assertEquals(BackendFailure.Kind.CANCELLED, (failure.get() as BackendFailure).kind)
+            val closingUntil = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+            while (runner.snapshot().resourceScopes != 0 && System.nanoTime() < closingUntil) Thread.sleep(1)
+            assertEquals(0, runner.snapshot().resourceScopes)
+            assertEquals(1, runner.executeCommand { CoreAttempt.Ready((it as NativePrototypeCore).stats().udpEndpoints) })
+            LwipUdpEndpoint.bind(runner, udp.localEndpoint).close()
+            assertNull(runner.snapshot().failure)
+        } finally { runner.close() }
+    }
     @Test fun nativeUdpBindingsPreserveDatagramsAndRejectStaleTokens() {
         LwipNativeBindings.ensureLoaded()
         assertEquals(2, LwipNativeBindings.abiVersion())

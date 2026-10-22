@@ -5,7 +5,7 @@ import com.shilapi.xcertplay.network.backend.BackendFailure
 import java.security.SecureRandom
 
 /** Explicit P2 echo core on a virtual netif; not the production SessionNetwork implementation. */
-internal class NativePrototypeCore private constructor(private val clockMillis: () -> Long) : LwipPrototypeCore {
+internal class NativePrototypeCore private constructor(private val clockMillis: () -> Long, private val address: ByteArray) : LwipUdpCore {
     data class Stats(
         val queuedFrames: Int, val entropyWords: Int, val configuredBytes: Int,
         val heapUsed: Int, val pbufUsed: Int, val tcpListeners: Int, val udpEndpoints: Int,
@@ -65,6 +65,30 @@ internal class NativePrototypeCore private constructor(private val clockMillis: 
         Stats(s[1].toInt(), s[2].toInt(), s[3].toInt(), s[4].toInt(), s[5].toInt(),
             s[6].toInt(), s[7].toInt(), s[8].toInt(), s[9].toInt(), s[10])
     }
+    override val udpLocalAddress: ByteArray get() { checkOwner(); return address.copyOf() }
+    override fun udpBind(port: Int): LwipUdpCore.Binding = nativeCall {
+        supply()
+        val result = LongArray(2)
+        checkResult(LwipNativeBindings.udpBind(handle, port, result))
+        try {
+            check(result[0] > 0 && result[1] in 1L..65535L) { "Invalid UDP binding metadata" }
+            LwipUdpCore.Binding(result[0], result[1].toInt())
+        } catch (error: Throwable) {
+            if (result[0] > 0) checkResult(LwipNativeBindings.udpClose(handle, result[0]))
+            throw error
+        }
+    }
+    override fun udpSend(token: Long, address: ByteArray, port: Int, bytes: ByteArray): CoreAttempt<Unit> = nativeCall {
+        supply()
+        udpAttempt(LwipNativeBindings.udpSend(handle, token, address, port, bytes, 0, bytes.size))
+    }
+    override fun udpReceive(token: Long, bytes: ByteArray, source: ByteArray, metadata: IntArray): CoreAttempt<Unit> = nativeCall {
+        supply()
+        udpAttempt(LwipNativeBindings.udpReceive(handle, token, bytes, source, metadata))
+    }
+    override fun udpClose(token: Long) = nativeCall {
+        supply(); checkResult(LwipNativeBindings.udpClose(handle, token))
+    }
     override fun close() = nativeCall {
         if (Thread.currentThread() !== owner) throw BackendFailure(BackendFailure.Kind.INTERNAL)
         if (handle != 0L) {
@@ -78,7 +102,7 @@ internal class NativePrototypeCore private constructor(private val clockMillis: 
         fun create(mac: ByteArray, ip: ByteArray, mtu: Int, clockMillis: () -> Long = SystemClock::elapsedRealtime): NativePrototypeCore = nativeCall {
             require(mac.size == 6 && ip.size == 16 && mtu in 1280..1500)
             LwipNativeBindings.ensureLoaded()
-            val core = NativePrototypeCore(clockMillis)
+            val core = NativePrototypeCore(clockMillis, ip.copyOf())
             try {
                 core.random.nextBytes(core.entropy)
                 val now = clockMillis()
@@ -95,11 +119,16 @@ internal class NativePrototypeCore private constructor(private val clockMillis: 
             if (status == 0) return
             val kind = when (status) {
                 -2 -> BackendFailure.Kind.RESOURCE_LIMIT
-                -5 -> BackendFailure.Kind.ADDRESS_CONFLICT
+                -5, -10 -> BackendFailure.Kind.ADDRESS_CONFLICT
                 -9 -> BackendFailure.Kind.USB_IO
                 else -> if (initializing) BackendFailure.Kind.BACKEND_INIT else BackendFailure.Kind.INTERNAL
             }
             throw BackendFailure(kind, IllegalStateException("lwIP status $status"))
+        }
+        private fun udpAttempt(status: Int): CoreAttempt<Unit> {
+            if (status == -11) return CoreAttempt.Pending
+            checkResult(status)
+            return CoreAttempt.Ready(Unit)
         }
         private inline fun <T> nativeCall(block: () -> T): T = try { block() }
         catch (error: LinkageError) { throw BackendFailure(BackendFailure.Kind.NATIVE_UNAVAILABLE, error) }

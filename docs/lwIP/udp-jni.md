@@ -28,5 +28,6 @@ native核心或复制区；端点查找再次验证UDP类型和该核心注册�
 类型token、重复关闭、槽位复用、上下文重建和旧上下文拒绝。
 
 这些结果不是公共两后端合同、并发取消队列、DirectByteBuffer、OOM注入、实际
-NCM/iPhone或ARM性能验收。后续核心命令桥必须在操作前推进时间和补充熵，并在正确
-的核心线程调用；本原始JNI接口不自行产生阻塞读写语义。
+NCM/iPhone或ARM性能验收。当前NativePrototypeCore在操作前推进时间和补充熵，并在
+创建核心线程转发UDP；上层命令、deadline/取消和公共UDP适配见[UDP适配](udp-adapter.md)。
+本原始JNI接口不自行产生阻塞读写语义，上层测试也不替代完整两后端契约。

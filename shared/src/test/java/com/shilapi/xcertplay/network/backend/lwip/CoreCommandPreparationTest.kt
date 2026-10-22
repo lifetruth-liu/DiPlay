@@ -11,6 +11,41 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class CoreCommandPreparationTest {
+    @Test(timeout = 10_000) fun failedDeliveryRetiresBudgetAndLeavesQueueUsable() {
+        val queue = queue()
+        val reason = IllegalStateException("copy failure")
+        val failed = Call { queue.callPreparedDeliver<Int, Int>(4, deliver = { throw reason }) {
+            { CoreAttempt.Ready(42) }
+        } }
+        await { queue.hasReady() }; queue.runBatch(0)
+        assertSame(reason, failed.finish().exceptionOrNull())
+        assertEquals(0, queue.snapshot().bytes)
+        val next = Call { queue.callPrepared<Int>(4) { { CoreAttempt.Ready(42) } } }
+        await { queue.hasReady() }; queue.runBatch(0)
+        assertEquals(42, next.finish().getOrThrow())
+    }
+    @Test(timeout = 10_000) fun deliveryRetainsBudgetThroughCallerCopy() {
+        val queue = queue()
+        val entered = CountDownLatch(1)
+        val gate = CountDownLatch(1)
+        val delivering = AtomicReference<Thread>()
+        val call = Call { queue.callPreparedDeliver<Int, Int>(4, deliver = {
+            delivering.set(Thread.currentThread()); entered.countDown(); gate.await(); it + 1
+        }) { { CoreAttempt.Ready(41) } } }
+        try {
+            await { queue.hasReady() }; queue.runBatch(0)
+            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            assertEquals(4, queue.snapshot().bytes)
+            assertEquals(1, queue.snapshot().commands)
+            val rejected = Call { queue.callPrepared<Int>(1) { fail(); { CoreAttempt.Ready(0) } } }
+            failure(BackendFailure.Kind.RESOURCE_LIMIT) { rejected.finish().getOrThrow() }
+            queue.close(BackendFailure(BackendFailure.Kind.CANCELLED))
+            assertEquals(4, queue.snapshot().bytes)
+        } finally { gate.countDown() }
+        assertEquals(42, call.finish().getOrThrow())
+        assertSame(call.thread, delivering.get())
+        assertEquals(0, queue.snapshot().bytes)
+    }
     @Test(timeout = 10_000) fun contextStopDuringPreparationPreservesFirstFailure() {
         val queue = queue()
         val entered = CountDownLatch(1)

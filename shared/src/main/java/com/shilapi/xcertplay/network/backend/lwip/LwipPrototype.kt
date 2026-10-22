@@ -93,6 +93,13 @@ class LwipPrototype(
         return commands.callPrepared(retainedBytes, deadlineMillis, discard, scope, prepare)
     }
 
+    internal fun <T, R> executePreparedDelivered(retainedBytes: Int, deadlineMillis: Long,
+                                                scope: CoreCommandQueue.Scope, deliver: (T) -> R,
+                                                prepare: () -> ((LwipPrototypeCore) -> CoreAttempt<T>)): R {
+        checkCommandCaller()
+        return commands.callPreparedDeliver(retainedBytes, deadlineMillis, scope = scope, deliver = deliver, prepare = prepare)
+    }
+
     internal fun <T> executeCommand(retainedBytes: Int = 0, deadlineMillis: Long = 0,
                                    discard: (T) -> Unit = {}, scope: CoreCommandQueue.Scope? = null,
                                    operation: (LwipPrototypeCore) -> CoreAttempt<T>): T {
@@ -100,7 +107,7 @@ class LwipPrototype(
         return commands.call(retainedBytes, deadlineMillis, discard, scope, operation)
     }
 
-    private fun checkCommandCaller() {
+    internal fun checkCommandCaller() {
         synchronized(signal) {
             if (Thread.currentThread() === coreThread) throw BackendFailure(BackendFailure.Kind.INTERNAL)
             failure?.let { throw it }

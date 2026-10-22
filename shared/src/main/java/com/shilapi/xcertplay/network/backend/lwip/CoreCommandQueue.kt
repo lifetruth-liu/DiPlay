@@ -67,6 +67,10 @@ internal class CoreCommandQueue<C>(
     private var retained = 0
     private var closed: BackendFailure? = null
     private var owner: Thread? = null
+    fun <T, R> callPreparedDeliver(retainedBytes: Int = 0, deadlineMillis: Long = 0,
+                                  discard: (T) -> Unit = {}, scope: Scope? = null, deliver: (T) -> R,
+                                  prepare: () -> ((C) -> CoreAttempt<T>)): R =
+        submit(retainedBytes, deadlineMillis, discard, scope, prepare).await(deliver)
 
     /** Internal operations and discard handlers must not block. retainedBytes
      * includes all owned payloads retained by the operation/completion. */
@@ -76,7 +80,11 @@ internal class CoreCommandQueue<C>(
     /** Reserves count/bytes before preparing owned payloads on the calling thread.
      * prepare must only perform bounded Java copying/allocation, never native I/O. */
     fun <T> callPrepared(retainedBytes: Int = 0, deadlineMillis: Long = 0, discard: (T) -> Unit = {},
-                         scope: Scope? = null, prepare: () -> ((C) -> CoreAttempt<T>)): T {
+                         scope: Scope? = null, prepare: () -> ((C) -> CoreAttempt<T>)): T =
+        submit(retainedBytes, deadlineMillis, discard, scope, prepare).await { it }
+
+    private fun <T> submit(retainedBytes: Int, deadlineMillis: Long, discard: (T) -> Unit,
+                           scope: Scope?, prepare: () -> ((C) -> CoreAttempt<T>)): Task<T> {
         require(retainedBytes >= 0 && deadlineMillis >= 0)
         if (Thread.currentThread().isInterrupted) throw BackendFailure(BackendFailure.Kind.CANCELLED)
         val task = synchronized(signal) {
@@ -93,7 +101,7 @@ internal class CoreCommandQueue<C>(
         if (task.prepare(prepare)) {
             try { wake() } catch (error: Throwable) { synchronized(signal) { task.cancel(error) } }
         }
-        return task.await()
+        return task
     }
     fun snapshot() = synchronized(signal) {
         Snapshot(live.size, retained, resources.size, resources.values.count { it.phase != ResourcePhase.OPEN })
@@ -210,10 +218,16 @@ internal class CoreCommandQueue<C>(
                 }
             }
         }
-        fun await(): T {
+        fun <R> await(deliver: (T) -> R): R {
+            val committed = awaitResult()
+            try { return deliver(committed) } finally {
+                synchronized(signal) { acknowledged = true; retire(this) }
+            }
+        }
+        private fun awaitResult(): T {
             synchronized(signal) {
                 while (true) {
-                    result?.let { acknowledged = true; retire(this); return it.value }
+                    result?.let { return it.value }
                     failure?.let { acknowledged = true; retire(this); throw it }
                     if (expired()) { cancel(BackendFailure(BackendFailure.Kind.TIMEOUT)); continue }
                     try {

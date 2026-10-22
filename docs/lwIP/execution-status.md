@@ -795,3 +795,42 @@ diplay-command-preparation-ci.log。JUnit共3335项（shared1751/common1578/home
 6902ca21661ee7514d7d9c3bb25394c74d780922205fc4facfd35321bbd869e4。
 公开树及staged diff检查通过。此批JNI/native未修改，未重跑设备或native宿主套件；
 未取得独立评审完成结果，不记作独立评审通过。
+
+### P3 公共UDP合同适配与native贯通（2026-10-22）
+
+基于c81cf197。新增LwipUdpEndpoint实现UdpEndpoint，显式绑定原型运行器；
+LwipUdpCore定义核心线程非阻塞接口，NativePrototypeCore复用ABI2 JNI实现。
+IPv6地址与虚拟netif一致，返回实际绑定端口/会话linkId；同方向并发拒绝，允许收发
+并行。发送经准备准入后复制，接收使用私有缓冲和来源元数据，超时/取消不写用户
+目标。关闭经预留资源队列一次释放token，失败绑定和迟到结果同样回收。
+完整SessionNetwork/TCP和生产后端选择未接入，详细边界见[UDP适配](udp-adapter.md)。
+
+新增callPreparedDeliver，使调用线程复制接收结果期间仍保留预算；finally退休，
+交付异常也回收，已提交成功在并发close后仍交付。旧“先await再deliver”实现真实
+red：diplay-udp-adapter-delivery-red.log；不是拿早先的队列测试代替这条新合同。
+UDP占位工厂真实red BACKEND_INIT：diplay-udp-adapter-red.log。
+原生核心尚未实现UDP接口时，实际Android适配路径red INTERNAL：
+diplay-udp-adapter-native-red.log。接通后首轮设备7/7，13s：diplay-udp-adapter-native-green.log。
+设备用例以有效NDP/IPv6/UDP帧，覆盖实际端口/来源、截断、空包、输出内容、关闭
+等待者、native UDP回到echo监听器基线和同端口重绑。
+
+复核未启动bind会短暂占资源scope，测试期望0实际1真实red：
+diplay-udp-adapter-start-red.log；修为登记前检查运行状态。
+绑定注入OOM原先暴露原始OOME并停止运行器，真实red：diplay-udp-adapter-oom-red.log。
+适配边界及核心侧元数据构造映射RESOURCE_LIMIT，失败scope回收后运行器可继续绑定。
+最终准备/交付10项、资源8项、队列11项、运行器17项、UDP8项共54项通过：
+diplay-udp-adapter-final-green.log。未耗尽物理内存来测试OOM。
+
+本批未改C/JNI ABI，未宣称全部65527字节边界、媒体过期策略或完整T01–T08。
+完整TCP/SessionNetwork、会话集成和实际NCM/iPhone/ARM门槛仍待完成，G2/G3未通过。
+
+最终九项Android CI exit0，7m42s，250任务44执行：diplay-udp-adapter-ci.log。
+JUnit共3345项（shared1761/common1578/home6），零失败、错误、跳过。
+最终Android connected 7/7，零失败、错误、跳过，15s：
+diplay-udp-adapter-final-connected.log。任务自有API28 x86_64模拟器debug.checkjni=1，
+测试进程5293日志确认Not late-enabling -Xcheck:jni (already on)。
+AVD路径DeviceMonitor仍有bad sub-command告警，测试正常完成并核对XML。
+最终APK四ABI/16KiB/NX/许可证及源码摘要检查通过，SHA-256：
+05a7398d3ef919c7c4fef8072f62e842067bb2484e1159479e915258f758e90d。
+公开树及staged diff检查通过。C代码未修改，未重跑native宿主sanitizer套件。
+未取得独立评审完成结果，不记作独立评审通过。上述日志均位于任务主机TEMP目录。
