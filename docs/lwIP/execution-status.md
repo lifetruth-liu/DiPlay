@@ -1620,3 +1620,20 @@ Windows61/61、1.33s：TEMP/diplay-receive-allocation-host.log；Linux ASan/UBSa
 单元任务UP-TO-DATE，不记新执行。public tree及diff检查通过。本轮无新JNI/内核/
 设备证据；多段重叠乱序、FIN、回调拒绝、重组及并发关闭等仍缺，不宣称完整
 R01/R02或真机/安全门槛通过，整体目标继续。
+
+### 10,000次原生宿主创建/销毁
+
+新增lifecycle_soak执行10,000个负载轮次：空核心、UDP带排队数据、TCP带未读数据/
+未确认发送交替；显式端点关闭与核心销毁回收交替，每轮重复destroy。初版严格要求
+全部pool立即回基线，红测TEMP/diplay-lifecycle-soak-diagnostic.log定位cycle=2、
+SYS_TIMEOUT多1。核对TCP timer无应用参数且最后PCB销毁后下一tick退休，改为
+逐轮允许最多一个全局timeout节点，其他pool精确归零；每1,000轮空核心推进时间
+后全部pool精确归零。没有改产品行为或vendor，详见host-lifecycle-soak.md。
+
+Windows62/62、1.46s，soak0.23s，10次采样process_handles均99：
+TEMP/diplay-lifecycle-soak-final-host.log。Linux ASan/UBSan/池检查及默认LSan
+62/62、43.69s，soak33.18s，10次采样fds均6/threads均1：
+/tmp/diplay-lifecycle-soak-final-sanitize.log。九项CI exit0、3s，12执行/238缓存：
+TEMP/diplay-lifecycle-soak-ci.log；单元任务UP-TO-DATE，不记新执行。public tree
+及diff检查通过。未启动设备、无新JNI或内核证据；该子项不代表整会话租约/线程/
+FD、100次设备重连或8小时音视频长稳，完整L06和整体目标保持未完成。

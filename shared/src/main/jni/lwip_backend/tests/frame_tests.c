@@ -17,6 +17,7 @@
 #include <windows.h>
 #else
 #include <pthread.h>
+#include <dirent.h>
 #endif
 
 #define CHECK(x)                                                                                   \
@@ -1221,6 +1222,87 @@ static void test_lifecycle(void) {
         close_core(&f);
     }
 }
+#ifndef _WIN32
+static unsigned count_process_entries(const char *path) {
+    DIR *directory = opendir(path);
+    CHECK(directory);
+    unsigned count = 0;
+    struct dirent *entry;
+    while ((entry = readdir(directory)) != NULL)
+        if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, "..")) count++;
+    CHECK(closedir(directory) == 0);
+    return count;
+}
+#endif
+static void test_lifecycle_soak(void) {
+    struct fixture f; ready_core(&f); close_core(&f);
+    uint32_t heap = lwip_stats.mem.used, pools[MEMP_MAX];
+    for (unsigned pool = 0; pool < MEMP_MAX; ++pool) pools[pool] = lwip_stats.memp[pool]->used;
+#ifdef _WIN32
+    DWORD handles;
+    CHECK(GetProcessHandleCount(GetCurrentProcess(), &handles));
+#else
+    unsigned fds = count_process_entries("/proc/self/fd");
+    unsigned threads = count_process_entries("/proc/self/task");
+#endif
+    for (unsigned iteration = 0; iteration < 10000; ++iteration) {
+        ready_core(&f);
+        uint64_t endpoint = 0, listener = 0; uint16_t port;
+        switch (iteration % 3) {
+        case 0: break;
+        case 1: {
+            CHECK(dp_udp_bind(f.core, 47000, &endpoint, &port) == DP_OK && port == 47000);
+            uint8_t frame[66]; ethernet(frame, local_mac);
+            uint8_t *p = ipv6(frame, local_ip, 17, 12);
+            w16(p, 50000); w16(p + 2, port); w16(p + 4, 12);
+            memcpy(p + 8, "seed", 4);
+            w16(p + 6, checksum(frame + 14, p, 12, 17));
+            CHECK(dp_core_input(f.core, frame, sizeof(frame)) == DP_OK);
+            CHECK(dp_udp_send(f.core, endpoint, peer_ip, 50000, (const uint8_t *)"reply", 5) == DP_OK);
+            break;
+        }
+        default: {
+            CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK);
+            uint32_t server = establish(&f, 50000);
+            endpoint = accept_stream(&f, listener);
+            send_tcp(&f, 24, 1001, server + 1, "queued");
+            size_t copied;
+            CHECK(dp_tcp_write(f.core, endpoint, (const uint8_t *)"unacked", 7, &copied) == DP_OK && copied == 7);
+            break;
+        }
+        }
+        /* Alternate explicit endpoint cleanup with destruction of live queued endpoints. */
+        if (iteration % 2 && endpoint) {
+            CHECK((iteration % 3 == 1 ? dp_udp_close(f.core, endpoint) : dp_tcp_close(f.core, endpoint)) == DP_OK);
+            if (listener) CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+        }
+        close_core(&f);
+        CHECK(dp_core_destroy(&f.core) == DP_OK); /* Repeated destroy must be harmless. */
+        CHECK(netif_list == NULL && netif_default == NULL && lwip_stats.mem.used == heap);
+        for (unsigned pool = 0; pool < MEMP_MAX; ++pool) {
+            /* The global TCP timer has NULL arg and retires at its next tick after the last PCB.
+             * It may retain one timeout node, never an application endpoint or its context. */
+            uint32_t maximum = pools[pool] + (pool == MEMP_SYS_TIMEOUT ? 1u : 0u);
+            if (lwip_stats.memp[pool]->used < pools[pool] || lwip_stats.memp[pool]->used > maximum)
+                fprintf(stderr, "cycle=%u pool=%u used=%u baseline=%u\n", iteration, pool,
+                        (unsigned)lwip_stats.memp[pool]->used, (unsigned)pools[pool]);
+            CHECK(lwip_stats.memp[pool]->used >= pools[pool] && lwip_stats.memp[pool]->used <= maximum);
+        }
+        if ((iteration + 1) % 1000 == 0) {
+            ready_core(&f); advance(&f, 500); close_core(&f);
+            for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == pools[pool]);
+#ifdef _WIN32
+            DWORD current;
+            CHECK(GetProcessHandleCount(GetCurrentProcess(), &current) && current == handles);
+            printf("lifecycle cycles=%u process_handles=%lu\n", iteration + 1, (unsigned long)current);
+#else
+            CHECK(count_process_entries("/proc/self/fd") == fds);
+            CHECK(count_process_entries("/proc/self/task") == threads);
+            printf("lifecycle cycles=%u fds=%u threads=%u\n", iteration + 1, fds, threads);
+#endif
+        }
+    }
+}
 static void test_not_ready(void) {
     struct fixture f;
     open_core(&f, 0);
@@ -2323,6 +2405,8 @@ int main(int argc, char **argv) {
         test_tcp_connect_retry();
     else if (!strcmp(argv[1], "udp"))
         test_udp();
+    else if (!strcmp(argv[1], "lifecycle_soak"))
+        test_lifecycle_soak();
     else if (!strcmp(argv[1], "lifecycle"))
         test_lifecycle();
     else if (!strcmp(argv[1], "not_ready"))
