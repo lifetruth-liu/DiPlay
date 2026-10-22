@@ -15,6 +15,7 @@ frame_allocation_tests通过链接器--wrap拦截分配调用，产品不包含�
 | tcp_syn_allocation_failures | SYN输入5点，瞬时/持续 | 不发布错误stream；监听器恢复或明确核心失败，销毁及重建后资源归零 |
 | tcp_timer_allocation_failures | 实际TCP handler重排分配，瞬时/持续 | 瞬时恢复；持续核心失败，旧端点错误和销毁/重建可验证 |
 | tcp_connect_allocation_failures | 主动连接5点，瞬时/持续 | 成功则握手及双向数据；失败句柄清零，检查核心状态和资源回收/重建 |
+| tcp_write_allocation_failures | 1字节2点、8192字节32点，瞬时/持续 | copied=0且原子回滚、无新数据输出；重试完整发送、缓冲区所有权及下一次写入序号正确 |
 
 位置计数是按调用场景和执行顺序统计，不能理解为不同源码分配语句数。每个场景
 先在成功路径计数，再逐个令第k次分配返回NULL；冷创建首次calloc是单独定向检查。
@@ -28,7 +29,7 @@ calloc命中断言避免工具链绕过包装后假绿。未以清空整个池�
 也可单独执行frame_allocation_tests core_allocation_failures。测试使用GNU兼容
 链接器，仅在已验证的MinGW/Linux宿主构建中声明结果。
 
-当前59项宿主测试通过，包括ASan/UBSan、lwIP池检查和默认LSan构建。未把宿主
+当前60项宿主测试通过，包括ASan/UBSan、lwIP池检查和默认LSan构建。未把宿主
 结果当作Android/JNI或真实NCM/iPhone证据。既有UDP分配详情见
 [udp-large-datagram-gap.md](udp-large-datagram-gap.md)。
 
@@ -87,3 +88,15 @@ handle必须清零。非核心失败先退休TCP timer并检查heap/活动PCB/�
 回到调用前基线，再在同核心重新连接并收发；所有场景销毁后检查全局基线，且另
 创建核心、连接并收发后再次检查。无其他活动连接，不覆盖回收其他PCB及全部
 写入/重组/未知邻居/并发路径，也没有新增Android/JNI或真机结论。
+
+## TCP写入分配失败与原子回滚
+
+1字节正常写入测得2点、8192字节测得32点，分别逐点瞬时和持续注入，共68个
+失败位置。当前全部返回WOULD_BLOCK且copied=0，符合现有TCP写入背压接口；未将
+它记作test-plan.md中要求RESOURCE_LIMIT的完整R01通过，也未修改该验收要求。
+每次失败在重试前核对heap/全部pool回到写入前基线，且未输出新TCP数据。解除注入
+后完整重试，成功即覆盖调用方source，最终逐帧核对校验和、序号和内容，确保已复制
+数据不再借用调用方内存。全部ACK后同stream再写1字节，验证没有重复接受前缀。
+关闭stream和listener、退休按需timer后检查heap/活动PCB/监听PCB/全部pool基线，
+再重绑同端口完成连接和接收。此场景是空发送队列的首写，不包含已有unsent队列
+拼接、所有发送窗口状态、输出分配失败及取消竞态；完整R01/R02仍未通过。

@@ -1588,3 +1588,19 @@ ASan/UBSan/池检查及默认LSan59/59、10.00s：
 不记重新执行。public tree和diff检查通过。本轮未启动设备或重跑JNI/内核。
 没有其他活动连接，仍缺全部TCP写入/接收、未知邻居/重组、冷定时器、并发关闭、
 独立安全审查和实际设备等；不将本子集视为完整R01，整体目标继续。
+
+### TCP首写分配失败的回滚与重试
+
+新增tcp_write_allocation_failures，1字节2点、8192字节32点，各做瞬时/持续注入，
+共68个失败位置。全部WOULD_BLOCK/copied=0；重试前heap/全部pool归还，且没有
+输出新数据。解除故障后完整重试，覆盖source，逐帧校验数据及校验和；ACK完成后
+同stream再写1字节检查正确序号，关闭后资源回基线并重绑端口、重新连接接收。
+用例直接通过，未改产品行为、vendor或ABI。该背压结果不等同test-plan.md要求的
+RESOURCE_LIMIT，不声称完整R01通过；已有unsent队列/所有窗口和并发路径仍缺。
+
+Windows60/60、1.30s：TEMP/diplay-write-allocation-final-host.log；Linux
+ASan/UBSan/池检查及默认LSan60/60、10.88s：
+/tmp/diplay-write-allocation-final-sanitize.log。两个平台打印相同的4组分配计数。
+九项CI exit0、3s，12执行/238缓存：TEMP/diplay-write-allocation-ci.log；三个
+单元任务UP-TO-DATE，不记新执行。public tree及diff检查通过。本轮未启动设备，
+没有新增JNI或内核证据；真机、安全审查、完整故障矩阵和峰值仍待覆盖，目标继续。

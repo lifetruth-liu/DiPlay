@@ -1853,6 +1853,94 @@ static void test_tcp_connect_allocation_failures(void) {
                persistent, (unsigned long)allocations, recovered, rejected, fatal);
     }
 }
+static void test_tcp_write_allocation_failures(void) {
+    const size_t sizes[] = {1, 8192};
+    for (unsigned vector = 0; vector < sizeof(sizes) / sizeof(sizes[0]); ++vector) {
+        size_t length = sizes[vector];
+        for (int persistent = 0; persistent < 2; ++persistent) {
+            size_t allocations = 0;
+            unsigned blocked = 0, accepted = 0;
+            for (size_t fail_at = 0; fail_at <= allocations; ++fail_at) {
+                struct fixture f; ready_core(&f);
+                dp_stats before, after;
+                CHECK(dp_core_get_stats(f.core, &before) == DP_OK);
+                uint32_t pools[MEMP_MAX];
+                for (unsigned pool = 0; pool < MEMP_MAX; ++pool) pools[pool] = lwip_stats.memp[pool]->used;
+                uint64_t listener; uint16_t port;
+                CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK);
+                uint32_t server = establish(&f, 50000);
+                uint64_t stream = accept_stream(&f, listener);
+                dp_stats write_before;
+                CHECK(dp_core_get_stats(f.core, &write_before) == DP_OK);
+                uint32_t write_pools[MEMP_MAX];
+                for (unsigned pool = 0; pool < MEMP_MAX; ++pool) write_pools[pool] = lwip_stats.memp[pool]->used;
+                uint8_t source[8192], expected[8192], seen[8192] = {0};
+                for (size_t i = 0; i < length; ++i) source[i] = expected[i] = (uint8_t)(i ^ (i >> 8));
+                f.count = 0;
+                allocation_fault.calls = 0; allocation_fault.rejected = 0;
+                allocation_fault.persistent = persistent; allocation_fault.fail_at = fail_at;
+                allocation_fault.armed = 1;
+                size_t copied = SIZE_MAX;
+                dp_result result = dp_tcp_write(f.core, stream, source, length, &copied);
+                allocation_fault.armed = 0;
+                fprintf(stderr, "WRITE size=%lu persistent=%d fail_at=%lu result=%d copied=%lu\n",
+                        (unsigned long)length, persistent, (unsigned long)fail_at, result, (unsigned long)copied);
+                if (!fail_at) {
+                    CHECK(result == DP_OK && copied == length);
+                    allocations = allocation_fault.calls;
+                    CHECK(allocations > 0 && allocations <= 64);
+                } else {
+                    CHECK(allocation_fault.rejected && allocation_fault.calls >= fail_at);
+                    if (!persistent) CHECK(allocation_fault.rejected == 1);
+                }
+                if (result == DP_WOULD_BLOCK) {
+                    CHECK(fail_at && copied == 0);
+                    CHECK(dp_core_get_stats(f.core, &after) == DP_OK && after.failure == DP_OK);
+                    CHECK(after.heap_used == write_before.heap_used && after.tcp_active == write_before.tcp_active);
+                    for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == write_pools[pool]);
+                    for (size_t n = 0; n < f.count; ++n) {
+                        const uint8_t *p = f.frames[n].bytes;
+                        if (f.frames[n].length >= 74 && p[20] == 6)
+                            CHECK(u16(p + 18) == (p[66] >> 4) * 4);
+                    }
+                    CHECK(dp_tcp_write(f.core, stream, source, length, &copied) == DP_OK && copied == length);
+                    blocked++;
+                } else {
+                    CHECK(result == DP_OK && copied == length);
+                    if (fail_at) accepted++;
+                }
+                memset(source, 0xa5, length); /* Successful copy must own even an unsent prefix. */
+                size_t received = 0;
+                for (unsigned attempt = 0; attempt < 32 && received < length; ++attempt) {
+                    collect_echo(&f, server, expected, seen, length);
+                    while (received < length && seen[received]) received++;
+                    send_tcp(&f, 16, 1001, server + 1 + (uint32_t)received, "");
+                    advance(&f, 250);
+                }
+                CHECK(received == length);
+                /* A second write on the same stream must begin after exactly the accepted prefix. */
+                f.count = 0;
+                uint8_t next = 0x73, next_seen = 0;
+                CHECK(dp_tcp_write(f.core, stream, &next, 1, &copied) == DP_OK && copied == 1);
+                collect_echo(&f, server + (uint32_t)length, &next, &next_seen, 1);
+                CHECK(next_seen);
+                CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+                CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+                advance(&f, 500);
+                CHECK(dp_core_get_stats(f.core, &after) == DP_OK && after.failure == DP_OK);
+                CHECK(after.heap_used == before.heap_used && after.tcp_active == before.tcp_active &&
+                      after.tcp_listeners == before.tcp_listeners);
+                for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == pools[pool]);
+                CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK && port == 7000);
+                exercise_and_close_listener(&f, listener);
+                close_core(&f);
+            }
+            CHECK(blocked + accepted == allocations);
+            printf("TCP write size=%lu persistent=%d points=%lu blocked=%u accepted=%u\n",
+                   (unsigned long)length, persistent, (unsigned long)allocations, blocked, accepted);
+        }
+    }
+}
 static void test_tcp_accept_allocation_failures(void) {
     for (int persistent = 0; persistent < 2; ++persistent) {
         size_t allocations = 0;
@@ -2179,6 +2267,8 @@ int main(int argc, char **argv) {
         test_core_allocation_failures();
     else if (!strcmp(argv[1], "tcp_listen_allocation_failures"))
         test_tcp_listen_allocation_failures();
+    else if (!strcmp(argv[1], "tcp_write_allocation_failures"))
+        test_tcp_write_allocation_failures();
     else if (!strcmp(argv[1], "tcp_connect_allocation_failures"))
         test_tcp_connect_allocation_failures();
     else if (!strcmp(argv[1], "tcp_accept_allocation_failures"))
