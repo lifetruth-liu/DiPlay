@@ -22,6 +22,21 @@ import org.junit.runners.Parameterized
 
 @RunWith(Parameterized::class)
 class TcpSessionDeviceContractTest(private val backend: String) {
+    @Test fun peerResetIsDistinctFromEofTimeoutAndLocalCancellation() {
+        peer(resetAfterData = true).use { peer ->
+            val deadline = peer.network.clock.nowMillis() + 3000
+            peer.stream.write(byteArrayOf(1), deadlineMillis = deadline)
+            val target = ByteArray(7) { 0x55 }
+            val failure = assertThrows(BackendFailure::class.java) {
+                peer.stream.read(target, deadlineMillis = deadline)
+            }
+            assertEquals(generateSequence<Throwable>(failure) { it.cause }.take(16).joinToString(" caused by "),
+                BackendFailure.Kind.PEER_RESET, failure.kind)
+            assertArrayEquals(ByteArray(7) { 0x55 }, target)
+            peer.verify()
+        }
+    }
+
     @Test fun repeatedSessionHandshakeAndEmptyHalfClose() {
         repeat(12) {
             peer().use { peer ->
@@ -145,9 +160,10 @@ class TcpSessionDeviceContractTest(private val backend: String) {
         fun verify()
     }
 
-    private fun peer(): Peer = if (backend == "system") systemPeer() else nativePeer()
+    private fun peer(resetAfterData: Boolean = false): Peer =
+        if (backend == "system") systemPeer(resetAfterData) else nativePeer(resetAfterData)
 
-    private fun systemPeer(): Peer {
+    private fun systemPeer(resetAfterData: Boolean): Peer {
         val server = ServerSocket(0, 1, InetAddress.getByName("::1"))
         val network = SystemSessionNetwork("tcp-contract")
         val error = AtomicReference<Throwable>()
@@ -155,6 +171,11 @@ class TcpSessionDeviceContractTest(private val backend: String) {
             try {
                 server.accept().use { socket ->
                     socket.soTimeout = 30000
+                    if (resetAfterData) {
+                        check(socket.getInputStream().read() == 1)
+                        socket.setSoLinger(true, 0)
+                        return@use
+                    }
                     val bytes = ByteArrayOutputStream()
                     val chunk = ByteArray(997)
                     while (true) {
@@ -179,8 +200,8 @@ class TcpSessionDeviceContractTest(private val backend: String) {
         } catch (failure: Throwable) { network.close(); server.close(); worker.join(3000); throw failure }
     }
 
-    private fun nativePeer(): Peer {
-        val wire = TcpWirePeer()
+    private fun nativePeer(resetAfterData: Boolean): Peer {
+        val wire = TcpWirePeer(resetAfterData)
         val base = coreCommandClock()
         val offset = AtomicLong()
         val clock = MonotonicClock { base.nowMillis() + offset.get() }
@@ -190,7 +211,6 @@ class TcpSessionDeviceContractTest(private val backend: String) {
         val network = LwipSessionNetwork.start(runner, "tcp-contract")
         try {
             repeat(16) { offset.addAndGet(250); runner.executeCommand { it.poll(); CoreAttempt.Ready(Unit) } }
-            wire.learnNeighbor()
             val stream = network.connect(NetworkEndpoint(wire.peerIp, 9000, network.linkId), clock.nowMillis() + 3000)
             return object : Peer {
                 override val network = network
@@ -206,7 +226,7 @@ class TcpSessionDeviceContractTest(private val backend: String) {
     }
 
     /** Test-only, stop-and-wait echo after FIN. No native API or fake core calls. */
-    private class TcpWirePeer : EthernetFramePort {
+    private class TcpWirePeer(private val resetAfterData: Boolean) : EthernetFramePort {
         val mac = byteArrayOf(2, 0, 0, 0, 0, 1)
         val ip = ByteArray(16).also { it[0] = 0xfe.toByte(); it[1] = 0x80.toByte(); it[15] = 1 }
         val peerIp = ip.copyOf().also { it[15] = 2 }
@@ -228,19 +248,22 @@ class TcpSessionDeviceContractTest(private val backend: String) {
         override fun close() { closed.set(true); worker.interrupt(); input.offer(ByteArray(14)); worker.join(3000); check(!worker.isAlive) }
         fun checkFailure() { error.get()?.let { throw AssertionError(it) } }
         private fun emit(frame: ByteArray) { check(input.offer(frame, 2, TimeUnit.SECONDS)) }
-        fun learnNeighbor() {
-            emit(packet(58, 32).also {
-                it[21] = 255.toByte(); it[54] = 135.toByte(); ip.copyInto(it, 62)
-                it[78] = 1; it[79] = 1; peerMac.copyInto(it, 80); checksum(it, 58, 56)
-            })
-        }
         private fun runPeer() {
             var localPort = 0; var localNext = 0L; var peerNext = 7000L
             var acknowledged = 7000L; var finished = false; var sentFin = false; var sent = 0
             val received = ByteArrayOutputStream()
             while (!closed.get()) {
                 val frame = output.poll(100, TimeUnit.MILLISECONDS) ?: continue
-                if (trace.size < 20) trace.add("out proto=${frame.getOrNull(20)} size=${frame.size} flags=${frame.getOrNull(67)}")
+                if (trace.size < 20) trace.add("out proto=${frame.getOrNull(20)} size=${frame.size} type=${frame.getOrNull(54)} flags=${frame.getOrNull(67)}")
+                if (frame.size >= 78 && frame[20] == 58.toByte() && frame[54] == 135.toByte() &&
+                    frame.copyOfRange(62, 78).contentEquals(peerIp)) {
+                    emit(packet(58, 32).also {
+                        it[21] = 255.toByte(); it[54] = 136.toByte(); it[58] = 0x60
+                        peerIp.copyInto(it, 62); it[78] = 2; it[79] = 1
+                        peerMac.copyInto(it, 80); checksum(it, 58, 56)
+                    })
+                    continue
+                }
                 if (frame.size < 74 || frame[20] != 6.toByte()) continue
                 check(read16(frame, 56) == 9000)
                 val flags = frame[67].toInt() and 255
@@ -256,6 +279,10 @@ class TcpSessionDeviceContractTest(private val backend: String) {
                 }
                 if (flags and 16 != 0) acknowledged = maxOf(acknowledged, ack)
                 if (seq == localNext && (data.isNotEmpty() || flags and 1 != 0)) {
+                    if (resetAfterData && data.isNotEmpty()) {
+                        emit(tcp(localPort, 20, peerNext, seq + data.size))
+                        return
+                    }
                     check(received.size() + data.size <= 131072)
                     received.write(data); localNext += data.size
                     if (flags and 1 != 0) { localNext++; finished = true }

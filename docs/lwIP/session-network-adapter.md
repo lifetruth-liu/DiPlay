@@ -53,7 +53,7 @@ SessionNetworkDeviceContractTest在Android上对系统socket和真实JNI会话�
 捕获真实输出帧验证端口、IPv6地址、负载及UDP校验和；不将此夹具当作独立kernel互通。
 
 独立kernel peer对原生端点API的验证见kernel-endpoint-peer.md。尚未完成全部两后端
-参数化合同（尤其共同TCP背压/重置/写阻塞取消、UDP分片/上限），所有分配/引用/竞态故障矩阵、
+参数化合同（尤其共同TCP背压/写阻塞取消、UDP分片/上限），所有分配/引用/竞态故障矩阵、
 真实NCM/iPhone/ARM及性能长稳验收。此层完成接口组合，不代表全部
 会话行为、业务集成或G2/G3已经验收。
 
@@ -71,3 +71,13 @@ close及关闭后read拒绝。通过有界轮询线程栈确认后端read已进�
 peer收到FIN才回复，避免只用线程启动信号充当读操作已执行的证据。另对两个后端各
 连续12次创建会话、握手和空半关闭。最终设备30/30，但诊断期间大数据用例的3秒握手
 超时又出现一次；带有界wire轨迹的两轮随后通过，根因仍未定位，不作稳定性结论。
+
+后续RST共同合同让peer收到首字节后发送真实重置，断言PEER_RESET及读取缓冲不变。
+系统后端原来将Android NIO的普通IOException("Connection reset by peer")归为INTERNAL，
+现按Android errno原因链或标准reset文本分类，同时保留本地关闭CANCELLED优先级；
+未知错误仍为INTERNAL。JVM真实NIO/adopted socket也有远端SO_LINGER(0)回归。
+
+本轮握手失败轨迹确认无TCP SYN输出，只有邻居发现等控制帧；旧wire peer只在启动
+时一次注入NS，忽略运行时NDP请求。peer改为对目标为peerIp的NS发送带正确hop limit/
+target/option/checksum的NA，并移除一次性预热注入。两轮诊断及最终32项中JNI握手
+均通过；此修正补齐夹具真实协议缺口，不宣称有限复跑已证明所有历史超时根因或长稳。

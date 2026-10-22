@@ -12,6 +12,7 @@ import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.SocketAddress
 import java.net.SocketTimeoutException
+import java.net.SocketException
 import java.nio.ByteBuffer
 import java.nio.channels.*
 import java.util.concurrent.atomic.AtomicBoolean
@@ -135,6 +136,7 @@ class SystemSessionNetwork(
                 val kind = when {
                     stopped.get() -> BackendFailure.Kind.CANCELLED
                     error is BindException -> BackendFailure.Kind.ADDRESS_CONFLICT
+                    isPeerReset(error) -> BackendFailure.Kind.PEER_RESET
                     else -> BackendFailure.Kind.INTERNAL
                 }
                 throw BackendFailure(kind, error)
@@ -186,6 +188,17 @@ class SystemSessionNetwork(
             finally { synchronized(lock) { resources.remove(this) } }
         }
     }
+
+    private fun isPeerReset(error: IOException): Boolean =
+        generateSequence<Throwable>(error) { it.cause }.take(16).any { cause ->
+            // Android libcore keeps errno in the cause; JVM sockets expose canonical text.
+            (cause is android.system.ErrnoException && cause.errno == android.system.OsConstants.ECONNRESET) ||
+                // Android NIO may discard errno and throw this exact plain IOException.
+                (cause is IOException && cause.message.equals("Connection reset by peer", ignoreCase = true)) ||
+                (cause is SocketException && cause.message.orEmpty().let {
+                    it.contains("ECONNRESET", ignoreCase = true) || it.contains("Connection reset", ignoreCase = true)
+                })
+        }
 
     private inner class Listener(val channel: ServerSocketChannel) : Resource(channel), TcpListener {
         lateinit var bound: NetworkEndpoint

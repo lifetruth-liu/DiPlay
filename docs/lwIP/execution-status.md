@@ -1297,3 +1297,29 @@ TEMP/diplay-tcp-errors-handshake.log。没有得到超时失败时的wire轨迹�
 完整九项CI exit0：TEMP/diplay-tcp-errors-final-ci.log；三模块单元任务均UP-TO-DATE，
 不记重新执行。public tree及staged diff检查通过。仅测试及文档变化，未更改生产行为。
 背压、RST、写阻塞取消、故障矩阵及真机门槛仍缺，G2/G3及完整目标保持未完成。
+
+### 共同 RST 合同及系统后端错误分类修复
+
+新增peerResetIsDistinctFromEofTimeoutAndLocalCancellation，两后端peer收到首字节
+后真实reset，读取必须为PEER_RESET且缓冲不变。系统peer使用SO_LINGER(0)，JNI
+peer发合法RST/ACK。首轮red明确系统expected PEER_RESET but INTERNAL，同时两个
+JNI连接超时：TEMP/diplay-reset-red.log。初版按Android errno原因链/SocketException
+分类仍失败，追加cause诊断确认Android NIO抛无cause的普通IOException("Connection
+reset by peer")：TEMP/diplay-reset-cause.log。因此补充该精确标准文本，保留绑定冲突
+分类及本地关闭CANCELLED优先级，未知错误仍INTERNAL，原因链检查最多16层。
+JVM真实NIO及adopted socket的SO_LINGER(0)回归通过：TEMP/diplay-reset-jvm.log。
+
+本轮首次得到握手失败wire轨迹：无TCP SYN输出，只有IPv6控制帧，runner无故障。
+测试peer原来只注入一次启动NS且忽略运行时NS；改为应答目标peerIp的实际NDP请求，
+发送正确NA，移除启动一次注入。随后green/cause两轮JNI均无握手失败（系统RST尚红），
+最终完整32/32、零失败/错误/跳过，exit0、25s：TEMP/diplay-reset-final-connected.log。
+这补齐了确定的夹具缺口；有限重跑不证明所有历史超时均由此引起或满足长稳。
+
+设备为自建API28 x86_64 AVD diplay-lwip-api28，无真实USB/iPhone；启动前确认用户
+RUNNING_UNLOCKED。测试APK SHA-256：
+d65be6d2fa4bba2b74b2a43033827c44e30774c39ee09934643a627259a1aba7。
+完整九项CI exit0、7m33s、250任务43执行：TEMP/diplay-reset-final-ci.log。
+最终XML shared1790/common1578/home6共3374项零失败/错误/跳过；任务执行情况按CI
+日志记录，不将UP-TO-DATE任务记重新执行。public tree及staged diff检查通过。
+本轮仅显式系统适配器错误分类及测试夹具变化，不切换生产后端；背压/写阻塞取消、
+故障矩阵、真机及安全/性能验收仍缺，G2/G3和完整目标保持未完成。

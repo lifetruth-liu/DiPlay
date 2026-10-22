@@ -17,6 +17,26 @@ import org.junit.Test
 
 /** Real loopback traffic; no Android or native library substitutes. */
 class SessionNetworkContractTest {
+    @Test fun systemChannelsAndAdoptedSocketsReportRealRemoteReset() {
+        for (adopted in listOf(false, true)) {
+            ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).use { server ->
+                SystemSessionNetwork("reset").use { network ->
+                    val stream = if (adopted) network.adopt(Socket(InetAddress.getByName("127.0.0.1"), server.localPort))
+                        else network.connect(address(network, server.localPort))
+                    stream.use {
+                        server.accept().use { it.setSoLinger(true, 0) }
+                        val target = ByteArray(7) { 9 }
+                        assertEquals(BackendFailure.Kind.PEER_RESET,
+                            assertThrows(BackendFailure::class.java) {
+                                stream.read(target, deadlineMillis = network.clock.nowMillis() + 3000)
+                            }.kind)
+                        assertArrayEquals(ByteArray(7) { 9 }, target)
+                    }
+                }
+            }
+        }
+    }
+
     @Test fun adoptedSystemSocketUsesEndpointFramingAndPreservesOwnership() {
         ServerSocket(0, 50, InetAddress.getByName("127.0.0.1")).use { server ->
             Socket(InetAddress.getByName("127.0.0.1"), server.localPort).use { phone ->
