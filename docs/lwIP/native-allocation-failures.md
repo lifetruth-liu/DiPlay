@@ -16,6 +16,7 @@ frame_allocation_tests通过链接器--wrap拦截分配调用，产品不包含�
 | tcp_timer_allocation_failures | 实际TCP handler重排分配，瞬时/持续 | 瞬时恢复；持续核心失败，旧端点错误和销毁/重建可验证 |
 | tcp_connect_allocation_failures | 主动连接5点，瞬时/持续 | 成功则握手及双向数据；失败句柄清零，检查核心状态和资源回收/重建 |
 | tcp_write_allocation_failures | 1字节2点、8192字节32点，瞬时/持续 | copied=0且原子回滚、无新数据输出；重试完整发送、缓冲区所有权及下一次写入序号正确 |
+| tcp_receive_allocation_failures | 1/1440字节，顺序各2点、乱序各3点，瞬时/持续 | 原队列seed保留，缺口前不可读；重传后完整无重复、同stream继续接收，关闭资源回基线 |
 
 位置计数是按调用场景和执行顺序统计，不能理解为不同源码分配语句数。每个场景
 先在成功路径计数，再逐个令第k次分配返回NULL；冷创建首次calloc是单独定向检查。
@@ -29,7 +30,7 @@ calloc命中断言避免工具链绕过包装后假绿。未以清空整个池�
 也可单独执行frame_allocation_tests core_allocation_failures。测试使用GNU兼容
 链接器，仅在已验证的MinGW/Linux宿主构建中声明结果。
 
-当前60项宿主测试通过，包括ASan/UBSan、lwIP池检查和默认LSan构建。未把宿主
+当前61项宿主测试通过，包括ASan/UBSan、lwIP池检查和默认LSan构建。未把宿主
 结果当作Android/JNI或真实NCM/iPhone证据。既有UDP分配详情见
 [udp-large-datagram-gap.md](udp-large-datagram-gap.md)。
 
@@ -100,3 +101,17 @@ handle必须清零。非核心失败先退休TCP timer并检查heap/活动PCB/�
 关闭stream和listener、退休按需timer后检查heap/活动PCB/监听PCB/全部pool基线，
 再重绑同端口完成连接和接收。此场景是空发送队列的首写，不包含已有unsent队列
 拼接、所有发送窗口状态、输出分配失败及取消竞态；完整R01/R02仍未通过。
+
+## TCP顺序及乱序输入分配失败
+
+先在已接受stream排入seed，再对1或1440字节的新数据帧输入注入；顺序每种长度
+正常2点，乱序每种长度3点，各遍历瞬时/持续故障，共20个位置。每组只有输入
+pbuf分配失败返回RESOURCE_LIMIT；后续协议分配失败可能被栈处理为丢弃/待重传并
+返回OK，未据此宣称完整R01的错误映射验收通过。
+
+任何结果均先确认核心健康且原seed可完整读取。乱序数据在缺口补齐前不可读，
+WOULD_BLOCK不修改目标缓冲区。解除注入后重传同帧，再填gap，核对完整内容与
+无重复交付；随后同stream发送next并接收，证明连接继续可用。关闭stream和
+listener、退休timer后heap/活动PCB/监听PCB/全部pool回初始基线，重绑同端口再
+完成连接和接收。没有覆盖所有重叠/多段乱序/FIN/重组/回调拒绝及并发关闭状态；
+也不把宿主核心可恢复扩大为JNI runner在输入OOM后会保留原会话。

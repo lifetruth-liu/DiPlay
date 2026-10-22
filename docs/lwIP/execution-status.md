@@ -1604,3 +1604,19 @@ ASan/UBSan/池检查及默认LSan60/60、10.88s：
 九项CI exit0、3s，12执行/238缓存：TEMP/diplay-write-allocation-ci.log；三个
 单元任务UP-TO-DATE，不记新执行。public tree及diff检查通过。本轮未启动设备，
 没有新增JNI或内核证据；真机、安全审查、完整故障矩阵和峰值仍待覆盖，目标继续。
+
+### TCP接收分配失败、原队列保留与乱序恢复
+
+新增tcp_receive_allocation_failures：1/1440字节，顺序各2点、乱序各3点，各做
+瞬时/持续注入，共20个失败位置。每组1例输入RESOURCE_LIMIT，后续协议分配
+失败可能返回OK并等待重传；未把这些结果算作完整R01错误映射通过。测试先排入
+seed，故障后仍能读出；乱序缺口前必须WOULD_BLOCK且不改缓冲区。解除故障后
+重传同帧并补gap，完整有序无重复，再接收next。关闭、timer退休后heap/全部pool
+回基线，重绑同端口完成连接和接收。用例直接通过，无产品、vendor或ABI修改。
+
+Windows61/61、1.33s：TEMP/diplay-receive-allocation-host.log；Linux ASan/UBSan/
+池检查及默认LSan61/61、11.01s：/tmp/diplay-receive-allocation-sanitize.log。
+九项CI exit0、3s，12执行/238缓存：TEMP/diplay-receive-allocation-ci.log；三个
+单元任务UP-TO-DATE，不记新执行。public tree及diff检查通过。本轮无新JNI/内核/
+设备证据；多段重叠乱序、FIN、回调拒绝、重组及并发关闭等仍缺，不宣称完整
+R01/R02或真机/安全门槛通过，整体目标继续。
