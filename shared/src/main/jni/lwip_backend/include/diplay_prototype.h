@@ -36,6 +36,7 @@ DP_API dp_result dp_proto_udp_send(uint64_t context, uint64_t endpoint, const ui
 DP_API dp_result dp_proto_udp_receive(uint64_t context, uint64_t endpoint, uint8_t *target, size_t capacity, dp_udp_datagram *info);
 DP_API dp_result dp_proto_udp_close(uint64_t context, uint64_t endpoint);
 DP_API dp_result dp_proto_tcp_listen(uint64_t, uint16_t, unsigned, uint64_t *, uint16_t *);
+DP_API dp_result dp_proto_tcp_listen_with_options(uint64_t, uint16_t, unsigned, int, uint64_t *, uint16_t *);
 DP_API dp_result dp_proto_tcp_accept(uint64_t, uint64_t, uint64_t *, dp_tcp_info *);
 DP_API dp_result dp_proto_tcp_connect(uint64_t, const uint8_t[16], uint16_t, uint64_t *);
 DP_API dp_result dp_proto_tcp_connect_status(uint64_t, uint64_t, dp_tcp_info *);

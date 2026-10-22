@@ -52,7 +52,7 @@ static void tcp_lifecycle(void) {
     dp_tcp_info info;
     const uint8_t peer[16] = {0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2};
     CHECK(dp_proto_tcp_connect(context, peer, 9000, &stream) == DP_WOULD_BLOCK && stream == 0);
-    CHECK(dp_proto_tcp_listen(context, 0, 2, &listener, &port) == DP_OK && listener && port);
+    CHECK(dp_proto_tcp_listen_with_options(context, 0, 2, 1, &listener, &port) == DP_OK && listener && port);
     CHECK(dp_proto_tcp_accept(context, listener, &stream, &info) == DP_WOULD_BLOCK && stream == 0);
     CHECK(dp_proto_tcp_close(context, listener) == DP_INVALID_ARGUMENT);
     CHECK(dp_proto_supply(context, 99, NULL, 0) == DP_CLOCK_REVERSED);

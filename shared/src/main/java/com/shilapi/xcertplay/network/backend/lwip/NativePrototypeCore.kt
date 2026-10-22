@@ -5,7 +5,8 @@ import com.shilapi.xcertplay.network.backend.BackendFailure
 import java.security.SecureRandom
 
 /** Explicit prototype core on a virtual netif; not the production SessionNetwork implementation. */
-internal class NativePrototypeCore private constructor(private val clockMillis: () -> Long, private val address: ByteArray) : LwipUdpCore, LwipTcpCore {
+internal class NativePrototypeCore private constructor(private val clockMillis: () -> Long, private val address: ByteArray,
+                                                       private val echoServices: Boolean) : LwipUdpCore, LwipTcpCore {
     data class Stats(
         val queuedFrames: Int, val entropyWords: Int, val configuredBytes: Int,
         val heapUsed: Int, val pbufUsed: Int, val tcpListeners: Int, val udpEndpoints: Int,
@@ -35,7 +36,7 @@ internal class NativePrototypeCore private constructor(private val clockMillis: 
 
     override fun prepare() = nativeCall {
         supply()
-        checkResult(LwipNativeBindings.prepareEcho(handle), initializing = true)
+        if (echoServices) checkResult(LwipNativeBindings.prepareEcho(handle), initializing = true)
     }
     override fun setLinkReady(ready: Boolean) = nativeCall {
         supply(); checkResult(LwipNativeBindings.setReady(handle, ready))
@@ -90,11 +91,11 @@ internal class NativePrototypeCore private constructor(private val clockMillis: 
         supply(); checkResult(LwipNativeBindings.udpClose(handle, token))
     }
     override val tcpLocalAddress: ByteArray get() { checkOwner(); return address.copyOf() }
-    override fun tcpListen(port: Int, backlog: Int): LwipTcpCore.Listener = nativeCall {
+    override fun tcpListen(port: Int, backlog: Int, reuseAddress: Boolean): LwipTcpCore.Listener = nativeCall {
         require(port in 0..65535 && backlog in 1..32)
         supply()
         val result = LongArray(2)
-        checkResult(LwipNativeBindings.tcpListen(handle, port, backlog, result))
+        checkResult(LwipNativeBindings.tcpListenWithOptions(handle, port, backlog, reuseAddress, result))
         try {
             check(result[0] > 0 && result[1] in 1L..65535L) { "Invalid TCP listener metadata" }
             LwipTcpCore.Listener(result[0], result[1].toInt())
@@ -194,10 +195,11 @@ internal class NativePrototypeCore private constructor(private val clockMillis: 
     }
 
     companion object {
-        fun create(mac: ByteArray, ip: ByteArray, mtu: Int, clockMillis: () -> Long = SystemClock::elapsedRealtime): NativePrototypeCore = nativeCall {
+        fun create(mac: ByteArray, ip: ByteArray, mtu: Int, echoServices: Boolean = true,
+                   clockMillis: () -> Long = SystemClock::elapsedRealtime): NativePrototypeCore = nativeCall {
             require(mac.size == 6 && ip.size == 16 && mtu in 1280..1500)
             LwipNativeBindings.ensureLoaded()
-            val core = NativePrototypeCore(clockMillis, ip.copyOf())
+            val core = NativePrototypeCore(clockMillis, ip.copyOf(), echoServices)
             try {
                 core.random.nextBytes(core.entropy)
                 val now = clockMillis()

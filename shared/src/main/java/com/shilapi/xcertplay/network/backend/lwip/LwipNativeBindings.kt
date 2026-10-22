@@ -4,7 +4,7 @@ package com.shilapi.xcertplay.network.backend.lwip
 internal object LwipNativeBindings {
     private val loaded by lazy {
         System.loadLibrary("diplay_lwip")
-        if (abiVersion() != 5) throw UnsatisfiedLinkError("Unsupported lwIP context/UDP/TCP ABI")
+        if (abiVersion() != 6) throw UnsatisfiedLinkError("Unsupported lwIP context/UDP/TCP ABI")
     }
     fun ensureLoaded() { loaded }
     external fun abiVersion(): Int
@@ -25,6 +25,7 @@ internal object LwipNativeBindings {
     external fun udpReceive(context: Long, endpoint: Long, target: ByteArray, source: ByteArray, metadata: IntArray): Int
     external fun udpClose(context: Long, endpoint: Long): Int
     external fun tcpListen(context: Long, port: Int, backlog: Int, result: LongArray): Int
+    external fun tcpListenWithOptions(context: Long, port: Int, backlog: Int, reuseAddress: Boolean, result: LongArray): Int
     external fun tcpAccept(context: Long, listener: Long, result: LongArray, local: ByteArray, remote: ByteArray, ports: IntArray): Int
     external fun tcpConnect(context: Long, address: ByteArray, port: Int, result: LongArray): Int
     external fun tcpConnectStatus(context: Long, endpoint: Long, local: ByteArray, remote: ByteArray, ports: IntArray): Int

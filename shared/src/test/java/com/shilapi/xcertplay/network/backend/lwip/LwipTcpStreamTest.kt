@@ -198,7 +198,7 @@ class LwipTcpStreamTest {
         override fun tcpShutdownOutput(token: Long): CoreAttempt<Unit> { valid(token); outputClosed = true; return CoreAttempt.Ready(Unit) }
         override fun tcpClose(token: Long) { valid(token); tokens.remove(token); aborts.incrementAndGet() }
         override fun tcpCloseGraceful(token: Long) { valid(token); tokens.remove(token); graceful.incrementAndGet() }
-        override fun tcpListen(port: Int, backlog: Int): LwipTcpCore.Listener = error("not used")
+        override fun tcpListen(port: Int, backlog: Int, reuseAddress: Boolean): LwipTcpCore.Listener = error("not used")
         override fun tcpAccept(listener: Long): CoreAttempt<LwipTcpCore.Accepted> = error("not used")
         override fun tcpListenerClose(token: Long) = error("not used")
         override fun prepare() = owner()

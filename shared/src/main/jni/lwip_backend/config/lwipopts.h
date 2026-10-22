@@ -48,6 +48,7 @@
 #define LWIP_UDP 1
 #define LWIP_ETHERNET 1
 #define LWIP_TCP_KEEPALIVE 1
+#define SO_REUSE 1
 #define TCP_LISTEN_BACKLOG 1
 #define TCP_MSS 1440
 #define LWIP_WND_SCALE 1

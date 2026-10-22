@@ -157,7 +157,7 @@ class LwipTcpListenerTest {
         private var next = 1L
         private fun owner() { assertSame(owner, Thread.currentThread()) }
         override val tcpLocalAddress: ByteArray get() { owner(); return ip.copyOf() }
-        override fun tcpListen(port: Int, backlog: Int): LwipTcpCore.Listener {
+        override fun tcpListen(port: Int, backlog: Int, reuseAddress: Boolean): LwipTcpCore.Listener {
             owner(); bindFailure.getAndSet(null)?.let { throw it }
             if (listeners.isNotEmpty()) throw BackendFailure(BackendFailure.Kind.ADDRESS_CONFLICT)
             this.backlog.set(backlog)

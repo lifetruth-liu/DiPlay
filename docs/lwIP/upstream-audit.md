@@ -41,6 +41,28 @@ gpg --homedir "$audit_keyring" --status-fd 1 --verify lwip-2.2.1.zip.sig lwip-2.
 
 ## 已公布问题的配置适用性
 
+### SO_REUSE配置增量审查（2026-10-22）
+
+显式会话适配为reuseAddress开启SO_REUSE=1。基于同一固定vendor及三项已列回补，
+重新检查tcp.c的bind/listen/connect分支、tcp_in.c的监听匹配和子PCB继承、udp.c的
+匹配/绑定分支，以及ip.h/opt.h的选项定义：
+
+- TCP只有双方PCB设置SOF_REUSEADDR时才跳过活动地址绑定冲突；启用选项的新绑定
+  可跳过TIME_WAIT列表，未移除旧TIME_WAIT。listen阶段仍拒绝同地址/端口的重复
+  活动监听，connect保留重复连接元组检查。
+- 子PCB继承SOF_REUSEADDR（SOF_INHERITED）。匹配优先具体本地地址，再回退ANY；
+  新端点API仍绑定唯一虚拟netif及具体IPv6，未开放任意系统接口绑定。
+- UDP端点不设置SOF_REUSEADDR，重复绑定仍拒绝；SO_REUSE_RXTOALL维持默认0，
+  未开启广播/多播的额外多接收者复制路径。
+- 新增tcp_reuse真实帧用例覆盖活动子连接、TIME_WAIT、重复监听和非法选项，既有
+  UDP/TCP用例同时回归；Linux ASan/UBSan/pool guards及Windows最终各50/50。
+  另验证复用后新旧连接分流。日志：WSL /tmp/diplay-session-final2-host.log、
+  TEMP/diplay-session-final2-windows.log。
+
+本次是配置相关路径的增量检查，不是完整CVE重检、模糊测试或安全审计通过。
+输入匹配的全部地址/多播组合、资源失败及长期复用竞态仍需后续覆盖，首段安全
+审计未通过的结论不变。未引入新的vendor应用模块或改变固定源码身份。
+
 检查了Android.mk、CMake源清单和四ABI的真实stack archive，各30个object；
 没有mqtt/snmp/smtp/lowpan/ppp/zepif成员。当前只编译core、core/ipv6及ethernet netif；
 IPv4、DHCP、DNS、socket/netconn等配置关闭。下表只是这些问题的适用性判断，

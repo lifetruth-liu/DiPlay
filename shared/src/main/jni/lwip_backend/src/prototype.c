@@ -280,6 +280,12 @@ dp_result dp_proto_tcp_listen(uint64_t h, uint16_t port, unsigned backlog, uint6
     struct prototype *p; dp_result s = lookup(h, &p, 0);
     return s == DP_OK ? finish(p, dp_tcp_listen(p->core, port, backlog, endpoint, actual)) : s;
 }
+dp_result dp_proto_tcp_listen_with_options(uint64_t h, uint16_t port, unsigned backlog, int reuse, uint64_t *endpoint, uint16_t *actual) {
+    if (endpoint) *endpoint = 0;
+    if (actual) *actual = 0;
+    struct prototype *p; dp_result s = lookup(h, &p, 0);
+    return s == DP_OK ? finish(p, dp_tcp_listen_with_options(p->core, port, backlog, reuse, endpoint, actual)) : s;
+}
 dp_result dp_proto_tcp_accept(uint64_t h, uint64_t listener, uint64_t *endpoint, dp_tcp_info *info) {
     if (endpoint) *endpoint = 0;
     struct prototype *p; dp_result s = lookup(h, &p, 0);

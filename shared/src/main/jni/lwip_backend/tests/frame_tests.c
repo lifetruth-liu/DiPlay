@@ -739,6 +739,45 @@ static void test_tcp_liveness(void) {
     CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
     close_core(&f);
 }
+static void test_tcp_reuse(void) {
+    for (int old_reuse = 0; old_reuse < 2; ++old_reuse) for (int new_reuse = 0; new_reuse < 2; ++new_reuse) {
+        struct fixture f; ready_core(&f);
+        uint64_t listener, extra; uint16_t port;
+        CHECK(dp_tcp_listen_with_options(f.core, 7000, 2, 2, &listener, &port) == DP_INVALID_ARGUMENT && !listener && !port);
+        CHECK(dp_tcp_listen_with_options(f.core, 7000, 2, old_reuse, &listener, &port) == DP_OK);
+        establish(&f, 50000); uint64_t stream = accept_stream(&f, listener);
+        CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+        dp_result expected = old_reuse && new_reuse ? DP_OK : DP_ADDRESS_IN_USE;
+        CHECK(dp_tcp_listen_with_options(f.core, 7000, 2, new_reuse, &listener, &port) == expected);
+        if (expected == DP_OK) {
+            CHECK(dp_tcp_listen_with_options(f.core, 7000, 2, 1, &extra, &port) == DP_ADDRESS_IN_USE && !extra);
+            uint8_t byte; size_t copied;
+            CHECK(dp_tcp_read(f.core, stream, &byte, 1, &copied) == DP_WOULD_BLOCK);
+            uint32_t fresh_server = establish(&f, 50001);
+            uint64_t fresh = accept_stream(&f, listener);
+            CHECK(fresh != stream);
+            send_tcp_port(&f, 50001, 24, 1001, fresh_server + 1, "N", 1);
+            CHECK(dp_tcp_read(f.core, fresh, &byte, 1, &copied) == DP_OK && copied == 1 && byte == 'N');
+            CHECK(dp_tcp_read(f.core, stream, &byte, 1, &copied) == DP_WOULD_BLOCK);
+            CHECK(dp_tcp_close(f.core, fresh) == DP_OK);
+            CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+        }
+        CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+        close_core(&f);
+    }
+    for (int reuse = 0; reuse < 2; ++reuse) {
+        struct fixture f; ready_core(&f);
+        uint64_t listener; uint16_t port;
+        CHECK(dp_tcp_listen_with_options(f.core, 7000, 2, 1, &listener, &port) == DP_OK);
+        uint32_t server = establish(&f, 50000); uint64_t stream = accept_stream(&f, listener);
+        CHECK(dp_tcp_close_graceful(f.core, stream) == DP_OK);
+        send_tcp(&f, 17, 1001, server + 2, "");
+        CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+        CHECK(dp_tcp_listen_with_options(f.core, 7000, 2, reuse, &listener, &port) == (reuse ? DP_OK : DP_ADDRESS_IN_USE));
+        if (reuse) CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+        close_core(&f);
+    }
+}
 static uint32_t connect_begin(struct fixture *f, uint64_t *stream, uint16_t *local_port) {
     f->count = 0;
     CHECK(dp_tcp_connect(f->core, peer_ip, 9000, stream) == DP_OK && *stream);
@@ -1370,6 +1409,8 @@ int main(int argc, char **argv) {
         test_tcp_graceful_failure();
     else if (!strcmp(argv[1], "tcp_liveness"))
         test_tcp_liveness();
+    else if (!strcmp(argv[1], "tcp_reuse"))
+        test_tcp_reuse();
     else if (!strcmp(argv[1], "tcp_connect_cancel"))
         test_tcp_connect_cancel();
     else if (!strcmp(argv[1], "tcp_connect_limits"))

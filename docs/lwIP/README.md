@@ -21,6 +21,7 @@
 | [发布与维护](release-and-maintenance.md) | 后端选择、回退、诊断、开源维护、发布检查表 | 实验发布、问题排查、依赖升级 |
 | [公共TCP流原型](tcp-adapter.md) | 显式主动连接、读写/deadline/取消/关闭及keepalive | 原型宿主适配与后续两后端合同验收 |
 | [公共TCP监听原型](tcp-listener-adapter.md) | 显式绑定、accept及独立子流所有权 | 监听器生命周期与后续会话适配 |
+| [显式lwIP会话原型](session-network-adapter.md) | 会话所有权、关闭、reuseAddress与echo隔离 | 两后端合同及后续业务接入前验证 |
 
 ## 成功标准
 

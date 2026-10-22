@@ -26,7 +26,7 @@ internal class LwipTcpListener private constructor(
         private fun tcp(core: LwipPrototypeCore) = core as? LwipTcpCore ?: throw BackendFailure(BackendFailure.Kind.INTERNAL)
         private inline fun <T> allocation(block: () -> T): T = try { block() }
         catch (error: OutOfMemoryError) { throw BackendFailure(BackendFailure.Kind.RESOURCE_LIMIT, error) }
-        fun bind(runner: LwipPrototype, local: NetworkEndpoint, backlog: Int = 50): LwipTcpListener = allocation {
+        fun bind(runner: LwipPrototype, local: NetworkEndpoint, backlog: Int = 50, reuseAddress: Boolean = false): LwipTcpListener = allocation {
             runner.checkCommandCaller()
             require(backlog > 0 && local.address.size == 16)
             val token = AtomicLong()
@@ -41,7 +41,7 @@ internal class LwipTcpListener private constructor(
                     val address = native.tcpLocalAddress
                     val requested = local.address
                     require(requested.all { it == 0.toByte() } || requested.contentEquals(address))
-                    val result = native.tcpListen(local.port, minOf(backlog, 32))
+                    val result = native.tcpListen(local.port, minOf(backlog, 32), reuseAddress)
                     token.set(result.token)
                     if (result.token <= 0 || result.port !in 1..65535 ||
                         (local.port != 0 && result.port != local.port)) throw BackendFailure(BackendFailure.Kind.PROTOCOL)

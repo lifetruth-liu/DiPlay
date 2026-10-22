@@ -1,8 +1,9 @@
 # P3 公共TCP监听适配
 
 `LwipTcpListener`实现现有TcpListener，显式bind工厂经runner调用原生listen/accept。
-复用[公共TCP流](tcp-adapter.md)的读写、deadline、配置和关闭实现。完整SessionNetwork
-及生产后端选择仍未接入；本轮没有更改C/JNI，整体JNI ABI仍为5，核心C ABI仍为1。
+复用[公共TCP流](tcp-adapter.md)的读写、deadline、配置和关闭实现。已有
+[显式SessionNetwork](session-network-adapter.md)，生产后端选择仍未接入。当前JNI
+ABI为6，核心C ABI仍为1；reuseAddress由新绑定选项在原生bind前设置。
 
 bind仅接受虚拟netif的具体IPv6或全零通配地址，向调用方报告具体地址和实际端口，
 保留linkId。动态端口必须非零，显式端口必须与返回值一致；不静默改绑其他端口。
@@ -32,6 +33,6 @@ context销毁屏障，不从业务线程释放活PCB。
 数据帧驱动公共bind/accept，验证动态端口和真实peer地址、关闭listener后子流继续
 读写、默认FIN及scope归零。
 
-尚未完成完整SessionNetwork（包括reuseAddress策略）、全部两后端参数化合同、全部
+尚未完成全部两后端参数化合同、全部
 分配/异常/竞态矩阵、独立kernel peer对新端点接口的验证、真实NCM/iPhone/ARM及性能
 长稳验收。不能将上述原型路径扩大为G2/G3或完整业务迁移通过。

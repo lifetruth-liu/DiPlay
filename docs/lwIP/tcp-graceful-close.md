@@ -3,7 +3,7 @@
 新增`dp_tcp_close_graceful`、prototype转发、`tcpCloseGraceful` JNI及类型化核心方法。
 整体JNI ABI升至4，Kotlin加载检查同步；native-only核心C ABI仍为1。既有tcpClose
 保留本地abort语义，用于取消、resetOnClose及未交付资源回滚。后续已有
-[显式公共TcpStream主动连接适配](tcp-adapter.md)，当前整体JNI ABI为5。
+[显式公共TcpStream主动连接适配](tcp-adapter.md)，当前整体JNI ABI为6。
 
 健康且已连接的stream先清除arg/recv/err/sent/poll回调，再调用lwIP tcp_close。
 成功后PCB可能已经释放，也可能处于FIN_WAIT/LAST_ACK或TF_CLOSEPEND；应用不得再

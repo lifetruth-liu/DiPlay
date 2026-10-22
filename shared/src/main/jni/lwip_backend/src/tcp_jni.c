@@ -39,6 +39,20 @@ JNIEXPORT jint JNICALL JNI_NAME(tcpListen)(JNIEnv *env, jobject self, jlong cont
     if ((*env)->ExceptionCheck(env)) { dp_proto_tcp_listener_close((uint64_t)context, endpoint); return DP_INTERNAL; }
     return DP_OK;
 }
+JNIEXPORT jint JNICALL JNI_NAME(tcpListenWithOptions)(JNIEnv *env, jobject self, jlong context, jint port,
+                                                     jint backlog, jboolean reuse, jlongArray result) {
+    (void)self;
+    dp_result s = shape(env, result, 2);
+    if (s != DP_OK) return s;
+    if (port < 0 || port > 65535 || backlog < 1 || (unsigned)backlog > DP_TCP_MAX_BACKLOG) return DP_INVALID_ARGUMENT;
+    uint64_t endpoint = 0; uint16_t actual = 0;
+    s = dp_proto_tcp_listen_with_options((uint64_t)context, (uint16_t)port, (unsigned)backlog, reuse ? 1 : 0, &endpoint, &actual);
+    if (s != DP_OK) return s;
+    jlong values[2] = {(jlong)endpoint, actual};
+    (*env)->SetLongArrayRegion(env, result, 0, 2, values);
+    if ((*env)->ExceptionCheck(env)) { dp_proto_tcp_listener_close((uint64_t)context, endpoint); return DP_INTERNAL; }
+    return DP_OK;
+}
 JNIEXPORT jint JNICALL JNI_NAME(tcpAccept)(JNIEnv *env, jobject self, jlong context, jlong listener,
                                          jlongArray result, jbyteArray local, jbyteArray remote, jintArray ports) {
     (void)self;

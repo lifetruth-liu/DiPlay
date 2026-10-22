@@ -1,14 +1,16 @@
-# P3 TCP JNI桥（当前ABI 5）
+# P3 TCP JNI桥（当前ABI 6）
 
 在既有context/UDP桥上新增TCP桥，整体JNI ABI升级到3，Kotlin加载器与native
 abiVersion同步校验。后续新增[优雅关闭](tcp-graceful-close.md)将整体ABI升级4，
-新增PCB keepalive配置后整体ABI升级5，当前加载器与native均要求5。native-only核心C ABI仍为1。原始接口由核心创建线程串行调用，
+新增PCB keepalive配置后整体ABI升级5，后续新增绑定选项升级6，当前加载器与native均要求6。native-only核心C ABI仍为1。原始接口由核心创建线程串行调用，
 不自行创建线程或提供阻塞/deadline语义；已有[类型化宿主核心接口](tcp-core.md)，
-已有[显式公共TcpStream主动连接适配](tcp-adapter.md)和[监听适配](tcp-listener-adapter.md)，SessionNetwork尚未接入。
+已有[显式公共TcpStream主动连接适配](tcp-adapter.md)、[监听适配](tcp-listener-adapter.md)
+和[会话适配](session-network-adapter.md)，生产选择尚未接入。
 
 | 方法 | 输出/语义 |
 | --- | --- |
 | tcpListen | LongArray(2)：listener token、实际端口 |
+| tcpListenWithOptions | 相同结果，bind前设置reuseAddress；不允许重复活动监听 |
 | tcpAccept | LongArray(1) stream token、两个独立ByteArray(16)地址、IntArray(2)端口 |
 | tcpConnect | LongArray(1)候选token；成功表示SYN入栈，之后查询同一token |
 | tcpConnectStatus | 握手完成后写两地址/两端口；等待或失败时不发布信息 |

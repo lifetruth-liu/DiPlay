@@ -9,7 +9,7 @@ internal interface LwipTcpCore : LwipPrototypeCore {
     data class Listener(val token: Long, val port: Int)
     data class Peer(val localAddress: ByteArray, val localPort: Int, val remoteAddress: ByteArray, val remotePort: Int)
     data class Accepted(val token: Long, val peer: Peer)
-    fun tcpListen(port: Int, backlog: Int): Listener
+    fun tcpListen(port: Int, backlog: Int, reuseAddress: Boolean = false): Listener
     fun tcpAccept(listener: Long): CoreAttempt<Accepted>
     /** Ready means a candidate was created, not that its handshake completed. */
     fun tcpConnect(address: ByteArray, port: Int): CoreAttempt<Long>

@@ -149,10 +149,10 @@ static void release_listener(void *value) {
     core->endpoint_allocated -= sizeof(*listener);
     free(listener);
 }
-dp_result dp_tcp_listen(dp_core *core, uint16_t port, unsigned backlog, uint64_t *handle, uint16_t *actual) {
+dp_result dp_tcp_listen_with_options(dp_core *core, uint16_t port, unsigned backlog, int reuse, uint64_t *handle, uint16_t *actual) {
     if (handle) *handle = 0;
     if (actual) *actual = 0;
-    if (!handle || !actual || !backlog || backlog > DP_TCP_MAX_BACKLOG) return DP_INVALID_ARGUMENT;
+    if (!handle || !actual || !backlog || backlog > DP_TCP_MAX_BACKLOG || (reuse != 0 && reuse != 1)) return DP_INVALID_ARGUMENT;
     dp_result status = dp_enter(core, 0);
     if (status != DP_OK) return status;
     if (core->tcp_listener_count >= MEMP_NUM_TCP_PCB_LISTEN) return leave(core, DP_RESOURCE_LIMIT);
@@ -162,6 +162,7 @@ dp_result dp_tcp_listen(dp_core *core, uint16_t port, unsigned backlog, uint64_t
     core->tcp_listener_count++; allocated(core, sizeof(*listener));
     listener->pcb = tcp_new_ip_type(IPADDR_TYPE_V6);
     if (!listener->pcb) { release_listener(listener); return leave(core, DP_RESOURCE_LIMIT); }
+    if (reuse) ip_set_option(listener->pcb, SOF_REUSEADDR);
     ip_addr_t local;
     ip_addr_copy_from_ip6(local, *netif_ip6_addr(&core->netif, 0));
     err_t error = tcp_bind(listener->pcb, &local, port);
@@ -171,13 +172,16 @@ dp_result dp_tcp_listen(dp_core *core, uint16_t port, unsigned backlog, uint64_t
     }
     tcp_bind_netif(listener->pcb, &core->netif);
     struct tcp_pcb *pcb = tcp_listen_with_backlog_and_err(listener->pcb, (uint8_t)backlog, &error);
-    if (!pcb) { release_listener(listener); return leave(core, DP_RESOURCE_LIMIT); }
+    if (!pcb) { release_listener(listener); return leave(core, error == ERR_USE ? DP_ADDRESS_IN_USE : DP_RESOURCE_LIMIT); }
     listener->pcb = pcb;
     status = dp_endpoint_register(&core->endpoints, DP_ENDPOINT_LISTENER, listener, release_listener, handle);
     if (status != DP_OK) { release_listener(listener); return leave(core, status); }
     tcp_arg(pcb, listener); tcp_accept(pcb, accepted);
     *actual = pcb->local_port;
     return leave(core, DP_OK);
+}
+dp_result dp_tcp_listen(dp_core *core, uint16_t port, unsigned backlog, uint64_t *handle, uint16_t *actual) {
+    return dp_tcp_listen_with_options(core, port, backlog, 0, handle, actual);
 }
 dp_result dp_tcp_accept(dp_core *core, uint64_t listener_handle, uint64_t *handle, dp_tcp_info *info) {
     if (handle) *handle = 0;

@@ -15,6 +15,7 @@ typedef struct {
  * publication. Read restores receive credit only for bytes actually consumed.
  * dp_tcp_close invalidates the generation and aborts locally without waiting for FIN. */
 DP_API dp_result dp_tcp_listen(dp_core *, uint16_t, unsigned, uint64_t *, uint16_t *);
+DP_API dp_result dp_tcp_listen_with_options(dp_core *, uint16_t, unsigned, int, uint64_t *, uint16_t *);
 DP_API dp_result dp_tcp_accept(dp_core *, uint64_t, uint64_t *, dp_tcp_info *);
 /* begin returns OK with an owned candidate token once a SYN is queued; poll that
  * token with connect_status instead of beginning again. Unready begin returns

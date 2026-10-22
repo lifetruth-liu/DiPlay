@@ -1127,3 +1127,49 @@ diff检查通过。未取得独立评审完成结果，不记作独立评审通�
 仍缺完整SessionNetwork（包括reuseAddress策略及隔离原型echo服务）、两后端参数化
 合同、全部分配/异常/竞态矩阵、独立kernel peer对新端点接口的验证、真实NCM/iPhone/
 ARM及性能长稳。保持显式原型入口，未迁移生产业务；G2/G3及整体目标仍未完成。
+
+### P3 显式lwIP会话与地址复用（2026-10-22）
+
+基于04c4a5f9。新增LwipSessionNetwork实现公共会话接口，组合现有TCP/UDP适配，
+校验IPv6与linkId、共享runner单调时钟。会话关闭取消accept/connect/read/write/
+UDP send/receive及候选，依赖owner的context销毁屏障统一释放；重复close可继续
+有界join。启动失败关闭已接管runner并保留错误。native工厂以echoServices=false
+创建核心，不占用原型TCP7000/UDP7001；nativeEcho及旧create默认保留echo模式。
+详见[显式会话原型](session-network-adapter.md)，生产后端选择/业务未迁移。
+
+reuseAddress透传至新增原生绑定选项；SO_REUSE=1、bind前设置SOF_REUSEADDR，旧
+C/JNI监听方法默认false不变。listen转换阶段ERR_USE修为ADDRESS_IN_USE，防止
+重复活动监听误报资源上限。新增prototype/JNI方法，整体ABI6、核心C ABI1。
+按既有审计要求增量检查TCP bind/listen/connect/继承/匹配及UDP条件分支；未启用
+SO_REUSE_RXTOALL，UDP端点不设置复用标志。增量记录见upstream-audit.md，不宣称
+完整安全审计通过。
+
+原生复用用例先复用标志无效果而red，49/50通过、exit8：
+WSL /tmp/diplay-session-reuse-red.log。实现后检查双方复用的存活子连接、旧监听已
+复用的TIME_WAIT按新开关允许/拒绝、重复活动监听、非法选项及prototype转发。
+另补复用后新旧连接分流，实际新连接收取自己的数据，旧流仍独立。最终Linux
+ASan/UBSan/pool guards、Windows各50/50，exit0（4.74s/1.18s）：
+WSL /tmp/diplay-session-final2-host.log、TEMP/diplay-session-final2-windows.log。
+
+会话4项用例先未实现方法red，exit1、17s：TEMP/diplay-session-red.log。首次接通
+发现旧位置时钟参数调用需同步，修正后会话/TCP/UDP/命令队列65项定向通过，
+35s、exit0：diplay-session-focused-fixed.log。覆盖会话身份/时钟、复用参数、非法
+端点、启动失败port关闭、六类等待取消及上下文只销毁一次。
+
+Android显式会话先缺tcpListenWithOptions而NATIVE_UNAVAILABLE/UnsatisfiedLinkError
+真实red，exit1、55s：diplay-session-jni-red.log。接通后14/14，15s、exit0：
+diplay-session-connected.log。验证真实native会话可绑定原型echo端口、重复活动
+监听为ADDRESS_CONFLICT、close取消accept/UDP等待；既有真实TCP/UDP帧用例回归。
+
+最终九项Android CI exit0，7m37s、250任务46执行：diplay-session-ci.log。
+shared/common单元任务本轮执行，home为UP-TO-DATE；核对XML共3373项（shared1789/
+common1578/home6）零失败/错误/跳过，不将home旧结果记作本轮执行。定向类计数65项。
+最终API28 x86_64模拟器14/14，18s、exit0：diplay-session-final-connected.log，
+XML零失败/错误/跳过；debug.checkjni=1，测试进程9315确认already on。
+四ABI均确认十二项TCP JNI导出；APK四ABI/16KiB/NX/许可证与源摘要检查通过，SHA-256：
+45316a0e1ca9bbaf46386ded062100bd9c0ff2862da6b965346495c144873ef8。
+public tree及staged diff检查通过。未取得独立评审完成结果，不记作独立评审通过。
+
+仍缺完整两后端参数化合同、全部分配/引用/竞态故障矩阵、独立kernel peer对新端点
+API验证、真实NCM/iPhone/ARM、性能长稳及生产通道/选择/回退集成。接口组合已接通，
+不将已覆盖路径扩大为全部会话合同验收；安全审计、G2/G3及整体目标仍未完成。

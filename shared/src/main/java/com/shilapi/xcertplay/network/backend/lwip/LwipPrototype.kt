@@ -341,7 +341,7 @@ class LwipPrototype(
             val ownedIp = ipv6.copyOf()
             val clock = coreCommandClock()
             return LwipPrototype(port, commandClock = clock) {
-                NativePrototypeCore.create(ownedMac, ownedIp, mtu, clock::nowMillis)
+                NativePrototypeCore.create(ownedMac, ownedIp, mtu, clockMillis = clock::nowMillis)
             }
         }
 

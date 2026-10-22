@@ -18,6 +18,34 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class NativePrototypeInstrumentationTest {
+    @Test fun nativeSessionHasNoEchoOwnsEndpointsAndCancelsWaiters() {
+        val incoming = LinkedBlockingQueue<ByteArray>()
+        val port = object : EthernetFramePort {
+            override val hostMac = mac.copyOf()
+            override fun send(frame: ByteArray, timeoutMillis: Int) = NcmSendResult.Sent
+            override fun recv(timeoutMillis: Long) = incoming.poll(timeoutMillis, TimeUnit.MILLISECONDS)
+            override fun close() { incoming.offer(ByteArray(14)) }
+        }
+        val network = LwipSessionNetwork.native(port, mac, ip, "session")
+        try {
+            // These are the prototype echo ports. Both must be free in a session core.
+            val listener = network.listen(NetworkEndpoint(ip, 7000, "session"), reuseAddress = true)
+            val udp = network.bindUdp(NetworkEndpoint(ip, 7001, "session"))
+            try { network.listen(listener.localEndpoint, reuseAddress = true); fail("duplicate listener") }
+            catch (error: BackendFailure) { assertEquals(BackendFailure.Kind.ADDRESS_CONFLICT, error.kind) }
+            val acceptError = AtomicReference<Throwable>(); val receiveError = AtomicReference<Throwable>()
+            val started = java.util.concurrent.CountDownLatch(2)
+            val accepter = Thread { started.countDown(); acceptError.set(runCatching { listener.accept() }.exceptionOrNull()) }
+            val receiver = Thread { started.countDown(); receiveError.set(runCatching { udp.receive(ByteArray(1)) }.exceptionOrNull()) }
+            accepter.start(); receiver.start(); assertTrue(started.await(2, TimeUnit.SECONDS))
+            network.close(); network.close()
+            accepter.join(2000); receiver.join(2000); assertFalse(accepter.isAlive); assertFalse(receiver.isAlive)
+            assertEquals(BackendFailure.Kind.CANCELLED, (acceptError.get() as BackendFailure).kind)
+            assertEquals(BackendFailure.Kind.CANCELLED, (receiveError.get() as BackendFailure).kind)
+            listener.close(); udp.close()
+        } finally { network.close() }
+    }
+
     @Test fun publicTcpListenerAcceptsRealPeerAndChildSurvivesListenerClose() {
         val incoming = LinkedBlockingQueue<ByteArray>(); val outgoing = LinkedBlockingQueue<ByteArray>()
         val port = object : EthernetFramePort {
@@ -30,7 +58,7 @@ class NativePrototypeInstrumentationTest {
         }
         val base = coreCommandClock(); val offset = AtomicLong(100)
         val clock = MonotonicClock { base.nowMillis() + offset.get() }
-        val runner = LwipPrototype(port, commandClock = clock) { NativePrototypeCore.create(mac, ip, 1500, clock::nowMillis) }
+        val runner = LwipPrototype(port, commandClock = clock) { NativePrototypeCore.create(mac, ip, 1500, clockMillis = clock::nowMillis) }
         var accepter: Thread? = null
         fun nextTcp(accept: (ByteArray) -> Boolean): ByteArray {
             val end = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
@@ -87,7 +115,7 @@ class NativePrototypeInstrumentationTest {
         }
         val base = coreCommandClock(); val offset = AtomicLong(100)
         val clock = MonotonicClock { base.nowMillis() + offset.get() }
-        val runner = LwipPrototype(port, commandClock = clock) { NativePrototypeCore.create(mac, ip, 1500, clock::nowMillis) }
+        val runner = LwipPrototype(port, commandClock = clock) { NativePrototypeCore.create(mac, ip, 1500, clockMillis = clock::nowMillis) }
         var connector: Thread? = null
         fun nextTcp(accept: (ByteArray) -> Boolean): ByteArray {
             val end = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
@@ -216,11 +244,13 @@ class NativePrototypeInstrumentationTest {
 
     @Test fun tcpJniAcceptReadWriteAndHalfCloseValidateBeforeConsuming() {
         LwipNativeBindings.ensureLoaded()
-        assertEquals(5, LwipNativeBindings.abiVersion())
+        assertEquals(6, LwipNativeBindings.abiVersion())
         val h = LwipNativeBindings.create(mac, ip, 1500, 100, ByteArray(1024).also { SecureRandom().nextBytes(it) })
         assertTrue(h > 0)
         try {
             val bound = LongArray(2)
+            assertEquals(-1, LwipNativeBindings.tcpListenWithOptions(h, 7000, 2, true, LongArray(1)))
+            assertEquals(-1, LwipNativeBindings.tcpListenWithOptions(h, 7000, 33, true, bound))
             assertEquals(-1, LwipNativeBindings.tcpListen(h, 7000, 2, LongArray(1)))
             assertEquals(0, LwipNativeBindings.tcpListen(h, 7000, 2, bound))
             assertEquals(7000L, bound[1])
@@ -323,7 +353,7 @@ class NativePrototypeInstrumentationTest {
         val base = coreCommandClock()
         val offset = AtomicLong(100)
         val clock = MonotonicClock { base.nowMillis() + offset.get() }
-        val runner = LwipPrototype(port, commandClock = clock) { NativePrototypeCore.create(mac, ip, 1500, clock::nowMillis) }
+        val runner = LwipPrototype(port, commandClock = clock) { NativePrototypeCore.create(mac, ip, 1500, clockMillis = clock::nowMillis) }
         try {
             runner.start()
             val udp = LwipUdpEndpoint.bind(runner, NetworkEndpoint(ip, 0, "native-test"))
@@ -380,7 +410,7 @@ class NativePrototypeInstrumentationTest {
     }
     @Test fun nativeUdpBindingsPreserveDatagramsAndRejectStaleTokens() {
         LwipNativeBindings.ensureLoaded()
-        assertEquals(5, LwipNativeBindings.abiVersion())
+        assertEquals(6, LwipNativeBindings.abiVersion())
         val entropy = ByteArray(1024).also { SecureRandom().nextBytes(it) }
         val context = LwipNativeBindings.create(mac, ip, 1500, 100, entropy)
         assertTrue(context > 0)
