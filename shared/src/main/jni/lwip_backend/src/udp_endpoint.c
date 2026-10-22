@@ -5,13 +5,14 @@
 #include <string.h>
 #define UDP_BLOCK_BYTES 1024u
 struct udp_block { uint8_t bytes[UDP_BLOCK_BYTES]; uint16_t next; };
-struct queued_datagram { dp_udp_datagram info; uint16_t first; };
+struct queued_datagram { dp_udp_datagram info; uint16_t first; uint64_t queued_at; };
 struct udp_endpoint {
     dp_core *owner;
     struct udp_pcb *pcb;
     struct queued_datagram packets[DP_UDP_QUEUE_PACKETS];
     uint32_t head, count, used;
-    uint64_t dropped;
+    uint64_t dropped, expired;
+    uint32_t max_age_millis;
 };
 /* Reserve all endpoint records and block metadata inside the global RX budget,
  * not just the payload bytes. Allocation is outside receive callbacks. */
@@ -51,6 +52,24 @@ static void free_blocks(struct dp_udp_pool *pool, uint16_t first) {
         first = next;
     }
 }
+static void discard_head(struct udp_endpoint *endpoint) {
+    struct queued_datagram *packet = &endpoint->packets[endpoint->head];
+    free_blocks(endpoint->owner->udp_pool, packet->first);
+    endpoint->used -= packet->info.original_length;
+    memset(packet, 0, sizeof(*packet));
+    endpoint->head = (endpoint->head + 1) % DP_UDP_QUEUE_PACKETS;
+    endpoint->count--;
+}
+static void expire_packets(struct udp_endpoint *endpoint) {
+    if (!endpoint->max_age_millis) return;
+    while (endpoint->count) {
+        const struct queued_datagram *packet = &endpoint->packets[endpoint->head];
+        if (endpoint->owner->last_clock - packet->queued_at < endpoint->max_age_millis) break;
+        discard_head(endpoint);
+        endpoint->dropped++;
+        endpoint->expired++;
+    }
+}
 static void release(void *value) {
     struct udp_endpoint *endpoint = value;
     dp_core *core = endpoint->owner;
@@ -73,6 +92,7 @@ static void received(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip_ad
     (void)pcb;
     if (!p) return;
     uint32_t length = p->tot_len;
+    expire_packets(endpoint);
     struct dp_udp_pool *pool = endpoint->owner->udp_pool;
     uint32_t needed = (length + UDP_BLOCK_BYTES - 1) / UDP_BLOCK_BYTES;
     if (!IP_IS_V6(source) || length > DP_UDP_MAX_PAYLOAD ||
@@ -108,6 +128,7 @@ static void received(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip_ad
     packet->info.source_port = port;
     packet->info.original_length = (uint16_t)length;
     packet->first = first;
+    packet->queued_at = endpoint->owner->last_clock;
     endpoint->count++;
     endpoint->used += length;
     pbuf_free(p);
@@ -181,6 +202,7 @@ dp_result dp_udp_receive(dp_core *core, uint64_t handle, uint8_t *target, size_t
     struct udp_endpoint *endpoint = NULL;
     status = lookup(core, handle, &endpoint);
     if (status != DP_OK) return leave(core, status);
+    expire_packets(endpoint);
     if (!endpoint->count) return leave(core, DP_WOULD_BLOCK);
     struct queued_datagram *packet = &endpoint->packets[endpoint->head];
     *info = packet->info;
@@ -194,10 +216,7 @@ dp_result dp_udp_receive(dp_core *core, uint64_t handle, uint8_t *target, size_t
         copied += count;
         index = block->next;
     }
-    free_blocks(core->udp_pool, packet->first);
-    endpoint->used -= packet->info.original_length;
-    endpoint->head = (endpoint->head + 1) % DP_UDP_QUEUE_PACKETS;
-    endpoint->count--;
+    discard_head(endpoint);
     return leave(core, DP_OK);
 }
 dp_result dp_udp_get_queue_stats(dp_core *core, uint64_t handle, dp_udp_queue_stats *stats) {
@@ -207,7 +226,35 @@ dp_result dp_udp_get_queue_stats(dp_core *core, uint64_t handle, dp_udp_queue_st
     if (status != DP_OK) return status;
     struct udp_endpoint *endpoint = NULL;
     status = lookup(core, handle, &endpoint);
-    if (status == DP_OK) *stats = (dp_udp_queue_stats){endpoint->count, endpoint->used, endpoint->dropped};
+    if (status == DP_OK) {
+        expire_packets(endpoint);
+        *stats = (dp_udp_queue_stats){endpoint->count, endpoint->used, endpoint->dropped};
+    }
+    return leave(core, status);
+}
+
+dp_result dp_udp_set_queue_max_age(dp_core *core, uint64_t handle, uint32_t max_age_millis) {
+    dp_result status = dp_enter(core, 0);
+    if (status != DP_OK) return status;
+    struct udp_endpoint *endpoint = NULL;
+    status = lookup(core, handle, &endpoint);
+    if (status == DP_OK) {
+        endpoint->max_age_millis = max_age_millis;
+        expire_packets(endpoint);
+    }
+    return leave(core, status);
+}
+dp_result dp_udp_get_expired_count(dp_core *core, uint64_t handle, uint64_t *expired) {
+    if (!expired) return DP_INVALID_ARGUMENT;
+    *expired = 0;
+    dp_result status = dp_enter(core, 1);
+    if (status != DP_OK) return status;
+    struct udp_endpoint *endpoint = NULL;
+    status = lookup(core, handle, &endpoint);
+    if (status == DP_OK) {
+        expire_packets(endpoint);
+        *expired = endpoint->expired;
+    }
     return leave(core, status);
 }
 dp_result dp_udp_close(dp_core *core, uint64_t handle) {

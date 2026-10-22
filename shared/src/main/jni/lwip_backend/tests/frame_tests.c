@@ -1200,6 +1200,52 @@ static void test_pmtu(void) {
         close_core(&f);
     }
 }
+static void test_udp_queue_age(void) {
+    struct fixture f; ready_core(&f);
+    uint64_t media, control; uint16_t media_port, control_port;
+    CHECK(dp_udp_bind(f.core, 47000, &media, &media_port) == DP_OK);
+    CHECK(dp_udp_bind(f.core, 47001, &control, &control_port) == DP_OK);
+    CHECK(dp_udp_set_queue_max_age(f.core, media, 100) == DP_OK);
+    send_udp(&f, media_port, "old"); send_udp(&f, control_port, "control");
+    f.now += 99; /* Existing advance() rounds to 250ms timer ticks. */
+    send_udp(&f, media_port, "fresh");
+    f.now++;
+    uint8_t bytes[16]; dp_udp_datagram info;
+    CHECK(dp_udp_receive(f.core, media, bytes, sizeof(bytes), &info) == DP_OK);
+    CHECK(info.copied_length == 5 && !memcmp(bytes, "fresh", 5));
+    uint64_t expired = UINT64_MAX;
+    CHECK(dp_udp_get_expired_count(f.core, media, &expired) == DP_OK && expired == 1);
+    dp_udp_queue_stats stats;
+    CHECK(dp_udp_get_queue_stats(f.core, media, &stats) == DP_OK && stats.packets == 0 && stats.bytes == 0 && stats.dropped == 1);
+    CHECK(dp_udp_receive(f.core, control, bytes, sizeof(bytes), &info) == DP_OK);
+    CHECK(info.copied_length == 7 && !memcmp(bytes, "control", 7));
+    for (unsigned i = 0; i < DP_UDP_QUEUE_PACKETS; ++i) send_udp(&f, media_port, "");
+    advance(&f, 100);
+    send_udp(&f, media_port, "replacement"); /* Prune before capacity rejection, including zero-length packets. */
+    CHECK(dp_udp_receive(f.core, media, bytes, sizeof(bytes), &info) == DP_OK && info.copied_length == 11);
+    CHECK(!memcmp(bytes, "replacement", 11));
+    CHECK(dp_udp_get_expired_count(f.core, media, &expired) == DP_OK && expired == 1 + DP_UDP_QUEUE_PACKETS);
+    CHECK(dp_udp_set_queue_max_age(f.core, media, 0) == DP_OK);
+    send_udp(&f, media_port, "retained"); advance(&f, 500);
+    CHECK(dp_udp_set_queue_max_age(f.core, media, 100) == DP_OK);
+    memset(bytes, 0xa5, sizeof(bytes));
+    CHECK(dp_udp_receive(f.core, media, bytes, sizeof(bytes), &info) == DP_WOULD_BLOCK && bytes[0] == 0xa5);
+    /* Cross a 32-bit lwIP clock wrap without losing queue age. */
+    CHECK(dp_udp_set_queue_max_age(f.core, media, UINT32_MAX) == DP_OK);
+    send_udp(&f, media_port, "wrapped");
+    f.now += (uint64_t)UINT32_MAX + 1;
+    CHECK(dp_udp_get_expired_count(f.core, media, &expired) == DP_OK && expired == 3 + DP_UDP_QUEUE_PACKETS);
+    CHECK(dp_udp_get_queue_stats(f.core, media, &stats) == DP_OK && stats.packets == 0 && stats.bytes == 0);
+    CHECK(dp_udp_close(f.core, media) == DP_OK);
+    expired = UINT64_MAX;
+    CHECK(dp_udp_get_expired_count(f.core, media, &expired) == DP_INVALID_ARGUMENT && expired == 0);
+    CHECK(dp_udp_set_queue_max_age(f.core, media, 1) == DP_INVALID_ARGUMENT);
+    CHECK(dp_udp_get_expired_count(f.core, control, NULL) == DP_INVALID_ARGUMENT);
+    CHECK(dp_udp_close(f.core, control) == DP_OK);
+    dp_stats final;
+    CHECK(dp_core_get_stats(f.core, &final) == DP_OK && final.heap_used == 0 && final.pbuf_used == 0);
+    close_core(&f);
+}
 static void test_lifecycle(void) {
     for (int i = 0; i < 100; i++) {
         struct fixture f;
@@ -2405,6 +2451,8 @@ int main(int argc, char **argv) {
         test_tcp_connect_retry();
     else if (!strcmp(argv[1], "udp"))
         test_udp();
+    else if (!strcmp(argv[1], "udp_queue_age"))
+        test_udp_queue_age();
     else if (!strcmp(argv[1], "lifecycle_soak"))
         test_lifecycle_soak();
     else if (!strcmp(argv[1], "lifecycle"))

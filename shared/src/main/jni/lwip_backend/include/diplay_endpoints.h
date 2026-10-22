@@ -21,6 +21,10 @@ DP_API dp_result dp_udp_send(dp_core *, uint64_t, const uint8_t destination[16],
                              const uint8_t *payload, size_t length);
 DP_API dp_result dp_udp_receive(dp_core *, uint64_t, uint8_t *target, size_t capacity, dp_udp_datagram *);
 DP_API dp_result dp_udp_get_queue_stats(dp_core *, uint64_t, dp_udp_queue_stats *);
+/* Opt-in per-channel age budget; zero preserves datagrams until receive/capacity pressure.
+ * Age uses the core's 64-bit monotonic clock. Setting a budget also prunes existing packets. */
+DP_API dp_result dp_udp_set_queue_max_age(dp_core *, uint64_t, uint32_t max_age_millis);
+DP_API dp_result dp_udp_get_expired_count(dp_core *, uint64_t, uint64_t *expired);
 DP_API dp_result dp_udp_close(dp_core *, uint64_t);
 #ifdef __cplusplus
 }

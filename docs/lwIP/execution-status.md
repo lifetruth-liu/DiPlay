@@ -1637,3 +1637,23 @@ TEMP/diplay-lifecycle-soak-final-host.log。Linux ASan/UBSan/池检查及默认L
 TEMP/diplay-lifecycle-soak-ci.log；单元任务UP-TO-DATE，不记新执行。public tree
 及diff检查通过。未启动设备、无新JNI或内核证据；该子项不代表整会话租约/线程/
 FD、100次设备重连或8小时音视频长稳，完整L06和整体目标保持未完成。
+
+### 原生UDP按端点排队年龄预算
+
+新增dp_udp_set_queue_max_age及dp_udp_get_expired_count增量C接口，默认关闭。
+报文记录64位核心单调时间，达到预算后在入队/读取/统计/修改预算时丢弃并归还
+blocks，总dropped及独立expired递增。timestamp/端点字段仍计入512KiB总预算，
+不扩大内存上限，公共结构体/C ABI版本/JNI ABI及vendor摘要不变。
+
+先加入测试与声明，TEMP/diplay-udp-age-red.log记录缺少实现的链接失败。实现后
+首次测试误用250ms步进的advance检查100ms边界，导致fresh也过期；核对助手后
+改为精确f.now推进。最终udp_queue_age覆盖边界、不同端点默认保留、满队列先
+清理、零长包、预算切换、32位栈时钟回绕、失效句柄和关闭资源。详见udp-queue-age.md。
+
+Windows63/63、1.50s：TEMP/diplay-udp-age-final-host.log；Linux ASan/UBSan/
+池检查及默认LSan63/63、47.19s：/tmp/diplay-udp-age-final-sanitize.log。
+九项CI exit0、7s，17执行/233缓存：TEMP/diplay-udp-age-ci.log；单元任务
+UP-TO-DATE，不记新执行。四ABI APK及源码校验通过：TEMP/diplay-udp-age-apk.log；
+APK SHA-256 0a4dd2dfb1d9bc1bd5a55fb70a556f2cea74097f9acb1f22db0143044e018559。
+public tree及diff检查通过。没有新设备/JNI运行/内核证据；策略尚未接通JNI、
+公共API及媒体通道配置，完整R04、真机及整体目标仍未完成。
