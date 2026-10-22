@@ -1801,3 +1801,13 @@ Ethernet/IPv6 CTest 加既有 NDP、选项和 DAD 测试，共 13/13 通过；�
 脚本单测 25 项中 16 项通过、9 项按平台跳过。三类长时 fuzz 原先构建于本次 NDP 修改之前，
 已要求保存旧报告并在当前源码上重建重跑。完整 RFC/安全评审、三个 target 各 8 CPU 小时、
 隔离网络下 10 分钟基准，以及 G0/G1 真机和 G2 实际 NCM 门槛仍未完成。
+
+### P3 API 28 双后端 Android 契约验证（2026-10-23）
+
+在任务 AVD `diplay-lwip-api28`（Android 9 / API 28、x86_64，`debug.checkjni=1`）运行
+`./gradlew :shared:connectedDebugAndroidTest --stacktrace`，结果 36/36 通过、0 失败、0 跳过：
+`SessionNetworkDeviceContractTest` 8 项、参数化 `TcpSessionDeviceContractTest` 14 项、
+`NativePrototypeInstrumentationTest` 14 项。覆盖系统与 `lwip-jni` 的 UDP 来源/截断/边界、端口冲突、
+关闭取消、TCP 半关闭/重置/超时、10 秒接收暂停后的背压恢复，以及原生 JNI 与 runner 生命周期。
+原生 AVD 控制台的旧 ddmlib `getAvdPath` 子命令告警未影响设备测试，Gradle 任务 exit 0。
+这是模拟器证据，不覆盖物理设备、iPhone/NCM、VPN/无线基线或低配 ARM 性能；G0/G1/G2 仍未通过。
