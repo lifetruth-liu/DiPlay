@@ -15,6 +15,34 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class LwipPrototypeTest {
+    @Test fun preparedCommandsValidateBeforeCopyAndRunOnlyOnCore() {
+        val core = Core(emptyList())
+        val prototype = LwipPrototype(Port()) { core.also { it.owner = Thread.currentThread() } }
+        val preparations = AtomicInteger()
+        val preparing = AtomicReference<Thread>()
+        val executing = AtomicReference<Thread>()
+        fun submit(): Int = prototype.executePreparedCommand(1, prototype.commandClock.nowMillis() + 1000) {
+            preparations.incrementAndGet(); preparing.set(Thread.currentThread())
+            val borrowed = byteArrayOf(41)
+            val owned = borrowed.copyOf()
+            borrowed.fill(0)
+            val operation: (LwipPrototypeCore) -> CoreAttempt<Int> = {
+                assertSame(core, it); executing.set(Thread.currentThread()); CoreAttempt.Ready(owned[0] + 1)
+            }
+            operation
+        }
+        try {
+            assertEquals(BackendFailure.Kind.CANCELLED, (runCatching { submit() }.exceptionOrNull() as BackendFailure).kind)
+            assertEquals(0, preparations.get())
+            prototype.start()
+            assertEquals(42, submit())
+            assertSame(Thread.currentThread(), preparing.get())
+            assertSame(core.owner, executing.get())
+            assertEquals(0, prototype.snapshot().commandBytes)
+        } finally { prototype.close() }
+        assertEquals(BackendFailure.Kind.CANCELLED, (runCatching { submit() }.exceptionOrNull() as BackendFailure).kind)
+        assertEquals(1, preparations.get())
+    }
     @Test fun resourceCloseWakesCoreAndReleasesOnceWithoutStoppingTheRunner() {
         val core = Core(emptyList()).apply { timeoutGate = CountDownLatch(1) }
         val prototype = LwipPrototype(Port()) { core.also { it.owner = Thread.currentThread() } }

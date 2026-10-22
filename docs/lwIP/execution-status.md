@@ -765,3 +765,33 @@ diplay-command-resource-final-ci.log。JUnit共3326项（shared1742/common1578/h
 4e919976e61c4d932a4aa7c6f4218c361175b99786fe406ce7ebbe194a8987f3。
 公开树及staged diff检查通过。此批JNI/native未修改，未重跑设备或native宿主套件；
 没有取得独立评审完成结果，不记作独立评审通过。
+
+### P3 复制前命令准备准入（2026-10-22）
+
+基于5870ca90。callPrepared先预留命令数与声明字节，再在调用线程运行有界Java
+prepare；PREPARING期间仍占额度，不持队列锁，不可访问native或执行阻塞I/O。
+成功准备且未终止才发布核心操作；准备期间取消/超时不能提前归还仍使用中的额度。
+资源关闭控制仍可执行，准备回调退出后拒绝发布已取消操作。普通call沿同一状态机。
+ready队列预分配至命令上限；退休时先清空操作闭包，再归还额度。
+准备阶段OOM映射RESOURCE_LIMIT，中断恢复标志并返回CANCELLED；首个终止原因保留。
+运行器executePreparedCommand在准备之前检查运行状态/调用线程。
+
+占位实现先执行prepare再入队，真实red：准备中snapshot.commands期望1实际0，
+exit1：TEMP/diplay-command-preparation-red.log。实现后修正测试的调用线程：
+pump线程不能同步发起阻塞调用，预算拒绝检查改由独立业务线程执行。
+运行器占位入口过早执行prepare也真实red：未启动时准备次数期望0实际1，exit1：
+diplay-command-preparation-runner-red.log。接入后准备8项、资源8项、队列11项、
+运行器17项共44项通过：diplay-command-preparation-runner-green.log。
+覆盖准备线程、核心线程、分配前数量/字节限额、准备期间端点关闭/全上下文停止、
+deadline、两种中断、注入OOM及普通异常后预算恢复，不耗尽宿主物理内存。
+
+通用组件仍依赖调用者准确申报并在prepare内创建拥有型缓冲，不分析闭包内存大小。
+普通call预先捕获的负载不自动受复制前准入保护；公共UDP/TCP适配与native端点
+尚未接通此入口，G2/G3和实际设备证据仍未完成。
+
+完整九项Android CI exit0，7m9s，250任务44执行：
+diplay-command-preparation-ci.log。JUnit共3335项（shared1751/common1578/home6），
+零失败、错误、跳过。最终APK四ABI/16KiB/NX/许可证及源码摘要检查通过，SHA-256：
+6902ca21661ee7514d7d9c3bb25394c74d780922205fc4facfd35321bbd869e4。
+公开树及staged diff检查通过。此批JNI/native未修改，未重跑设备或native宿主套件；
+未取得独立评审完成结果，不记作独立评审通过。

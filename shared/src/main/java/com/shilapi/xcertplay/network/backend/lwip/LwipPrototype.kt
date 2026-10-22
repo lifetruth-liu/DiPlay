@@ -86,15 +86,26 @@ class LwipPrototype(
     internal fun cancelCommands(scope: CoreCommandQueue.Scope) =
         commands.cancel(scope, BackendFailure(BackendFailure.Kind.CANCELLED))
 
+    internal fun <T> executePreparedCommand(retainedBytes: Int = 0, deadlineMillis: Long = 0,
+                                           discard: (T) -> Unit = {}, scope: CoreCommandQueue.Scope? = null,
+                                           prepare: () -> ((LwipPrototypeCore) -> CoreAttempt<T>)): T {
+        checkCommandCaller()
+        return commands.callPrepared(retainedBytes, deadlineMillis, discard, scope, prepare)
+    }
+
     internal fun <T> executeCommand(retainedBytes: Int = 0, deadlineMillis: Long = 0,
                                    discard: (T) -> Unit = {}, scope: CoreCommandQueue.Scope? = null,
                                    operation: (LwipPrototypeCore) -> CoreAttempt<T>): T {
+        checkCommandCaller()
+        return commands.call(retainedBytes, deadlineMillis, discard, scope, operation)
+    }
+
+    private fun checkCommandCaller() {
         synchronized(signal) {
             if (Thread.currentThread() === coreThread) throw BackendFailure(BackendFailure.Kind.INTERNAL)
             failure?.let { throw it }
             if (state != State.LISTENING && state != State.LINK_ACTIVE) throw BackendFailure(BackendFailure.Kind.CANCELLED)
         }
-        return commands.call(retainedBytes, deadlineMillis, discard, scope, operation)
     }
 
     fun start() {

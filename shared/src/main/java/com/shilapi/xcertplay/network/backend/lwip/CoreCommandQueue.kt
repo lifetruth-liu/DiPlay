@@ -57,11 +57,11 @@ internal class CoreCommandQueue<C>(
     }
     data class Snapshot(val commands: Int, val bytes: Int, val resources: Int = 0, val closingResources: Int = 0)
     data class Batch(val more: Boolean, val completed: Boolean)
-    private enum class Phase { QUEUED, RUNNING, WAITING, DONE }
+    private enum class Phase { PREPARING, QUEUED, RUNNING, WAITING, DONE }
     private enum class ResourcePhase { OPEN, QUEUED, RUNNING }
     private val signal = Object()
     private val live = linkedSetOf<Task<*>>()
-    private val ready = ArrayDeque<Task<*>>()
+    private val ready = ArrayDeque<Task<*>>(maxCommands)
     private val resources = linkedMapOf<Scope, Resource>()
     private val closing = ArrayDeque<Resource>(maxResources)
     private var retained = 0
@@ -70,7 +70,13 @@ internal class CoreCommandQueue<C>(
 
     /** Internal operations and discard handlers must not block. retainedBytes
      * includes all owned payloads retained by the operation/completion. */
-    fun <T> call(retainedBytes: Int = 0, deadlineMillis: Long = 0, discard: (T) -> Unit = {}, scope: Scope? = null, operation: (C) -> CoreAttempt<T>): T {
+    fun <T> call(retainedBytes: Int = 0, deadlineMillis: Long = 0, discard: (T) -> Unit = {}, scope: Scope? = null,
+                 operation: (C) -> CoreAttempt<T>): T = callPrepared(retainedBytes, deadlineMillis, discard, scope) { operation }
+
+    /** Reserves count/bytes before preparing owned payloads on the calling thread.
+     * prepare must only perform bounded Java copying/allocation, never native I/O. */
+    fun <T> callPrepared(retainedBytes: Int = 0, deadlineMillis: Long = 0, discard: (T) -> Unit = {},
+                         scope: Scope? = null, prepare: () -> ((C) -> CoreAttempt<T>)): T {
         require(retainedBytes >= 0 && deadlineMillis >= 0)
         if (Thread.currentThread().isInterrupted) throw BackendFailure(BackendFailure.Kind.CANCELLED)
         val task = synchronized(signal) {
@@ -80,11 +86,13 @@ internal class CoreCommandQueue<C>(
             if (Thread.currentThread() === owner) throw BackendFailure(BackendFailure.Kind.INTERNAL)
             if (deadlineMillis != 0L && clock.nowMillis() >= deadlineMillis) throw BackendFailure(BackendFailure.Kind.TIMEOUT)
             if (live.size >= maxCommands || retainedBytes > maxBytes - retained) throw BackendFailure(BackendFailure.Kind.RESOURCE_LIMIT)
-            Task(retainedBytes, deadlineMillis, discard, scope, operation).also {
-                live.add(it); ready.addLast(it); retained += retainedBytes
+            Task(retainedBytes, deadlineMillis, discard, scope).also {
+                live.add(it); retained += retainedBytes
             }
         }
-        try { wake() } catch (error: Throwable) { synchronized(signal) { task.cancel(error) } }
+        if (task.prepare(prepare)) {
+            try { wake() } catch (error: Throwable) { synchronized(signal) { task.cancel(error) } }
+        }
         return task.await()
     }
     fun snapshot() = synchronized(signal) {
@@ -150,15 +158,17 @@ internal class CoreCommandQueue<C>(
     private fun retire(task: Task<*>) {
         if (task.acknowledged && !task.active && live.remove(task)) {
             ready.remove(task)
+            task.operation = null
             retained -= task.bytes
         }
     }
     private inner class Task<T>(
         val bytes: Int, val deadline: Long,
-        val discard: (T) -> Unit, val scope: Scope?, val operation: (C) -> CoreAttempt<T>,
+        val discard: (T) -> Unit, val scope: Scope?,
     ) {
-        var phase = Phase.QUEUED
-        var active = false
+        var operation: ((C) -> CoreAttempt<T>)? = null
+        var phase = Phase.PREPARING
+        var active = true
         var acknowledged = false
         var result: CoreAttempt.Ready<T>? = null
         var failure: Throwable? = null
@@ -169,6 +179,36 @@ internal class CoreCommandQueue<C>(
             phase = Phase.DONE
             if (!active) ready.remove(this)
             signal.notifyAll()
+        }
+        fun prepare(factory: () -> ((C) -> CoreAttempt<T>)): Boolean {
+            synchronized(signal) {
+                if (expired()) cancel(BackendFailure(BackendFailure.Kind.TIMEOUT))
+                if (failure != null) { active = false; return false }
+            }
+            var prepared: ((C) -> CoreAttempt<T>)? = null
+            var error: Throwable? = null
+            try { prepared = factory() } catch (caught: Throwable) {
+                error = when (caught) {
+                    is OutOfMemoryError -> BackendFailure(BackendFailure.Kind.RESOURCE_LIMIT, caught)
+                    is InterruptedException -> {
+                        Thread.currentThread().interrupt()
+                        BackendFailure(BackendFailure.Kind.CANCELLED, caught)
+                    }
+                    else -> caught
+                }
+            }
+            return synchronized(signal) {
+                if (error != null) cancel(error)
+                if (Thread.currentThread().isInterrupted) cancel(BackendFailure(BackendFailure.Kind.CANCELLED))
+                if (expired()) cancel(BackendFailure(BackendFailure.Kind.TIMEOUT))
+                active = false
+                if (failure != null) false else {
+                    operation = checkNotNull(prepared)
+                    phase = Phase.QUEUED
+                    ready.addLast(this)
+                    true
+                }
+            }
         }
         fun await(): T {
             synchronized(signal) {
@@ -191,7 +231,7 @@ internal class CoreCommandQueue<C>(
                 if (expired()) cancel(BackendFailure(BackendFailure.Kind.TIMEOUT))
                 if (failure != null) { active = false; retire(this); return true }
             }
-            val attempt = try { operation(core) } catch (error: Throwable) {
+            val attempt = try { checkNotNull(operation).invoke(core) } catch (error: Throwable) {
                 synchronized(signal) {
                     cancel(error); active = false; retire(this)
                 }
