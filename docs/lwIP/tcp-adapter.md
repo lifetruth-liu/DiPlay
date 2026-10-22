@@ -1,7 +1,8 @@
 # P3 公共TCP流适配（JNI ABI 5）
 
 `LwipTcpStream`实现现有TcpStream合同，显式connect工厂接入LwipPrototype命令队列与
-LwipTcpCore。生产SessionNetwork选择和业务通道尚未接入，TcpListener仍待实现。
+LwipTcpCore。已有[公共TCP监听原型](tcp-listener-adapter.md)，通过同一发布逻辑交付
+接受流；生产SessionNetwork选择和业务通道尚未接入。
 所有原生操作和资源释放仍在核心线程，业务调用方只等待有界命令，不直接操作PCB。
 
 connect先预留resource scope，再在同一命令中创建至多一个候选并查询其握手状态。
@@ -42,6 +43,6 @@ configureLiveness调用新原生接口，给该PCB启用10秒idle、3秒interval
 原生用例用真实探测帧验证健康空闲连接持续存活、停止回应探测后复位。Android模拟器
 从公共connect驱动真实SYN/SYN-ACK、JNI配置、偏移读/EOF、write和FIN关闭。
 
-尚未完成完整两后端参数化合同、监听器/SessionNetwork、全部分配/异常/竞态矩阵、
+尚未完成完整两后端参数化合同、SessionNetwork、全部分配/异常/竞态矩阵、
 独立kernel peer对新端点接口的验证、真实NCM/iPhone/ARM、性能和长稳验收。
 这些测试不能替代G2/G3，也没有改变现有生产后端选择。

@@ -5,6 +5,7 @@ package com.shilapi.xcertplay.network.backend.lwip
  * the handle and transfers protocol closing to lwIP. Neither waits for a peer ACK or deadline.
  */
 internal interface LwipTcpCore : LwipPrototypeCore {
+    val tcpLocalAddress: ByteArray
     data class Listener(val token: Long, val port: Int)
     data class Peer(val localAddress: ByteArray, val localPort: Int, val remoteAddress: ByteArray, val remotePort: Int)
     data class Accepted(val token: Long, val peer: Peer)

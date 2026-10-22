@@ -18,6 +18,63 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class NativePrototypeInstrumentationTest {
+    @Test fun publicTcpListenerAcceptsRealPeerAndChildSurvivesListenerClose() {
+        val incoming = LinkedBlockingQueue<ByteArray>(); val outgoing = LinkedBlockingQueue<ByteArray>()
+        val port = object : EthernetFramePort {
+            override val hostMac = mac.copyOf()
+            override fun send(frame: ByteArray, timeoutMillis: Int): NcmSendResult {
+                outgoing.add(frame.copyOf()); return NcmSendResult.Sent
+            }
+            override fun recv(timeoutMillis: Long) = incoming.poll(timeoutMillis, TimeUnit.MILLISECONDS)
+            override fun close() { incoming.offer(ByteArray(14)) }
+        }
+        val base = coreCommandClock(); val offset = AtomicLong(100)
+        val clock = MonotonicClock { base.nowMillis() + offset.get() }
+        val runner = LwipPrototype(port, commandClock = clock) { NativePrototypeCore.create(mac, ip, 1500, clock::nowMillis) }
+        var accepter: Thread? = null
+        fun nextTcp(accept: (ByteArray) -> Boolean): ByteArray {
+            val end = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+            while (System.nanoTime() < end) {
+                val frame = outgoing.poll(100, TimeUnit.MILLISECONDS) ?: continue
+                if (frame.size >= 74 && frame[20] == 6.toByte() && accept(frame)) return frame
+            }
+            throw AssertionError("TCP frame timeout")
+        }
+        try {
+            runner.start()
+            val listener = LwipTcpListener.bind(runner, NetworkEndpoint(ByteArray(16), 0, "native-test"))
+            assertArrayEquals(ip, listener.localEndpoint.address); val localPort = listener.localEndpoint.port
+            assertTrue(localPort in 1..65535)
+            repeat(16) { offset.addAndGet(250); runner.executeCommand { it.poll(); CoreAttempt.Ready(Unit) } }
+            incoming.put(packet(58, 32).also {
+                it[21] = 255.toByte(); it[54] = 135.toByte(); ip.copyInto(it, 62)
+                it[78] = 1; it[79] = 1; peerMac.copyInto(it, 80); checksum(it, 58, 56)
+            })
+            val result = AtomicReference<Result<com.shilapi.xcertplay.network.backend.TcpStream>>()
+            accepter = Thread { result.set(runCatching { listener.accept(clock.nowMillis() + 2000) }) }.apply { start() }
+            incoming.put(tcpPacket(50000, localPort, 2, 1000, 0))
+            val syn = nextTcp { it[67].toInt() and 18 == 18 }; val sequence = read32(syn, 58)
+            incoming.put(tcpPacket(50000, localPort, 24, 1001, sequence + 1, "hi".toByteArray()))
+            accepter.join(2000); assertFalse(accepter.isAlive)
+            val stream = result.get().getOrThrow()
+            assertEquals(listener.localEndpoint, stream.localEndpoint)
+            assertEquals(NetworkEndpoint(ip.copyOf().also { it[15] = 2 }, 50000, "native-test"), stream.remoteEndpoint)
+            listener.close(); listener.close()
+            val target = ByteArray(2)
+            assertEquals(2, stream.read(target, 0, 2, clock.nowMillis() + 2000)); assertArrayEquals("hi".toByteArray(), target)
+            stream.write("ok".toByteArray(), 0, 2, clock.nowMillis() + 2000)
+            val sent = nextTcp { it.size > 54 + ((it[66].toInt() and 255) ushr 4) * 4 }
+            assertArrayEquals("ok".toByteArray(), sent.copyOfRange(54 + ((sent[66].toInt() and 255) ushr 4) * 4, sent.size))
+            incoming.put(tcpPacket(50000, localPort, 16, 1003, sequence + 3))
+            stream.close(); val fin = nextTcp { it[67].toInt() and 1 != 0 }
+            assertEquals(0, fin[67].toInt() and 4)
+            incoming.put(tcpPacket(50000, localPort, 17, 1003, sequence + 4))
+            val end = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+            while (runner.snapshot().resourceScopes != 0 && System.nanoTime() < end) Thread.sleep(1)
+            assertEquals(0, runner.snapshot().resourceScopes); assertNull(runner.snapshot().failure)
+        } finally { runner.close(); accepter?.join(2000) }
+    }
+
     @Test fun publicTcpStreamTraversesRunnerHandshakeReadWriteAndGracefulClose() {
         val incoming = LinkedBlockingQueue<ByteArray>(); val outgoing = LinkedBlockingQueue<ByteArray>()
         val port = object : EthernetFramePort {

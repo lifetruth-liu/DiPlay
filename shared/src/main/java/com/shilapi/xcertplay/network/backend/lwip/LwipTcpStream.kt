@@ -108,17 +108,49 @@ internal class LwipTcpStream private constructor(
         private fun range(bytes: ByteArray, offset: Int, length: Int) {
             require(offset >= 0 && length >= 0 && length <= bytes.size && offset <= bytes.size - length)
         }
+        private fun newLeaseScope(runner: LwipPrototype, lease: Lease) = runner.newResourceScope { core ->
+            val token = lease.token.getAndSet(0)
+            if (token > 0) {
+                if (lease.published.get() && !lease.reset.get()) tcp(core).tcpCloseGraceful(token)
+                else tcp(core).tcpClose(token)
+            }
+        }
+        private fun publish(runner: LwipPrototype, scope: CoreCommandQueue.Scope, lease: Lease,
+                            peer: LwipTcpCore.Peer, linkId: String): LwipTcpStream {
+            val stream = LwipTcpStream(runner, scope, lease,
+                NetworkEndpoint(peer.localAddress, peer.localPort, linkId),
+                NetworkEndpoint(peer.remoteAddress, peer.remotePort, linkId))
+            lease.published.set(true)
+            return stream
+        }
+        internal fun acceptFrom(runner: LwipPrototype, listenerScope: CoreCommandQueue.Scope, listener: Long,
+                                local: NetworkEndpoint, deadlineMillis: Long): LwipTcpStream = allocation {
+            runner.checkCommandCaller()
+            val lease = Lease()
+            // Reserve the child owner before native accept can remove a pending connection.
+            val scope = newLeaseScope(runner, lease)
+            try {
+                val peer = runner.executeCommand<LwipTcpCore.Peer>(96, deadlineMillis, scope = listenerScope,
+                    discard = { runner.closeResourceScope(scope) }) { core -> allocation {
+                    when (val accepted = tcp(core).tcpAccept(listener)) {
+                        CoreAttempt.Pending -> CoreAttempt.Pending
+                        is CoreAttempt.Ready -> {
+                            lease.token.set(accepted.value.token)
+                            val info = accepted.value.peer
+                            protocol(accepted.value.token > 0 && info.localAddress.contentEquals(local.address) &&
+                                info.localPort == local.port && info.remoteAddress.size == 16 && info.remotePort in 1..65535)
+                            CoreAttempt.Ready(info)
+                        }
+                    }
+                } }
+                publish(runner, scope, lease, peer, local.linkId)
+            } catch (error: Throwable) { runner.closeResourceScope(scope); throw error }
+        }
         fun connect(runner: LwipPrototype, remote: NetworkEndpoint, deadlineMillis: Long = 0): LwipTcpStream = allocation {
             runner.checkCommandCaller()
             require(remote.port != 0)
             val lease = Lease()
-            val scope = runner.newResourceScope { core ->
-                val token = lease.token.getAndSet(0)
-                if (token > 0) {
-                    if (lease.published.get() && !lease.reset.get()) tcp(core).tcpCloseGraceful(token)
-                    else tcp(core).tcpClose(token)
-                }
-            }
+            val scope = newLeaseScope(runner, lease)
             try {
                 val peer = runner.executePreparedCommand<LwipTcpCore.Peer>(96, deadlineMillis, scope = scope,
                     discard = { runner.closeResourceScope(scope) }) {
@@ -143,11 +175,7 @@ internal class LwipTcpStream private constructor(
                     } }
                     operation
                 }
-                val stream = LwipTcpStream(runner, scope, lease,
-                    NetworkEndpoint(peer.localAddress, peer.localPort, remote.linkId),
-                    NetworkEndpoint(peer.remoteAddress, peer.remotePort, remote.linkId))
-                lease.published.set(true)
-                stream
+                publish(runner, scope, lease, peer, remote.linkId)
             } catch (error: Throwable) { runner.closeResourceScope(scope); throw error }
         }
     }

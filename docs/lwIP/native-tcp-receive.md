@@ -5,6 +5,7 @@
 完整两后端合同和SessionNetwork适配，不能作为完整TCP合同验收。
 原始[TCP JNI](tcp-jni.md)已接入，当前JNI ABI 5；native-only核心C ABI仍为1。
 已有[优雅关闭原语](tcp-graceful-close.md)及[显式公共TCP主动连接适配](tcp-adapter.md)。
+另有[公共监听原型](tcp-listener-adapter.md)，接受流复用相同的公共读写/关闭实现。
 现有生产后端选择未改变，新增C API及错误值是兼容的扩展。
 
 监听绑定虚拟netif具体IPv6地址，支持动态端口；可以在链路未就绪和DAD前准备。

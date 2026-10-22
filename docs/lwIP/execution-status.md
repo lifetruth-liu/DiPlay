@@ -1090,3 +1090,40 @@ public tree及staged diff检查通过。未取得独立评审完成结果，不�
 仍缺公共监听器、完整SessionNetwork、两后端参数化合同、全部JNI/分配/竞态故障矩阵、
 独立kernel peer对新端点接口的验证、真实NCM/iPhone/ARM及长稳性能报告。只提供
 显式原型主动流，不接入生产业务或改变后端选择；G2/G3与整体目标仍未完成。
+
+### P3 公共TCP监听器（2026-10-22）
+
+基于bddad5a9。新增LwipTcpListener，实现显式bind/accept，绑定具体本地IPv6或通配
+地址，报告实际端口/地址和linkId。backlog为正，公共默认50按原生上限截到32。
+新增只读tcpLocalAddress，NativePrototypeCore在owner线程返回防御复制；不改C/JNI，
+整体JNI ABI仍5、核心C ABI仍1。详见[公共TCP监听原型](tcp-listener-adapter.md)。
+
+每监听器最多一个accept，命令以监听器scope取消；先预留独立子流scope再调用native
+accept，槽位耗尽不消费连接。成功/晚到/失败的token都由该scope持有；未发布子流
+abort，已发布流默认优雅关闭。与主动连接抽取共用lease scope和发布逻辑，保持同一
+读写/配置/关闭策略。关闭listener取消等待调用及未领取子项，已接受流仍独立工作。
+
+最初10项用例以未实现方法真实red，exit1、15s：TEMP/diplay-tcp-listener-red.log。
+实现后与既有流/UDP/命令队列59项通过，10s：diplay-tcp-listener-green.log。
+补运行中accept关闭/端口复用用例；显式端口元数据校验先red，6s：
+diplay-tcp-listener-port-red.log，修复后12项TCP监听器与其他定向测试共61项通过，
+7s、exit0：diplay-tcp-listener-focused.log。覆盖资源槽预留、超时/中断/关闭竞态、
+晚到子流回收、元数据/OOM失败、监听器关闭后子流可用及scope计数归零。
+
+Android模拟器13/13，30s、exit0：diplay-tcp-listener-connected.log。新增公共bind/
+accept用例经runner/JNI/lwIP走真实SYN/SYN-ACK/带数据ACK，验证动态端口/双方端点、
+关闭listener后已接受流read/write、默认FIN及scope归零。其余TCP/UDP/JNI用例回归。
+
+最终九项Android CI exit0，7m28s、250任务44执行：diplay-tcp-listener-ci.log。
+shared/common单元任务重新执行，home为UP-TO-DATE；核对XML共3369项（shared1785/
+common1578/home6）零失败/错误/跳过，不将home旧结果记作本轮执行。定向类计数61项。
+最终API28 x86_64模拟器13/13，15s、exit0：diplay-tcp-listener-final-connected.log，
+XML零失败/错误/跳过；debug.checkjni=1，测试进程8171确认already on。
+APK四ABI/16KiB/NX/许可证与源摘要检查通过，SHA-256：
+93bf0ccf3b7fe0081bcfbe7dcf19b8ffdac9fde423bbd3887a10f9a422ddf7a8。
+C/JNI未修改，未重跑宿主49项，不把此前结果当作本轮重新执行。public tree及staged
+diff检查通过。未取得独立评审完成结果，不记作独立评审通过。
+
+仍缺完整SessionNetwork（包括reuseAddress策略及隔离原型echo服务）、两后端参数化
+合同、全部分配/异常/竞态矩阵、独立kernel peer对新端点接口的验证、真实NCM/iPhone/
+ARM及性能长稳。保持显式原型入口，未迁移生产业务；G2/G3及整体目标仍未完成。

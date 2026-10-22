@@ -2,7 +2,8 @@
 
 `LwipTcpCore`把[原始TCP桥](tcp-jni.md)的数组和状态码转换为宿主命令可以调用的
 非阻塞接口，`NativePrototypeCore`同时实现UDP/TCP核心接口。全部调用仍在创建线程，
-不自行等待、启动线程或回调Java；已有[显式公共TCP主动连接适配](tcp-adapter.md)，
+不自行等待、启动线程或回调Java；已有[显式公共TCP主动连接适配](tcp-adapter.md)与
+[监听适配](tcp-listener-adapter.md)，tcpLocalAddress向绑定工厂提供防御复制的本地IPv6，
 生产SessionNetwork与后端选择尚未接入。
 
 | 原始结果 | 宿主接口语义 |

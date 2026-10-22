@@ -89,6 +89,7 @@ internal class NativePrototypeCore private constructor(private val clockMillis: 
     override fun udpClose(token: Long) = nativeCall {
         supply(); checkResult(LwipNativeBindings.udpClose(handle, token))
     }
+    override val tcpLocalAddress: ByteArray get() { checkOwner(); return address.copyOf() }
     override fun tcpListen(port: Int, backlog: Int): LwipTcpCore.Listener = nativeCall {
         require(port in 0..65535 && backlog in 1..32)
         supply()

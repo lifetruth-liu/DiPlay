@@ -158,6 +158,7 @@ class LwipTcpStreamTest {
         override fun close() { frames.offer(ByteArray(14)) }
     }
     private inner class Core : LwipTcpCore {
+        override val tcpLocalAddress: ByteArray get() { owner(); return ip.copyOf() }
         lateinit var owner: Thread
         val tokens = ConcurrentHashMap.newKeySet<Long>()
         val handshake = AtomicBoolean(true); val writeBlocked = AtomicBoolean(); val eof = AtomicBoolean()
