@@ -1469,3 +1469,23 @@ Linux ASan/UBSan/池检查及默认LSan52/52、9.09s，注入单项3.92s：
 仅R01的UDP发送子集，未遍历上下文/绑定libc分配、JNI异常、未知邻居排队及全部
 TCP/重组分配路径；并发、独立安全评审、完整进程峰值、真机及性能长稳仍缺。
 生产后端未切换，G2/G3与整体目标保持未完成。
+
+### UDP绑定逐点分配失败与已有队列保留
+
+测试专用frame_allocation_tests扩展calloc链接包装，无产品钩子。首次绑定创建
+接收池路径动态计数3点，已有池路径2点；基线调用断言实际calloc命中2/1次，不能
+因工具链跳过包装而只测PCB分配。每个点依次返回NULL后须RESOURCE_LIMIT，预置
+非零的handle/actual_port清零，heap、UDP PCB和全部MEMP pool使用量回到原基线。
+
+同一核心的固定47000端口必须可立即重绑、发送并关闭。已有池路径在注入前通过
+真实帧预排入原端点数据，失败后核对内容、来源和长度，原端点继续可发送；新端点
+关闭不误释放仍共享的池。普通MinGW与Linux sanitizer均确认3/2点，既有UDP发送
+280点注入同时回归。测试/构建/文档以外无代码修改，vendor摘要及ABI不变。
+
+最终Windows53/53、1.31s，单项0.02s：TEMP/diplay-bind-allocation-queue-host.log。
+Linux ASan/UBSan/池检查及默认LSan53/53、9.33s，单项0.08s：
+/tmp/diplay-bind-allocation-queue-sanitize.log。完整九项CI通过，日志：
+TEMP/diplay-bind-allocation-queue-ci.log；三个单元任务UP-TO-DATE，不记重新执行。
+public tree及staged diff检查通过。本轮未重新运行JNI/设备测试，不将宿主矩阵当作
+Android libc、JNI或实际NCM/iPhone证据。上下文分配、更多TCP/接收/并发故障、独立
+安全评审、进程峰值及真机/长稳仍缺，R01与G2/G3及整体目标均未标完成。

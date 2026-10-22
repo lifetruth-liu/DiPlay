@@ -124,3 +124,17 @@ RESOURCE_LIMIT、核心仍正常，已输出片不能包含末片；lwIP heap和
 这是R01的UDP发送子集：未覆盖上下文/绑定的libc malloc/calloc、JNI复制异常、未知
 邻居排队、所有TCP/接收重组分配点、并发取消或实际设备。不将280次注入称为完整
 R01验收，也不将宿主52项作为新一轮JNI/真机证据。产品源代码、vendor摘要和ABI不变。
+
+## UDP绑定分配失败与共享池保留
+
+同一测试目标增加calloc链接包装，仅在绑定调用期间启用。覆盖首次绑定创建全局
+接收池（端点calloc、UDP PCB pool、队列池calloc，共3点）及已有池绑定（2点）。
+基线调用额外断言calloc实际命中2/1次，避免工具链绕过libc包装后失去覆盖而假绿。
+
+每个失败须RESOURCE_LIMIT，handle/actual_port从预置非零值清零；heap、UDP PCB及
+所有MEMP pool回到原基线。随后同一核心、同一固定47000端口可绑定并发送。已有池
+模式预先排入一个真实UDP帧，失败后仍可完整接收原数据，原端点继续发送；新端点
+关闭不释放仍被原端点拥有的池。普通及sanitizer构建均遍历3/2个失败位置。
+
+最终原生53/53及完整Android CI通过。该子集未在Android执行，未注入上下文malloc/
+calloc、JNI或所有并发路径，不宣称完整R01或真机门槛完成；产品源与ABI未变化。

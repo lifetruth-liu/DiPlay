@@ -27,8 +27,9 @@
     } while (0)
 #define FRAME_MAX 1514
 #ifdef DP_WRAP_ALLOCATION
-static struct { size_t calls, fail_at; int armed; } allocation_fault;
+static struct { size_t calls, fail_at, calloc_calls; int armed; } allocation_fault;
 void *__real_mem_malloc(mem_size_t size);
+void *__real_calloc(size_t count, size_t size);
 #if MEMP_OVERFLOW_CHECK
 void *__real_memp_malloc_fn(memp_t type, const char *file, int line);
 #else
@@ -39,6 +40,10 @@ static int reject_allocation(void) {
 }
 void *__wrap_mem_malloc(mem_size_t size) {
     return reject_allocation() ? NULL : __real_mem_malloc(size);
+}
+void *__wrap_calloc(size_t count, size_t size) {
+    if (allocation_fault.armed) allocation_fault.calloc_calls++;
+    return reject_allocation() ? NULL : __real_calloc(count, size);
 }
 #if MEMP_OVERFLOW_CHECK
 void *__wrap_memp_malloc_fn(memp_t type, const char *file, int line) {
@@ -1548,6 +1553,75 @@ static void test_udp_allocation_failures(void) {
                (unsigned long)lengths[vector], (unsigned long)allocations);
     }
 }
+static void test_udp_bind_allocation_failures(void) {
+    const uint8_t payload[] = {1, 2, 3};
+    for (unsigned shared_pool = 0; shared_pool < 2; ++shared_pool) {
+        size_t allocations = 0;
+        for (size_t fail_at = 0; fail_at <= allocations; ++fail_at) {
+            struct fixture f;
+            ready_core(&f);
+            uint64_t seed = 0; uint16_t seed_port = 0;
+            if (shared_pool) {
+                CHECK(dp_udp_bind(f.core, 47001, &seed, &seed_port) == DP_OK);
+                uint8_t frame[65];
+                ethernet(frame, local_mac);
+                uint8_t *udp = ipv6(frame, local_ip, 17, 11);
+                w16(udp, 50000); w16(udp + 2, seed_port); w16(udp + 4, 11);
+                memcpy(udp + 8, payload, sizeof(payload));
+                w16(udp + 6, checksum(frame + 14, udp, 11, 17));
+                CHECK(dp_core_input(f.core, frame, sizeof(frame)) == DP_OK);
+            }
+            dp_stats before, after;
+            CHECK(dp_core_get_stats(f.core, &before) == DP_OK);
+            uint32_t pool_usage[MEMP_MAX];
+            for (unsigned pool = 0; pool < MEMP_MAX; ++pool) pool_usage[pool] = lwip_stats.memp[pool]->used;
+            uint64_t handle = UINT64_MAX; uint16_t port = UINT16_MAX;
+            allocation_fault.calloc_calls = 0;
+            allocation_fault.calls = 0; allocation_fault.fail_at = fail_at; allocation_fault.armed = 1;
+            dp_result result = dp_udp_bind(f.core, 47000, &handle, &port);
+            allocation_fault.armed = 0;
+            if (!fail_at) {
+                CHECK(result == DP_OK && handle && port == 47000);
+                /* Detect a toolchain that bypasses the libc wrapper rather than silently losing coverage. */
+                CHECK(allocation_fault.calloc_calls == (shared_pool ? 1u : 2u));
+                allocations = allocation_fault.calls;
+                CHECK(allocations > 0 && allocations <= 16);
+                CHECK(dp_udp_close(f.core, handle) == DP_OK);
+            } else {
+                CHECK(result == DP_RESOURCE_LIMIT && allocation_fault.calls == fail_at);
+                CHECK(handle == 0 && port == 0);
+            }
+            CHECK(dp_core_get_stats(f.core, &after) == DP_OK);
+            CHECK(after.failure == DP_OK && after.heap_used == before.heap_used && after.udp_pcbs == before.udp_pcbs);
+            for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == pool_usage[pool]);
+            if (shared_pool) {
+                uint8_t received[3]; dp_udp_datagram info;
+                CHECK(dp_udp_receive(f.core, seed, received, sizeof(received), &info) == DP_OK);
+                CHECK(info.original_length == sizeof(payload) && info.copied_length == sizeof(payload));
+                CHECK(info.source_port == 50000 && !memcmp(info.source, peer_ip, 16));
+                CHECK(!memcmp(received, payload, sizeof(payload)));
+            }
+            /* Same fixed port remains available after every failed allocation. */
+            CHECK(dp_udp_bind(f.core, 47000, &handle, &port) == DP_OK && handle && port == 47000);
+            f.count = 0;
+            CHECK(dp_udp_send(f.core, handle, peer_ip, 50000, payload, sizeof(payload)) == DP_OK);
+            check_complete_udp_output(&f, port, payload, sizeof(payload));
+            CHECK(dp_udp_close(f.core, handle) == DP_OK);
+            if (shared_pool) {
+                f.count = 0;
+                CHECK(dp_udp_send(f.core, seed, peer_ip, 50000, payload, sizeof(payload)) == DP_OK);
+                check_complete_udp_output(&f, seed_port, payload, sizeof(payload));
+            }
+            CHECK(dp_core_get_stats(f.core, &after) == DP_OK);
+            CHECK(after.heap_used == before.heap_used && after.udp_pcbs == before.udp_pcbs);
+            for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == pool_usage[pool]);
+            if (shared_pool) CHECK(dp_udp_close(f.core, seed) == DP_OK);
+            close_core(&f);
+        }
+        printf("UDP bind shared_pool=%u traversed %lu allocation failure points\n",
+               shared_pool, (unsigned long)allocations);
+    }
+}
 #endif
 static void test_tx_failed(void) {
     struct fixture f;
@@ -1674,6 +1748,8 @@ int main(int argc, char **argv) {
 #ifdef DP_WRAP_ALLOCATION
     else if (!strcmp(argv[1], "udp_allocation_failures"))
         test_udp_allocation_failures();
+    else if (!strcmp(argv[1], "udp_bind_allocation_failures"))
+        test_udp_bind_allocation_failures();
 #endif
     else if (!strcmp(argv[1], "api"))
         test_api();
