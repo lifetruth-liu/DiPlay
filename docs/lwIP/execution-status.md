@@ -649,3 +649,35 @@ JNI兼容回归5/5，零失败/错误/跳过，10s、exit0：diplay-udp-endpoint
 未宣称全部65527字节边界、公共阻塞/deadline合同、按媒体通道的过期丢弃或实际
 NCM/iPhone/ARM已验收。仍需JNI命令桥、公共适配、TCP及会话集成，G2/G3未通过。
 公开树检查通过；本批未取得独立审查完成结果，不记作独立评审通过。
+
+### P3 UDP JNI桥与ABI 2（2026-10-22）
+
+基于84dbb2f2。新增udp_jni.c及C私有prototype_internal.h，prototype上下文添加
+65527字节复制区及UDP token转发API；不把dp_core指针传给Java。上下文创建线程和
+generation验证后才能借用复制区；每次调用仅使用Region复制，不保留Java数组地址。
+总prototype对象含复制区静态限制≤256KiB，原有预算测试仍通过。
+接口形状、异常路径和未完成范围见[UDP JNI桥](udp-jni.md)。
+
+新设备测试在未实现JNI时真实red：udpBind UnsatisfiedLinkError，原有5项通过、
+新增1项失败，exit1：TEMP/diplay-udp-jni-red-runtime.log。实现后6项green。
+随后新增ABI2断言，旧返回1再次red（expected2/actual1），exit1：diplay-udp-jni-abi-red.log。
+同步Kotlin加载检查与JNI abiVersion返回2；native-only核心C ABI仍为1。
+
+设备回归真实帧UDP接收/发送、源地址/端口、原始和复制长度、空包、子范围发送、
+溢出offset/负长度、无效数组不消费包、target/source同对象拒绝、错误线程、类型
+token误用、重复关闭、槽位复用和上下文重建。Java输入帧随后清零不改变接管数据。
+新增宿主UDP上下文生命周期覆盖带未关闭端点销毁、旧token拒绝和上下文失败后释放。
+
+最终Linux ASan/UBSan/pool guards、Windows MinGW各33/33；
+WSL /tmp/diplay-udp-jni-host-final.log、TEMP/diplay-udp-jni-windows-final.log。
+完整九项Android CI exit0，8m30s，250任务52执行：diplay-udp-jni-ci.log。
+最终ABI2 connected测试6/6，零失败/错误/跳过，13s、exit0：diplay-udp-jni-final-connected.log。
+任务自有API28 x86_64模拟器debug.checkjni=1，测试进程5539日志确认
+Not late-enabling -Xcheck:jni (already on)。AVD路径DeviceMonitor仍有bad sub-command
+告警，测试正常完成并核对XML。没有以此宣称OOM异常注入或全部JNI边界验收已完成。
+
+最终APK四ABI/ELF与ZIP 16KiB/NX/许可证与原始源码+精确补丁检查通过，SHA-256：
+9aeaab072b322d6471fe1f3053bc1e68d05983d2ee6ad109cd74013894291afe。
+现有native方法R8 keep规则覆盖新方法。公开树及diff检查通过。
+仍缺公共UdpEndpoint、核心命令/完成队列、deadline/取消、TCP和会话选择；G2/G3及
+实际NCM/iPhone/ARM设备门槛不变，整体目标尚未完成。

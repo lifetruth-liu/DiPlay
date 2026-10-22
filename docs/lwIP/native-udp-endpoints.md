@@ -1,6 +1,6 @@
 # P3 native UDP端点
 
-当前为 `diplay_endpoints.h` 的核心线程C API，尚未接入端点JNI或公共Kotlin
+当前为 `diplay_endpoints.h` 的核心线程C API，已添加[UDP JNI桥](udp-jni.md)，尚未接入公共Kotlin
 `UdpEndpoint`。生产会话选择不变，G2/G3不据这批宿主结果通过。
 
 - bind在虚拟IPv6地址上分配真实UDP PCB，绑定本会话netif；port=0返回栈实际端口，
@@ -28,6 +28,6 @@
 销毁和新core零资源。`udp_endpoint_fragments` 覆盖32KiB乱序IPv6分片输入、完整接收、
 分片输出重组、UDP端口、字节内容与校验和。两项也在API28 x86_64模拟器原生运行。
 
-下一步是端点JNI及核心命令/完成队列、阻塞调用的deadline/取消映射和TCP端点；
+下一步是核心命令/完成队列、公共接口、阻塞调用的deadline/取消映射和TCP端点；
 仍需真实NCM/iPhone、ARM、全部公共合同和会话级测试，不能把本C API测试当作已完成
 CarPlay集成或公共两后端契约。

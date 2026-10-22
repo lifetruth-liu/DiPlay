@@ -24,6 +24,28 @@ static uint64_t create(void) {
     CHECK(handle && handle < INT64_MAX);
     return handle;
 }
+static void udp_lifecycle(void) {
+    uint64_t context = create(), endpoint = 0;
+    uint16_t port = 0;
+    CHECK(dp_proto_udp_bind(context, 0, &endpoint, &port) == DP_OK);
+    CHECK(endpoint && port);
+    dp_udp_datagram info;
+    CHECK(dp_proto_udp_receive(context, endpoint, NULL, 0, &info) == DP_WOULD_BLOCK);
+    CHECK(dp_proto_udp_close(context, context) == DP_INVALID_ARGUMENT);
+    CHECK(dp_proto_udp_close(context, endpoint) == DP_OK);
+    uint64_t stale_endpoint = endpoint, stale_context = context;
+    CHECK(dp_proto_udp_bind(context, port, &endpoint, &port) == DP_OK && endpoint != stale_endpoint);
+    CHECK(dp_proto_udp_close(context, stale_endpoint) == DP_INVALID_ARGUMENT);
+    CHECK(dp_proto_destroy(&context) == DP_OK);
+    context = create();
+    CHECK(dp_proto_udp_close(context, endpoint) == DP_INVALID_ARGUMENT);
+    CHECK(dp_proto_udp_bind(stale_context, 0, &endpoint, &port) == DP_INVALID_ARGUMENT);
+    CHECK(endpoint == 0 && port == 0);
+    CHECK(dp_proto_udp_bind(context, 0, &endpoint, &port) == DP_OK);
+    CHECK(dp_proto_supply(context, 99, NULL, 0) == DP_CLOCK_REVERSED);
+    CHECK(dp_proto_udp_close(context, endpoint) == DP_OK); /* Cleanup after context failure. */
+    CHECK(dp_proto_destroy(&context) == DP_OK);
+}
 static void lifecycle(void) {
     uint64_t previous = 0;
     for (int i = 0; i < 100; i++) {
@@ -41,6 +63,7 @@ static void lifecycle(void) {
         CHECK(dp_proto_destroy(&h) == DP_OK && h == 0);
         CHECK(dp_proto_destroy(&h) == DP_OK);
     }
+    udp_lifecycle();
 }
 static void queue(void) {
     uint64_t h = create();

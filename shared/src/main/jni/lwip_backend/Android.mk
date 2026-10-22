@@ -9,7 +9,7 @@ include $(BUILD_STATIC_LIBRARY)
 
 include $(CLEAR_VARS)
 LOCAL_MODULE := diplay_lwip
-LOCAL_SRC_FILES := src/core.c src/netif.c src/prototype.c src/prototype_echo.c src/prototype_jni.c src/endpoint_registry.c src/udp_endpoint.c
+LOCAL_SRC_FILES := src/core.c src/netif.c src/prototype.c src/prototype_echo.c src/prototype_jni.c src/endpoint_registry.c src/udp_endpoint.c src/udp_jni.c
 LOCAL_C_INCLUDES := $(LOCAL_PATH)/include $(LOCAL_PATH)/src
 LOCAL_CFLAGS := -std=c11 -O2 -Wall -Wextra -Werror -fvisibility=hidden
 LOCAL_STATIC_LIBRARIES := diplay_lwip_stack

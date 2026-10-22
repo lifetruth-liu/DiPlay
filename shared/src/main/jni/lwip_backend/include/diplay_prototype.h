@@ -1,6 +1,7 @@
 #ifndef DIPLAY_PROTOTYPE_H
 #define DIPLAY_PROTOTYPE_H
 #include "diplay_lwip.h"
+#include "diplay_endpoints.h"
 #define DP_PROTO_ENTROPY_BYTES 1024
 #define DP_PROTO_TX_FRAMES 128
 typedef struct {
@@ -27,6 +28,11 @@ DP_API dp_result dp_proto_take_output(uint64_t handle, uint8_t *target, size_t c
 DP_API dp_result dp_proto_get_stats(uint64_t handle, dp_proto_stats *stats);
 DP_API int32_t dp_proto_entropy_remaining(uint64_t handle);
 DP_API dp_result dp_proto_destroy(uint64_t *handle);
+DP_API dp_result dp_proto_udp_bind(uint64_t context, uint16_t port, uint64_t *endpoint, uint16_t *actual);
+DP_API dp_result dp_proto_udp_send(uint64_t context, uint64_t endpoint, const uint8_t destination[16], uint16_t port,
+                                   const uint8_t *payload, size_t length);
+DP_API dp_result dp_proto_udp_receive(uint64_t context, uint64_t endpoint, uint8_t *target, size_t capacity, dp_udp_datagram *info);
+DP_API dp_result dp_proto_udp_close(uint64_t context, uint64_t endpoint);
 #ifdef DP_PROTO_TESTING
 dp_tx_result dp_proto_test_emit(uint64_t handle, const uint8_t *bytes, size_t length);
 uint32_t dp_proto_test_random(uint64_t handle);

@@ -4,7 +4,7 @@ package com.shilapi.xcertplay.network.backend.lwip
 internal object LwipNativeBindings {
     private val loaded by lazy {
         System.loadLibrary("diplay_lwip")
-        if (abiVersion() != 1) throw UnsatisfiedLinkError("Unsupported lwIP prototype ABI")
+        if (abiVersion() != 2) throw UnsatisfiedLinkError("Unsupported lwIP context/UDP ABI")
     }
     fun ensureLoaded() { loaded }
     external fun abiVersion(): Int
@@ -19,4 +19,9 @@ internal object LwipNativeBindings {
     external fun stats(handle: Long): LongArray
     external fun entropyRemaining(handle: Long): Int
     external fun destroy(handle: Long): Int
+    /** Bind result is [endpoint token, actual port]; receive metadata is [source port, original, copied]. */
+    external fun udpBind(context: Long, port: Int, result: LongArray): Int
+    external fun udpSend(context: Long, endpoint: Long, destination: ByteArray, port: Int, payload: ByteArray, offset: Int, length: Int): Int
+    external fun udpReceive(context: Long, endpoint: Long, target: ByteArray, source: ByteArray, metadata: IntArray): Int
+    external fun udpClose(context: Long, endpoint: Long): Int
 }

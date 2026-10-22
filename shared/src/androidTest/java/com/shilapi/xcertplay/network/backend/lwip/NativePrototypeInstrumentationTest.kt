@@ -13,6 +13,92 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class NativePrototypeInstrumentationTest {
+    @Test fun nativeUdpBindingsPreserveDatagramsAndRejectStaleTokens() {
+        LwipNativeBindings.ensureLoaded()
+        assertEquals(2, LwipNativeBindings.abiVersion())
+        val entropy = ByteArray(1024).also { SecureRandom().nextBytes(it) }
+        val context = LwipNativeBindings.create(mac, ip, 1500, 100, entropy)
+        assertTrue(context > 0)
+        var lastEndpoint = 0L
+        try {
+            val bound = LongArray(2)
+            assertEquals(-1, LwipNativeBindings.udpBind(context, 0, LongArray(1)))
+            assertEquals(0, LwipNativeBindings.udpBind(context, 0, bound))
+            val endpoint = bound[0]
+            val port = bound[1].toInt()
+            assertTrue(endpoint > 0 && endpoint != context && port in 1..65535)
+            assertEquals(-10, LwipNativeBindings.udpBind(context, port, LongArray(2)))
+            val source = ByteArray(16)
+            val metadata = IntArray(3)
+            assertEquals(-11, LwipNativeBindings.udpReceive(context, endpoint, ByteArray(0), source, metadata))
+            assertEquals(0, LwipNativeBindings.setReady(context, true))
+            repeat(16) { n ->
+                assertEquals(0, LwipNativeBindings.supply(context, 350L + n * 250, null))
+                assertEquals(0, LwipNativeBindings.poll(context))
+            }
+            fun drainRaw(): List<ByteArray> {
+                val frames = mutableListOf<ByteArray>()
+                val bytes = ByteArray(1514)
+                while (true) {
+                    val length = LwipNativeBindings.takeOutput(context, bytes)
+                    assertTrue(length >= 0)
+                    if (length == 0) return frames
+                    frames.add(bytes.copyOf(length))
+                }
+            }
+            drainRaw()
+            val solicitation = packet(58, 32)
+            solicitation[21] = 255.toByte(); solicitation[54] = 135.toByte()
+            ip.copyInto(solicitation, 62); solicitation[78] = 1; solicitation[79] = 1
+            peerMac.copyInto(solicitation, 80); checksum(solicitation, 58, 56)
+            assertEquals(0, LwipNativeBindings.input(context, solicitation))
+            drainRaw()
+            fun incoming(payload: ByteArray) {
+                val frame = packet(17, 8 + payload.size)
+                write16(frame, 54, 50000); write16(frame, 56, port); write16(frame, 58, 8 + payload.size)
+                payload.copyInto(frame, 62); checksum(frame, 17, 60)
+                assertEquals(0, LwipNativeBindings.input(context, frame))
+                frame.fill(0)
+            }
+            incoming("hello".toByteArray())
+            assertEquals(-1, LwipNativeBindings.udpReceive(context, endpoint, ByteArray(2), ByteArray(15), metadata))
+            assertEquals(-1, LwipNativeBindings.udpReceive(context, endpoint, ByteArray(2), source, IntArray(2)))
+            assertEquals(-1, LwipNativeBindings.udpReceive(context, endpoint, source, source, metadata))
+            val target = ByteArray(2)
+            assertEquals(0, LwipNativeBindings.udpReceive(context, endpoint, target, source, metadata))
+            assertArrayEquals("he".toByteArray(), target)
+            assertArrayEquals(intArrayOf(50000, 5, 2), metadata)
+            val peer = ip.copyOf().also { it[15] = 2 }
+            assertArrayEquals(peer, source)
+            incoming(byteArrayOf())
+            assertEquals(0, LwipNativeBindings.udpReceive(context, endpoint, ByteArray(0), source, metadata))
+            assertArrayEquals(intArrayOf(50000, 0, 0), metadata)
+            val payload = byteArrayOf(99, 111, 107, 88)
+            assertEquals(-1, LwipNativeBindings.udpSend(context, endpoint, peer, 50000, payload, Int.MAX_VALUE, 2))
+            assertEquals(-1, LwipNativeBindings.udpSend(context, endpoint, peer, 50000, payload, 0, -1))
+            assertEquals(0, LwipNativeBindings.udpSend(context, endpoint, peer, 50000, payload, 1, 2))
+            val sent = drainRaw().first { it[20] == 17.toByte() }
+            assertEquals(port, read16(sent, 54))
+            assertArrayEquals(byteArrayOf(111, 107), sent.copyOfRange(62, sent.size))
+            val wrongThread = AtomicInteger()
+            val worker = Thread { wrongThread.set(LwipNativeBindings.udpClose(context, endpoint)) }
+            worker.start(); worker.join(2000)
+            assertFalse(worker.isAlive); assertEquals(-3, wrongThread.get())
+            assertEquals(-1, LwipNativeBindings.udpClose(context, context))
+            assertEquals(0, LwipNativeBindings.udpClose(context, endpoint))
+            assertEquals(-1, LwipNativeBindings.udpClose(context, endpoint))
+            assertEquals(0, LwipNativeBindings.udpBind(context, port, bound))
+            lastEndpoint = bound[0]
+            assertNotEquals(endpoint, lastEndpoint)
+            assertEquals(-1, LwipNativeBindings.udpReceive(context, endpoint, target, source, metadata))
+        } finally { assertEquals(0, LwipNativeBindings.destroy(context)) }
+        val next = LwipNativeBindings.create(mac, ip, 1500, 100, entropy)
+        assertTrue(next > 0)
+        try {
+            assertEquals(-1, LwipNativeBindings.udpClose(next, lastEndpoint))
+            assertEquals(-1, LwipNativeBindings.udpBind(context, 0, LongArray(2)))
+        } finally { assertEquals(0, LwipNativeBindings.destroy(next)) }
+    }
     @Test fun realIpv6InputReachesNativeUdpAndTcpEchoWithoutKernelSockets() {
         var now = 100L
         NativePrototypeCore.create(mac, ip, 1500) { now }.use { core ->

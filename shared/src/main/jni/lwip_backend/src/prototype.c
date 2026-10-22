@@ -1,4 +1,5 @@
 #include "diplay_prototype.h"
+#include "prototype_internal.h"
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,10 +15,12 @@ struct prototype {
     uint64_t handle, now, rejected;
     uint32_t entropy[DP_PROTO_ENTROPY_BYTES / 4], entropy_at, entropy_count;
     struct frame frames[DP_PROTO_TX_FRAMES];
+    uint8_t udp_scratch[DP_UDP_MAX_PAYLOAD];
     uint32_t head, count;
     int echo_started;
     dp_result failure;
 };
+_Static_assert(sizeof(struct prototype) <= 256u * 1024u, "prototype context budget exceeded");
 static _Thread_local struct prototype *owned;
 static atomic_uint_least32_t generation;
 int dp_prototype_echo_start(void *unused);
@@ -234,6 +237,37 @@ dp_result dp_proto_destroy(uint64_t *handle) {
     erase(p, sizeof(*p));
     free(p);
     return DP_OK;
+}
+dp_result dp_proto_udp_buffer(uint64_t h, uint8_t **bytes) {
+    if (!bytes) return DP_INVALID_ARGUMENT;
+    *bytes = NULL;
+    struct prototype *p;
+    dp_result s = lookup(h, &p, 0);
+    if (s == DP_OK) *bytes = p->udp_scratch;
+    return s;
+}
+dp_result dp_proto_udp_bind(uint64_t h, uint16_t port, uint64_t *endpoint, uint16_t *actual) {
+    if (endpoint) *endpoint = 0;
+    if (actual) *actual = 0;
+    struct prototype *p;
+    dp_result s = lookup(h, &p, 0);
+    return s == DP_OK ? finish(p, dp_udp_bind(p->core, port, endpoint, actual)) : s;
+}
+dp_result dp_proto_udp_send(uint64_t h, uint64_t endpoint, const uint8_t destination[16], uint16_t port,
+                            const uint8_t *payload, size_t length) {
+    struct prototype *p;
+    dp_result s = lookup(h, &p, 0);
+    return s == DP_OK ? finish(p, dp_udp_send(p->core, endpoint, destination, port, payload, length)) : s;
+}
+dp_result dp_proto_udp_receive(uint64_t h, uint64_t endpoint, uint8_t *target, size_t capacity, dp_udp_datagram *info) {
+    struct prototype *p;
+    dp_result s = lookup(h, &p, 0);
+    return s == DP_OK ? finish(p, dp_udp_receive(p->core, endpoint, target, capacity, info)) : s;
+}
+dp_result dp_proto_udp_close(uint64_t h, uint64_t endpoint) {
+    struct prototype *p;
+    dp_result s = lookup(h, &p, 1);
+    return s == DP_OK ? dp_udp_close(p->core, endpoint) : s;
 }
 int32_t dp_proto_entropy_remaining(uint64_t h) {
     struct prototype *p;

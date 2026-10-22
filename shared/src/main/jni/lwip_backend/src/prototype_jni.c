@@ -33,7 +33,7 @@ static dp_result copy_entropy(JNIEnv *env, jbyteArray source, uint8_t *target, s
 }
 JNIEXPORT jint JNICALL JNI_NAME(abiVersion)(JNIEnv *env, jobject self) {
     NO_CONTEXT;
-    return 1;
+    return 2;
 }
 JNIEXPORT jlong JNICALL JNI_NAME(create)(JNIEnv *env, jobject self, jbyteArray mac_array,
                                          jbyteArray ip_array, jint mtu, jlong now,
