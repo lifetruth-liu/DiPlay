@@ -165,6 +165,11 @@ class NativePrototypeInstrumentationTest {
         val prototype = LwipPrototype.nativeEcho(port, mac, ip, 1500)
         prototype.use {
             it.start()
+            val stats = it.executeCommand(deadlineMillis = it.commandClock.nowMillis() + 2_000) { core ->
+                CoreAttempt.Ready((core as NativePrototypeCore).stats())
+            }
+            assertEquals(1, stats.tcpListeners)
+            assertEquals(1, stats.udpEndpoints)
             val frame = sent.poll(5, TimeUnit.SECONDS)
             assertNotNull("native timer output must reach the port", frame)
             assertEquals(0x86, frame!![12].toInt() and 255)

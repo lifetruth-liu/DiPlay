@@ -2,11 +2,17 @@ package com.shilapi.xcertplay.network.backend.lwip
 
 import com.shilapi.xcertplay.network.backend.BackendFailure
 import com.shilapi.xcertplay.network.backend.EthernetFramePort
+import com.shilapi.xcertplay.network.backend.MonotonicClock
 import com.shilapi.xcertplay.transport.NcmSendResult
 import java.io.Closeable
 import java.util.ArrayDeque
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+
+internal fun coreCommandClock(): MonotonicClock {
+    val origin = System.nanoTime()
+    return MonotonicClock { TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - origin) }
+}
 
 /**
  * Pull boundary for a bounded native owner, not a callback from inside lwIP into Java.
@@ -31,6 +37,7 @@ interface LwipPrototypeCore : Closeable {
 class LwipPrototype(
     private val port: EthernetFramePort,
     private val closeTimeoutMillis: Long = CLOSE_TIMEOUT_MILLIS,
+    internal val commandClock: MonotonicClock = coreCommandClock(),
     private val coreFactory: () -> LwipPrototypeCore,
 ) : Closeable {
     init { require(closeTimeoutMillis in 1..CLOSE_TIMEOUT_MILLIS) }
@@ -40,9 +47,11 @@ class LwipPrototype(
         val rxQueuedBytes: Int, val rxQueuedFrames: Int,
         val txQueuedBytes: Int, val txQueuedFrames: Int,
         val rxDropped: Long, val txSent: Long, val txNotReady: Long,
+        val commandCount: Int = 0, val commandBytes: Int = 0,
     )
 
     private val signal = Object()
+    private val commands = CoreCommandQueue<LwipPrototypeCore>(commandClock, { synchronized(signal) { wake() } })
     private val prepared = CountDownLatch(1)
     private val rx = ArrayDeque<ByteArray>()
     private val tx = ArrayDeque<ByteArray>()
@@ -64,7 +73,19 @@ class LwipPrototype(
     private var closeThread: Thread? = null
 
     fun snapshot(): Snapshot = synchronized(signal) {
-        Snapshot(state, failure, rxBytes, rx.size, txBytes, tx.size, rxDropped, txSent, txNotReady)
+        val commandState = commands.snapshot()
+        Snapshot(state, failure, rxBytes, rx.size, txBytes, tx.size, rxDropped, txSent, txNotReady,
+            commandState.commands, commandState.bytes)
+    }
+
+    internal fun <T> executeCommand(retainedBytes: Int = 0, deadlineMillis: Long = 0,
+                                   discard: (T) -> Unit = {}, operation: (LwipPrototypeCore) -> CoreAttempt<T>): T {
+        synchronized(signal) {
+            if (Thread.currentThread() === coreThread) throw BackendFailure(BackendFailure.Kind.INTERNAL)
+            failure?.let { throw it }
+            if (state != State.LISTENING && state != State.LINK_ACTIVE) throw BackendFailure(BackendFailure.Kind.CANCELLED)
+        }
+        return commands.call(retainedBytes, deadlineMillis, discard, operation)
     }
 
     fun start() {
@@ -105,6 +126,7 @@ class LwipPrototype(
             if (stopping) return
             stopping = true
             state = State.STOPPING
+            commands.close(failure ?: BackendFailure(BackendFailure.Kind.CANCELLED))
             rx.clear(); tx.clear(); rxBytes = 0; txBytes = 0
             wake()
             prepared.countDown()
@@ -169,30 +191,39 @@ class LwipPrototype(
             prepared.countDown()
             var seenReadiness = 0L
             var retryAt = Long.MAX_VALUE
+            var timerAt = System.nanoTime()
             while (!stopping) {
                 val before = synchronized(signal) { revision }
+                var madeProgress = System.nanoTime() >= timerAt
                 val readiness = synchronized(signal) {
                     Triple(readinessRevision, usbReady, linkMustPause).also { linkMustPause = false }
                 }
                 // A later success may coalesce with NotReady, but must not erase the DAD reset.
-                if (readiness.third) core.setLinkReady(false)
+                if (readiness.third) { core.setLinkReady(false); madeProgress = true }
                 if (readiness.first != seenReadiness) {
                     seenReadiness = readiness.first
                     core.setLinkReady(readiness.second)
                     retryAt = if (readiness.second) Long.MAX_VALUE else System.nanoTime() + RETRY_NANOS
+                    madeProgress = true
                 }
                 if (System.nanoTime() >= retryAt) {
                     core.setLinkReady(true)
                     retryAt = Long.MAX_VALUE
+                    madeProgress = true
                 }
                 repeat(BATCH_FRAMES) {
                     val frame = synchronized(signal) {
                         if (stopping) null else rx.pollFirst()?.also { rxBytes -= it.size }
                     }
-                    if (frame != null && !stopping) core.input(frame)
+                    if (frame != null && !stopping) { core.input(frame); madeProgress = true }
                 }
                 if (stopping) break
                 core.poll()
+                if (madeProgress) commands.progress()
+                val commandBatch = commands.runBatch(core)
+                if (commandBatch.completed) commands.progress()
+                val moreCommands = commands.hasReady()
+                if (stopping) break
                 var drained = 0
                 while (drained < BATCH_FRAMES && !stopping && canQueueTx()) {
                     val frame = core.takeOutput() ?: break
@@ -207,11 +238,12 @@ class LwipPrototype(
                 if (drained > 0 && !synchronized(signal) { usbReady }) core.setLinkReady(false)
                 val timeoutMillis = core.nextTimeoutMillis()
                 check(timeoutMillis in 0..MAX_TIMER_MILLIS) { "invalid core timer" }
-                var waitNanos = TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
+                timerAt = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
+                var waitNanos = TimeUnit.MILLISECONDS.toNanos(minOf(timeoutMillis, commands.nextDelayMillis()))
                 if (retryAt != Long.MAX_VALUE) waitNanos = minOf(waitNanos, (retryAt - System.nanoTime()).coerceAtLeast(0))
                 synchronized(signal) {
                     val moreOutput = drained == BATCH_FRAMES && canQueueTx()
-                    if (!stopping && revision == before && rx.isEmpty() && !moreOutput && waitNanos > 0) {
+                    if (!stopping && revision == before && rx.isEmpty() && !moreOutput && !moreCommands && waitNanos > 0) {
                         TimeUnit.NANOSECONDS.timedWait(signal, waitNanos)
                     }
                 }
@@ -279,7 +311,10 @@ class LwipPrototype(
             require(mac.size == 6 && ipv6.size == 16 && mtu in 1280..1500)
             val ownedMac = mac.copyOf()
             val ownedIp = ipv6.copyOf()
-            return LwipPrototype(port) { NativePrototypeCore.create(ownedMac, ownedIp, mtu) }
+            val clock = coreCommandClock()
+            return LwipPrototype(port, commandClock = clock) {
+                NativePrototypeCore.create(ownedMac, ownedIp, mtu, clock::nowMillis)
+            }
         }
 
         const val RX_QUEUE_BYTES = 128 * 1024

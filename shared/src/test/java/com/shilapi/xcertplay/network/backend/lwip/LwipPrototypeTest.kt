@@ -10,10 +10,60 @@ import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import org.junit.Assert.*
 import org.junit.Test
 
 class LwipPrototypeTest {
+    @Test fun commandsRunOnTheExistingCoreThread() {
+        val core = Core(emptyList())
+        val prototype = LwipPrototype(Port()) { core.also { it.owner = Thread.currentThread() } }
+        try {
+            prototype.start()
+            val result = runCatching {
+                prototype.executeCommand(deadlineMillis = prototype.commandClock.nowMillis() + 1_000) {
+                    CoreAttempt.Ready(Thread.currentThread())
+                }
+            }
+            assertTrue("command must be pumped before its deadline: $result", result.isSuccess)
+            assertSame(core.owner, result.getOrThrow())
+            assertEquals(0, prototype.snapshot().commandCount)
+        } finally { prototype.close() }
+    }
+
+    @Test fun inputProgressResumesPendingCommandsAndStopCancelsWaiters() {
+        val port = Port()
+        val core = Core(emptyList())
+        val prototype = LwipPrototype(port) { core.also { it.owner = Thread.currentThread() } }
+        prototype.start()
+        val progress = AtomicBoolean()
+        val attempted = CountDownLatch(1)
+        val result = AtomicReference<Result<Int>>()
+        val caller = Thread {
+            result.set(runCatching { prototype.executeCommand<Int> {
+                attempted.countDown()
+                if (progress.get()) CoreAttempt.Ready(42) else CoreAttempt.Pending
+            } })
+        }.apply { isDaemon = true; start() }
+        try {
+            assertTrue(attempted.await(2, TimeUnit.SECONDS))
+            assertNull(result.get())
+            progress.set(true); port.incoming.put(frame(1))
+            caller.join(2000); assertFalse(caller.isAlive)
+            assertEquals(42, result.get().getOrThrow())
+            val waiting = CountDownLatch(1)
+            val cancelled = AtomicReference<Throwable>()
+            val waiter = Thread {
+                cancelled.set(runCatching { prototype.executeCommand<Int> {
+                    waiting.countDown(); CoreAttempt.Pending
+                } }.exceptionOrNull())
+            }.apply { isDaemon = true; start() }
+            assertTrue(waiting.await(2, TimeUnit.SECONDS))
+            prototype.requestStop()
+            waiter.join(2000); assertFalse(waiter.isAlive)
+            assertEquals(BackendFailure.Kind.CANCELLED, (cancelled.get() as BackendFailure).kind)
+        } finally { prototype.close(); caller.join(2000) }
+    }
     @Test fun preparationDoesNotWaitForUsbAndAllCoreCallsStayOnOneThread() {
         val port = Port().apply { sendGate = CountDownLatch(1) }
         val core = Core(listOf(frame(1)))

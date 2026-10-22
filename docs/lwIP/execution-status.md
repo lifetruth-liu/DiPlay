@@ -681,3 +681,27 @@ Not late-enabling -Xcheck:jni (already on)。AVD路径DeviceMonitor仍有bad sub
 现有native方法R8 keep规则覆盖新方法。公开树及diff检查通过。
 仍缺公共UdpEndpoint、核心命令/完成队列、deadline/取消、TCP和会话选择；G2/G3及
 实际NCM/iPhone/ARM设备门槛不变，整体目标尚未完成。
+
+### P3 核心命令队列与运行器接入（2026-10-22）
+
+基于222cf024。新增内部CoreCommandQueue，默认128条/256KiB声明保留字节，
+包括执行中和已完成未领取的命令。支持绝对单调时钟deadline、线程中断和停止取消；
+取消后的迟到结果在核心线程清理，清理前继续占预算。Pending只随实际进展重试，
+每轮最多32次尝试。接入现有运行器线程，native时钟与命令时钟共享起点。
+详细合同与限制见[核心命令队列](core-command-queue.md)。
+
+队列缺失实现的运行时red记录于TEMP/diplay-core-command-red-runtime.log；
+运行器未接入时命令超时的red记录于diplay-core-command-runner-red.log。
+接入后8项队列测试及运行器回归通过，覆盖保留预算、超时、取消、迟到清理、
+输入唤醒和核心线程归属。定向green日志diplay-core-command-runner-green.log。
+
+完整九项Android CI exit0，8m25s，250任务46执行：diplay-core-command-ci.log。
+JUnit共3312项（shared1728/common1578/home6），零失败、错误、跳过。
+Android connected 6/6，零失败、错误、跳过，17s：diplay-core-command-connected.log；
+其中真实native核心stats通过运行器命令调用。任务自有API28 x86_64模拟器
+debug.checkjni=1。四ABI/16KiB/NX/许可证和源码摘要检查通过；APK SHA-256：
+26041f09f2bd6a9ded0d3d2ab4e2c5bdce7a78a6e5d22efaa15021bde1d894b4。
+公开树检查通过。本批未取得独立审查完成结果，不记作独立评审通过。
+
+本通用队列依赖类型化调用者准确声明保留字节，不证明复制前内存准入。
+公共UdpEndpoint、端点级取消、TCP、会话选择及实际设备门槛仍待完成。
