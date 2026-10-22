@@ -1763,6 +1763,96 @@ static void test_tcp_listen_allocation_failures(void) {
                reuse, persistent, (unsigned long)allocations, recovered, rejected);
     }
 }
+static void finish_outgoing_connection(struct fixture *f, uint64_t stream) {
+    struct frame *syn = find(f, 6, -1, 0);
+    if (!syn) { advance(f, 3500); syn = find(f, 6, -1, 0); }
+    CHECK(syn && (syn->bytes[67] & 0x12) == 2);
+    uint16_t port = u16(syn->bytes + 54);
+    uint32_t sequence = u32(syn->bytes + 58);
+    send_tcp_pair(f, 9000, port, 18, 7000, sequence + 1, "", 0);
+    dp_tcp_info info;
+    CHECK(dp_tcp_connect_status(f->core, stream, &info) == DP_OK);
+    CHECK(info.local_port == port && info.remote_port == 9000);
+    send_tcp_pair(f, 9000, port, 24, 7001, sequence + 1, "reply", 5);
+    uint8_t bytes[5]; size_t copied = 0;
+    CHECK(dp_tcp_read(f->core, stream, bytes, sizeof(bytes), &copied) == DP_OK);
+    CHECK(copied == 5 && !memcmp(bytes, "reply", 5));
+    f->count = 0;
+    CHECK(dp_tcp_write(f->core, stream, (const uint8_t *)"hi", 2, &copied) == DP_OK && copied == 2);
+    uint8_t seen[2] = {0};
+    collect_echo(f, sequence, (const uint8_t *)"hi", seen, 2);
+    CHECK(seen[0] && seen[1]);
+    CHECK(dp_tcp_close(f->core, stream) == DP_OK);
+    advance(f, 500);
+}
+static void test_tcp_connect_allocation_failures(void) {
+    struct fixture prime; ready_core(&prime); close_core(&prime);
+    uint32_t heap = lwip_stats.mem.used, pools[MEMP_MAX];
+    for (unsigned pool = 0; pool < MEMP_MAX; ++pool) pools[pool] = lwip_stats.memp[pool]->used;
+    for (int persistent = 0; persistent < 2; ++persistent) {
+        size_t allocations = 0;
+        unsigned recovered = 0, rejected = 0, fatal = 0;
+        for (size_t fail_at = 0; fail_at <= allocations; ++fail_at) {
+            struct fixture f; ready_core(&f); f.count = 0;
+            dp_stats before;
+            CHECK(dp_core_get_stats(f.core, &before) == DP_OK);
+            uint32_t pools_before[MEMP_MAX];
+            for (unsigned pool = 0; pool < MEMP_MAX; ++pool) pools_before[pool] = lwip_stats.memp[pool]->used;
+            uint64_t stream = UINT64_MAX;
+            allocation_fault.calls = 0; allocation_fault.calloc_calls = 0;
+            allocation_fault.rejected = 0; allocation_fault.persistent = persistent;
+            allocation_fault.fail_at = fail_at; allocation_fault.armed = 1;
+            dp_result result = dp_tcp_connect(f.core, peer_ip, 9000, &stream);
+            allocation_fault.armed = 0;
+            fprintf(stderr, "CONNECT persistent=%d fail_at=%lu result=%d\n", persistent, (unsigned long)fail_at, result);
+            if (!fail_at) {
+                CHECK(result == DP_OK && allocation_fault.calloc_calls == 1);
+                allocations = allocation_fault.calls;
+                CHECK(allocations > 0 && allocations <= 32);
+            } else {
+                CHECK(allocation_fault.rejected && allocation_fault.calls >= fail_at);
+                if (!persistent) CHECK(allocation_fault.rejected == 1);
+            }
+            if (result == DP_OK) {
+                CHECK(stream && stream != UINT64_MAX);
+                finish_outgoing_connection(&f, stream);
+                if (fail_at) recovered++;
+            } else {
+                CHECK(fail_at && result == DP_RESOURCE_LIMIT && stream == 0);
+                rejected++;
+            }
+            dp_stats stats;
+            CHECK(dp_core_get_stats(f.core, &stats) == DP_OK);
+            if (stats.failure != DP_OK) {
+                CHECK(stats.failure == DP_RESOURCE_LIMIT && result == DP_RESOURCE_LIMIT);
+                fatal++;
+            } else {
+                advance(&f, 500);
+                CHECK(dp_core_get_stats(f.core, &stats) == DP_OK);
+                CHECK(stats.heap_used == before.heap_used && stats.tcp_active == before.tcp_active &&
+                      stats.tcp_listeners == before.tcp_listeners);
+                for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == pools_before[pool]);
+                uint16_t port;
+                connect_begin(&f, &stream, &port);
+                finish_outgoing_connection(&f, stream);
+            }
+            close_core(&f);
+            CHECK(netif_list == NULL && netif_default == NULL && lwip_stats.mem.used == heap);
+            for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == pools[pool]);
+            ready_core(&f);
+            uint16_t port;
+            connect_begin(&f, &stream, &port);
+            finish_outgoing_connection(&f, stream);
+            close_core(&f);
+            CHECK(lwip_stats.mem.used == heap);
+            for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == pools[pool]);
+        }
+        CHECK(recovered + rejected == allocations);
+        CHECK(persistent ? fatal > 0 : fatal == 0);
+        printf("TCP connect persistent=%d points=%lu recovered=%u rejected=%u fatal=%u\n",
+               persistent, (unsigned long)allocations, recovered, rejected, fatal);
+    }
+}
 static void test_tcp_accept_allocation_failures(void) {
     for (int persistent = 0; persistent < 2; ++persistent) {
         size_t allocations = 0;
@@ -2089,6 +2179,8 @@ int main(int argc, char **argv) {
         test_core_allocation_failures();
     else if (!strcmp(argv[1], "tcp_listen_allocation_failures"))
         test_tcp_listen_allocation_failures();
+    else if (!strcmp(argv[1], "tcp_connect_allocation_failures"))
+        test_tcp_connect_allocation_failures();
     else if (!strcmp(argv[1], "tcp_accept_allocation_failures"))
         test_tcp_accept_allocation_failures();
     else if (!strcmp(argv[1], "tcp_syn_allocation_failures"))

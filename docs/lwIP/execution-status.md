@@ -1572,3 +1572,19 @@ af4ff3fc3175cfb3cc63a766a70f26242fbcd329ad71c782fc07f468155425e9。
 本轮未重跑内核互通，不把既有内核结果算作当前修复的新证据。冷启动/非TCP定时器、
 其他分配/并发路径、峰值、独立安全审查和实际NCM/iPhone/ARM仍待覆盖；用户确认
 目前没有参考设备或报告，G0/G1未通过，生产选择保持原状，整体目标继续。
+
+### TCP主动连接分配失败矩阵
+
+新增tcp_connect_allocation_failures：正常5点，瞬时恢复2/拒绝3，持续拒绝5，
+其中持续1例核心RESOURCE_LIMIT。所有失败输出handle清零；成功必须完成SYN/
+SYN-ACK/ACK、接收reply、发送hi。非核心失败在同核心重连前检查heap/活动PCB/
+监听PCB/全部pool基线；所有场景销毁、全局基线检查，再新建核心和双向收发。
+测试直接通过，没有为制造红测修改正确产品行为，本轮产品和vendor均无变化。
+
+Windows59/59、1.25s：TEMP/diplay-connect-allocation-final-host.log；Linux
+ASan/UBSan/池检查及默认LSan59/59、10.00s：
+/tmp/diplay-connect-allocation-final-sanitize.log。九项CI exit0、3s，12执行/
+238缓存：TEMP/diplay-connect-allocation-ci.log；三个单元任务UP-TO-DATE，
+不记重新执行。public tree和diff检查通过。本轮未启动设备或重跑JNI/内核。
+没有其他活动连接，仍缺全部TCP写入/接收、未知邻居/重组、冷定时器、并发关闭、
+独立安全审查和实际设备等；不将本子集视为完整R01，整体目标继续。

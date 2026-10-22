@@ -12,6 +12,9 @@ frame_allocation_tests通过链接器--wrap拦截分配调用，产品不包含�
 | udp_allocation_failures | 1200字节1点、65487/65488/65527各93点 | 错误明确、无完整失败报文、资源回基线，解除注入可完整发送 |
 | tcp_listen_allocation_failures | reuse开/关，各3点，瞬时/持续两种模式 | 重试成功则验证连接可用再关闭；失败则清零输出、释放端口/PCB/句柄并可重绑 |
 | tcp_accept_allocation_failures | 最终ACK处理2点，瞬时/持续两种模式 | 无错误stream交付，原监听器可继续连接；关闭后半开/未交付资源归零并可重绑 |
+| tcp_syn_allocation_failures | SYN输入5点，瞬时/持续 | 不发布错误stream；监听器恢复或明确核心失败，销毁及重建后资源归零 |
+| tcp_timer_allocation_failures | 实际TCP handler重排分配，瞬时/持续 | 瞬时恢复；持续核心失败，旧端点错误和销毁/重建可验证 |
+| tcp_connect_allocation_failures | 主动连接5点，瞬时/持续 | 成功则握手及双向数据；失败句柄清零，检查核心状态和资源回收/重建 |
 
 位置计数是按调用场景和执行顺序统计，不能理解为不同源码分配语句数。每个场景
 先在成功路径计数，再逐个令第k次分配返回NULL；冷创建首次calloc是单独定向检查。
@@ -25,14 +28,14 @@ calloc命中断言避免工具链绕过包装后假绿。未以清空整个池�
 也可单独执行frame_allocation_tests core_allocation_failures。测试使用GNU兼容
 链接器，仅在已验证的MinGW/Linux宿主构建中声明结果。
 
-当前56项宿主测试通过，包括ASan/UBSan、lwIP池检查和默认LSan构建。未把宿主
+当前59项宿主测试通过，包括ASan/UBSan、lwIP池检查和默认LSan构建。未把宿主
 结果当作Android/JNI或真实NCM/iPhone证据。既有UDP分配详情见
 [udp-large-datagram-gap.md](udp-large-datagram-gap.md)。
 
 仍缺：冷启动内部周期定时器池初始化的逐点失败、其他libc分配点、JNI复制/异常、
 全部TCP/重组/未知邻居排队及并发关闭路径、完整进程峰值和实际设备验证。全局
 初始化保留的周期计时器属于热创建基线，不能把这些常驻项误记成已经逐点注入。
-产品代码、vendor摘要与公共C/JNI ABI不变，生产后端未切换。
+TCP定时器本地修正及vendor摘要见BACKPORTS.md，公共C/JNI ABI不变，生产后端未切换。
 
 ## TCP监听瞬时与持续不足
 
@@ -74,3 +77,13 @@ MEMP pool回到基线；再次同端口创建监听器并收发。测试只针�
 分配失败：瞬时失败恢复，持续失败必须使核心失败；检查旧端点错误、销毁、重建
 及heap/全部pool回基线。此重放只证明分配分支，不证明真实到期时间精度。
 冷启动及非TCP周期定时器仍保留原断言路径，完整R01尚未通过。
+
+## 主动连接分配失败
+
+正常主动连接测得5处分配，分别逐点瞬时及持续注入。瞬时2例恢复成功、3例明确
+RESOURCE_LIMIT；持续5例RESOURCE_LIMIT，其中1例核心失败。成功结果必须完成
+真实帧握手、接收reply及发送hi；无首个SYN时受控推进时间以允许重传。失败输出
+handle必须清零。非核心失败先退休TCP timer并检查heap/活动PCB/监听PCB/全部pool
+回到调用前基线，再在同核心重新连接并收发；所有场景销毁后检查全局基线，且另
+创建核心、连接并收发后再次检查。无其他活动连接，不覆盖回收其他PCB及全部
+写入/重组/未知邻居/并发路径，也没有新增Android/JNI或真机结论。
