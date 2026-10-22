@@ -334,4 +334,25 @@ dp_result dp_tcp_shutdown_output(dp_core *core, uint64_t handle) {
     return leave(core, DP_OK);
 }
 dp_result dp_tcp_close(dp_core *core, uint64_t handle) { return close_handle(core, handle, DP_ENDPOINT_TCP); }
+dp_result dp_tcp_close_graceful(dp_core *core, uint64_t handle) {
+    dp_result status = dp_enter(core, 1);
+    if (status != DP_OK) return status;
+    if (core->failure != DP_OK) core->link_ready = 0;
+    void *value = NULL;
+    status = dp_endpoint_lookup(&core->endpoints, handle, DP_ENDPOINT_TCP, &value);
+    if (status != DP_OK) return leave(core, status);
+    struct tcp_stream *stream = value;
+    err_t error = ERR_OK;
+    if (core->failure == DP_OK && stream->connected && stream->pcb) {
+        struct tcp_pcb *pcb = stream->pcb;
+        /* tcp_close may free immediately, defer FIN under pressure, or leave a closing PCB.
+         * In every successful case it owns the PCB. No application callback may survive. */
+        detach(pcb);
+        error = tcp_close(pcb);
+        if (error != ERR_OK) tcp_abort(pcb); /* Failed close retains a valid PCB. */
+        stream->pcb = NULL;
+    }
+    status = dp_endpoint_remove(&core->endpoints, handle, DP_ENDPOINT_TCP);
+    return leave(core, error == ERR_OK ? status : DP_INTERNAL);
+}
 dp_result dp_tcp_listener_close(dp_core *core, uint64_t handle) { return close_handle(core, handle, DP_ENDPOINT_LISTENER); }

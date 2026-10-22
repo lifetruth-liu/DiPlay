@@ -43,6 +43,7 @@ DP_API dp_result dp_proto_tcp_read(uint64_t, uint64_t, uint8_t *, size_t, size_t
 DP_API dp_result dp_proto_tcp_write(uint64_t, uint64_t, const uint8_t *, size_t, size_t *);
 DP_API dp_result dp_proto_tcp_shutdown_output(uint64_t, uint64_t);
 DP_API dp_result dp_proto_tcp_close(uint64_t, uint64_t);
+DP_API dp_result dp_proto_tcp_close_graceful(uint64_t, uint64_t);
 DP_API dp_result dp_proto_tcp_listener_close(uint64_t, uint64_t);
 #ifdef DP_PROTO_TESTING
 dp_tx_result dp_proto_test_emit(uint64_t handle, const uint8_t *bytes, size_t length);

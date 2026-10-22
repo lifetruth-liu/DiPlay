@@ -611,6 +611,112 @@ static void test_tcp_shutdown_pressure(void) {
         close_core(&f);
     }
 }
+static void test_tcp_graceful_close(void) {
+    for (unsigned mode = 0; mode < 3; ++mode) {
+        struct fixture f; ready_core(&f);
+        uint64_t listener; uint16_t port;
+        CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK);
+        uint32_t server = establish(&f, 50000);
+        uint64_t stream = accept_stream(&f, listener);
+        size_t copied;
+        uint8_t source[4] = {'t', 'a', 'i', 'l'}, seen[4] = {0};
+        if (mode == 0) {
+            CHECK(dp_tcp_write(f.core, stream, source, 4, &copied) == DP_OK && copied == 4);
+            memset(source, 0, sizeof(source));
+        } else send_tcp(&f, mode == 1 ? 17 : 24, 1001, server + 1, mode == 1 ? "" : "unread");
+        f.count = 0;
+        CHECK(dp_tcp_close_graceful(f.core, listener) == DP_INVALID_ARGUMENT);
+        CHECK(dp_tcp_close_graceful(f.core, stream) == DP_OK);
+        CHECK(dp_tcp_close(f.core, stream) == DP_INVALID_ARGUMENT);
+        CHECK(dp_tcp_read(f.core, stream, source, 1, &copied) == DP_INVALID_ARGUMENT);
+        struct frame *reply = find(&f, 6, -1, 0);
+        CHECK(reply && (reply->bytes[67] & (mode == 2 ? 4 : 1)));
+        if (mode != 2) {
+            for (size_t i = 0; i < f.count; ++i) CHECK(f.frames[i].bytes[20] != 6 || !(f.frames[i].bytes[67] & 4));
+            if (mode == 0) {
+                f.count = 0; advance(&f, 5000);
+                collect_echo(&f, server, (const uint8_t *)"tail", seen, 4);
+                CHECK(seen[0] && seen[1] && seen[2] && seen[3]);
+                send_tcp(&f, 17, 1001, server + 6, "");
+                f.count = 0;
+                send_tcp(&f, 17, 1001, server + 6, ""); /* Detached TIME_WAIT still answers duplicate FIN. */
+                reply = find(&f, 6, -1, 0);
+                CHECK(reply && !(reply->bytes[67] & 4) && u32(reply->bytes + 62) == 1002);
+                advance(&f, 121000);
+            } else send_tcp(&f, 16, 1002, server + 2, "");
+        }
+        CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+        dp_stats stats; CHECK(dp_core_get_stats(f.core, &stats) == DP_OK);
+        CHECK(stats.tcp_active == 0 && stats.heap_used == 0 && stats.pbuf_used == 0);
+        CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK);
+        establish(&f, 50001);
+        uint64_t fresh = accept_stream(&f, listener);
+        CHECK(fresh != stream && dp_tcp_close_graceful(f.core, stream) == DP_INVALID_ARGUMENT);
+        CHECK(dp_tcp_read(f.core, fresh, source, 1, &copied) == DP_WOULD_BLOCK);
+        CHECK(dp_tcp_close(f.core, fresh) == DP_OK);
+        CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+        close_core(&f);
+    }
+}
+static void test_tcp_graceful_pressure(void) {
+    for (unsigned complete = 0; complete < 3; ++complete) {
+        struct fixture f; ready_core(&f);
+        uint64_t listener; uint16_t port;
+        CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK);
+        uint32_t server = establish(&f, 50000);
+        uint64_t stream = accept_stream(&f, listener);
+        struct segment_pressure pressure = {0};
+        if (complete != 2)
+            CHECK(dp_core_execute(f.core, pressure_segments, &pressure) == DP_OK && pressure.count > 0);
+        else f.ready = 0; /* Output backpressure, rather than allocation pressure. */
+        f.count = 0;
+        CHECK(dp_tcp_close_graceful(f.core, stream) == DP_OK && f.count == 0);
+        CHECK(dp_tcp_close_graceful(f.core, stream) == DP_INVALID_ARGUMENT);
+        pressure.release = 1;
+        CHECK(dp_core_execute(f.core, pressure_segments, &pressure) == DP_OK && pressure.count == 0);
+        f.ready = 1;
+        if (complete == 2) CHECK(dp_core_set_link_ready(f.core, 1) == DP_OK);
+        if (complete) {
+            advance(&f, complete == 2 ? 5000 : 500);
+            struct frame *fin = find(&f, 6, -1, 0);
+            CHECK(fin && (fin->bytes[67] & 1) && !(fin->bytes[67] & 4));
+            send_tcp(&f, 17, 1001, server + 2, "");
+            advance(&f, 121000);
+        }
+        CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+        close_core(&f); /* Also frees detached FIN-pending PCBs before any retry. */
+    }
+}
+static void test_tcp_graceful_failure(void) {
+    for (unsigned mode = 0; mode < 3; ++mode) {
+        struct fixture f; ready_core(&f);
+        uint64_t stream, listener = 0; uint16_t port;
+        if (!mode) CHECK(dp_tcp_connect(f.core, peer_ip, 9000, &stream) == DP_OK);
+        else {
+            CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK);
+            establish(&f, 50000); stream = accept_stream(&f, listener);
+        }
+        f.count = 0;
+        if (mode == 1) { f.now--; CHECK(dp_core_poll(f.core) == DP_CLOCK_REVERSED); }
+        if (mode == 2) f.ready = -1;
+        dp_result expected = mode == 1 ? DP_CLOCK_REVERSED : (mode == 2 ? DP_LINK_IO : DP_OK);
+        CHECK(dp_tcp_close_graceful(f.core, stream) == expected);
+        if (mode == 1) CHECK(f.count == 0); /* Failed cores suppress cleanup output. */
+        if (!mode) {
+            struct frame *reset = find(&f, 6, -1, 0);
+            CHECK(reset && (reset->bytes[67] & 4)); /* A pending candidate is cancelled by abort. */
+        }
+        dp_stats stats; CHECK(dp_core_get_stats(f.core, &stats) == DP_OK);
+        CHECK(stats.failure == expected);
+        if (mode != 2) CHECK(stats.tcp_active == 0 && stats.pbuf_used == 0);
+        if (listener) CHECK(dp_tcp_listener_close(f.core, listener) == expected);
+        close_core(&f);
+        ready_core(&f);
+        CHECK(dp_core_get_stats(f.core, &stats) == DP_OK);
+        CHECK(stats.heap_used == 0 && stats.pbuf_used == 0 && stats.tcp_active == 0);
+        close_core(&f);
+    }
+}
 static uint32_t connect_begin(struct fixture *f, uint64_t *stream, uint16_t *local_port) {
     f->count = 0;
     CHECK(dp_tcp_connect(f->core, peer_ip, 9000, stream) == DP_OK && *stream);
@@ -1234,6 +1340,12 @@ int main(int argc, char **argv) {
         test_tcp_shutdown_pressure();
     else if (!strcmp(argv[1], "tcp_connect"))
         test_tcp_connect();
+    else if (!strcmp(argv[1], "tcp_graceful_close"))
+        test_tcp_graceful_close();
+    else if (!strcmp(argv[1], "tcp_graceful_pressure"))
+        test_tcp_graceful_pressure();
+    else if (!strcmp(argv[1], "tcp_graceful_failure"))
+        test_tcp_graceful_failure();
     else if (!strcmp(argv[1], "tcp_connect_cancel"))
         test_tcp_connect_cancel();
     else if (!strcmp(argv[1], "tcp_connect_limits"))

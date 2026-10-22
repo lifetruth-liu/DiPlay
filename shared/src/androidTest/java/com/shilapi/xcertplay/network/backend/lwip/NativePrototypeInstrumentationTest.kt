@@ -18,6 +18,31 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class NativePrototypeInstrumentationTest {
+    @Test fun tcpGracefulJniHandsFinToProtocolAndInvalidatesApplicationToken() {
+        LwipNativeBindings.ensureLoaded()
+        val h = LwipNativeBindings.create(mac, ip, 1500, 100, ByteArray(1024).also { SecureRandom().nextBytes(it) })
+        try {
+            rawReady(h)
+            val listener = LongArray(2)
+            assertEquals(0, LwipNativeBindings.tcpListen(h, 7000, 2, listener))
+            assertEquals(0, LwipNativeBindings.input(h, tcpPacket(50000, 7000, 2, 1000, 0)))
+            val syn = rawDrain(h).first { it[20] == 6.toByte() }; val server = read32(syn, 58)
+            assertEquals(0, LwipNativeBindings.input(h, tcpPacket(50000, 7000, 16, 1001, server + 1)))
+            val stream = LongArray(1)
+            assertEquals(0, LwipNativeBindings.tcpAccept(h, listener[0], stream, ByteArray(16), ByteArray(16), IntArray(2)))
+            val count = IntArray(1)
+            assertEquals(0, LwipNativeBindings.tcpWrite(h, stream[0], "tail".toByteArray(), 0, 4, count))
+            assertEquals(0, LwipNativeBindings.tcpCloseGraceful(h, stream[0]))
+            assertEquals(-1, LwipNativeBindings.tcpCloseGraceful(h, stream[0]))
+            val frames = rawDrain(h).filter { it[20] == 6.toByte() }
+            assertTrue(frames.any { it[67].toInt() and 1 != 0 })
+            assertTrue(frames.none { it[67].toInt() and 4 != 0 })
+            assertEquals(-1, LwipNativeBindings.tcpRead(h, stream[0], ByteArray(1), 0, 1, count))
+            assertEquals(0, LwipNativeBindings.input(h, tcpPacket(50000, 7000, 17, 1001, server + 6)))
+            assertEquals(0, LwipNativeBindings.tcpListenerClose(h, listener[0]))
+        } finally { assertEquals(0, LwipNativeBindings.destroy(h)) }
+    }
+
     @Test fun typedTcpCorePreservesPendingEofResetAndFailedContextCleanup() {
         var now = 100L
         val core = NativePrototypeCore.create(mac, ip, 1500) { now }
@@ -52,7 +77,7 @@ class NativePrototypeInstrumentationTest {
             assertEquals(CoreAttempt.Ready(Unit), tcp.tcpShutdownOutput(token))
             try { tcp.tcpWrite(token, target, 0, 1); fail("closed output") }
             catch (error: BackendFailure) { assertEquals(BackendFailure.Kind.PEER_CLOSED, error.kind) }
-            tcp.tcpClose(token)
+            tcp.tcpCloseGraceful(token)
             val active = (tcp.tcpConnect(peer, 9000) as CoreAttempt.Ready).value
             assertEquals(CoreAttempt.Pending, tcp.tcpConnectStatus(active))
             val outgoing = drain(core).last { it[20] == 6.toByte() && it[67].toInt() and 2 != 0 }
@@ -67,13 +92,13 @@ class NativePrototypeInstrumentationTest {
             catch (error: BackendFailure) { assertEquals(BackendFailure.Kind.PEER_RESET, error.kind) }
             now--
             try { core.poll(); fail("clock regression") } catch (_: BackendFailure) { }
-            tcp.tcpClose(active); tcp.tcpListenerClose(listener.token)
+            tcp.tcpCloseGraceful(active); tcp.tcpListenerClose(listener.token)
         } finally { core.close() }
     }
 
     @Test fun tcpJniAcceptReadWriteAndHalfCloseValidateBeforeConsuming() {
         LwipNativeBindings.ensureLoaded()
-        assertEquals(3, LwipNativeBindings.abiVersion())
+        assertEquals(4, LwipNativeBindings.abiVersion())
         val h = LwipNativeBindings.create(mac, ip, 1500, 100, ByteArray(1024).also { SecureRandom().nextBytes(it) })
         assertTrue(h > 0)
         try {
@@ -237,7 +262,7 @@ class NativePrototypeInstrumentationTest {
     }
     @Test fun nativeUdpBindingsPreserveDatagramsAndRejectStaleTokens() {
         LwipNativeBindings.ensureLoaded()
-        assertEquals(3, LwipNativeBindings.abiVersion())
+        assertEquals(4, LwipNativeBindings.abiVersion())
         val entropy = ByteArray(1024).also { SecureRandom().nextBytes(it) }
         val context = LwipNativeBindings.create(mac, ip, 1500, 100, entropy)
         assertTrue(context > 0)

@@ -1,6 +1,6 @@
 # P3 UDP JNI桥
 
-UDP桥最初随JNI ABI 2接入，本文描述其原始接口。当前整体JNI ABI为3，Kotlin与
+UDP桥最初随JNI ABI 2接入，本文描述其原始接口。当前整体JNI ABI为4，Kotlin与
 native加载检查必须一致，见[TCP JNI桥](tcp-jni.md)；native-only核心C ABI仍为1。
 公共Kotlin UdpEndpoint及deadline/取消随后已接入显式原型，见[UDP适配](udp-adapter.md)。
 完整SessionNetwork和生产后端选择仍未接入，旧JNI库与新Kotlin不允许混用。

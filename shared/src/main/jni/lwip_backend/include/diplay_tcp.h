@@ -13,7 +13,7 @@ typedef struct {
 } dp_tcp_info;
 /* Serialized owner-thread API. Queued accepts are owned by the listener until
  * publication. Read restores receive credit only for bytes actually consumed.
- * Close invalidates the generation and aborts locally without waiting for FIN. */
+ * dp_tcp_close invalidates the generation and aborts locally without waiting for FIN. */
 DP_API dp_result dp_tcp_listen(dp_core *, uint16_t, unsigned, uint64_t *, uint16_t *);
 DP_API dp_result dp_tcp_accept(dp_core *, uint64_t, uint64_t *, dp_tcp_info *);
 /* begin returns OK with an owned candidate token once a SYN is queued; poll that
@@ -27,6 +27,8 @@ DP_API dp_result dp_tcp_read(dp_core *, uint64_t, uint8_t *, size_t, size_t *);
 DP_API dp_result dp_tcp_write(dp_core *, uint64_t, const uint8_t *, size_t, size_t *);
 DP_API dp_result dp_tcp_shutdown_output(dp_core *, uint64_t);
 DP_API dp_result dp_tcp_close(dp_core *, uint64_t);
+/* Consume the application handle and hand closing PCB ownership to lwIP. */
+DP_API dp_result dp_tcp_close_graceful(dp_core *, uint64_t);
 DP_API dp_result dp_tcp_listener_close(dp_core *, uint64_t);
 #ifdef __cplusplus
 }

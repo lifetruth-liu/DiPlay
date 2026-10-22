@@ -1,8 +1,8 @@
 package com.shilapi.xcertplay.network.backend.lwip
 
 /** Owner-thread nonblocking TCP boundary. Arguments are borrowed for one call.
- * Returned address arrays are owned by the caller. Close aborts locally; graceful stream close
- * and deadlines belong to the public adapter, not this raw boundary.
+ * Returned address arrays are owned by the caller. Close aborts locally; closeGraceful consumes
+ * the handle and transfers protocol closing to lwIP. Neither waits for a peer ACK or deadline.
  */
 internal interface LwipTcpCore : LwipPrototypeCore {
     data class Listener(val token: Long, val port: Int)
@@ -19,5 +19,6 @@ internal interface LwipTcpCore : LwipPrototypeCore {
     fun tcpWrite(token: Long, bytes: ByteArray, offset: Int, length: Int): CoreAttempt<Int>
     fun tcpShutdownOutput(token: Long): CoreAttempt<Unit>
     fun tcpClose(token: Long)
+    fun tcpCloseGraceful(token: Long)
     fun tcpListenerClose(token: Long)
 }

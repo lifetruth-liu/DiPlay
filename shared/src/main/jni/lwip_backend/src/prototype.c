@@ -313,6 +313,15 @@ dp_result dp_proto_tcp_close(uint64_t h, uint64_t endpoint) {
     if (s == DP_OK && p->failure != DP_OK) dp_core_set_link_ready(p->core, 0);
     return s == DP_OK ? dp_tcp_close(p->core, endpoint) : s;
 }
+dp_result dp_proto_tcp_close_graceful(uint64_t h, uint64_t endpoint) {
+    struct prototype *p; dp_result s = lookup(h, &p, 1);
+    if (s != DP_OK) return s;
+    if (p->failure != DP_OK) {
+        dp_core_set_link_ready(p->core, 0);
+        return dp_tcp_close(p->core, endpoint);
+    }
+    return dp_tcp_close_graceful(p->core, endpoint);
+}
 dp_result dp_proto_tcp_listener_close(uint64_t h, uint64_t endpoint) {
     struct prototype *p; dp_result s = lookup(h, &p, 1);
     if (s == DP_OK && p->failure != DP_OK) dp_core_set_link_ready(p->core, 0);

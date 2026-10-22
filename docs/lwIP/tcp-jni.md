@@ -1,7 +1,8 @@
-# P3 TCP JNI桥（ABI 3）
+# P3 TCP JNI桥（当前ABI 4）
 
 在既有context/UDP桥上新增TCP桥，整体JNI ABI升级到3，Kotlin加载器与native
-abiVersion同步校验。native-only核心C ABI仍为1。原始接口由核心创建线程串行调用，
+abiVersion同步校验。后续新增[优雅关闭](tcp-graceful-close.md)将整体ABI升级4，
+当前加载器与native均要求4。native-only核心C ABI仍为1。原始接口由核心创建线程串行调用，
 不自行创建线程或提供阻塞/deadline语义；已有[类型化宿主核心接口](tcp-core.md)，
 公共TcpStream/SessionNetwork尚未接入。
 
@@ -14,6 +15,7 @@ abiVersion同步校验。native-only核心C ABI仍为1。原始接口由核心�
 | tcpRead/tcpWrite | offset/length子范围，IntArray(1)报告实际长度；WOULD_BLOCK为0 |
 | tcpShutdownOutput | 非阻塞半关闭，不能据此假定对端已经收到FIN |
 | tcpClose/tcpListenerClose | 释放对应类型generation handle，原始重复关闭返回INVALID_ARGUMENT |
+| tcpCloseGraceful | 消耗stream handle，把正常FIN关闭交给协议栈；不等待peer ACK |
 
 所有输出数组形状、读写范围和地址别名在端点改变或数据消费前校验。local与remote
 地址数组不能引用同一对象。范围用减法检查，防止offset+length溢出；拒绝负数和

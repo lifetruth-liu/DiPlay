@@ -1009,3 +1009,38 @@ diff检查通过。未取得独立评审完成结果，不记作独立评审通�
 Kotlin结果分配失败与全部JNI异常路径尚无动态注入；公共TcpStream/TcpListener/
 SessionNetwork、完整两后端契约、默认优雅关闭、实际NCM/iPhone/ARM及长稳仍待完成。
 没有设备或基线报告，G2/G3不变，整体目标仍未完成。
+
+### P3 TCP优雅关闭原语（2026-10-22）
+
+基于61ba81ba。新增dp_tcp_close_graceful、prototype/JNI/类型化宿主转发。整体JNI
+ABI升级4，native-only核心C ABI仍为1；既有abort接口不变。正常关闭先移除全部应用
+回调，再交由tcp_close接管PCB；成功后不再访问PCB，立即失效handle/释放应用记录。
+TF_CLOSEPEND、未ACK数据与TIME_WAIT继续受lwIP固定池限制，由协议ACK/超时或context
+销毁释放。未读数据遵循lwIP的RST行为；候选取消与失败上下文走abort。详见
+[TCP优雅关闭原语](tcp-graceful-close.md)，公共TcpStream策略尚未接入。
+
+两项新宿主用例先以旧abort行为真实red，45/47通过、exit8：
+WSL /tmp/diplay-tcp-graceful-red.log。实现后47/47通过；加入失败/取消路径成为48项。
+首次补测误认为待握手取消不发RST，源码确认tcp_abort会发RST后纠正测试；另补
+输出恢复用例，先遗漏setLinkReady(true)通知而失败，按既有宿主恢复流程补齐。
+最终Linux ASan/UBSan/pool guards、Windows MinGW均48/48、exit0（9.48s/4.91s）：
+WSL /tmp/diplay-tcp-graceful-final3-host.log、TEMP/diplay-tcp-graceful-final3-windows.log。
+覆盖发送数据复制重传、FIN次序/段池压力/输出恢复、旧handle和PCB复用、未读数据RST、
+候选取消、核心时钟/输出失败、FIN重试前销毁及重建后资源计数归零。
+
+Android新增原始JNI用例先缺tcpCloseGraceful而UnsatisfiedLinkError真实red，exit1、
+18s：diplay-tcp-graceful-jni-red.log；接通后11/11，16s、exit0：
+diplay-tcp-graceful-connected.log。既有类型化核心用例也改用优雅关闭，含失败prototype。
+
+最终九项Android CI exit0，7m32s、250任务47执行：diplay-tcp-graceful-ci.log。
+shared/common单元任务重新执行，home为UP-TO-DATE；核对XML3345项（shared1761/
+common1578/home6）零失败/错误/跳过，不将home旧结果记为本轮重新执行。
+最终API28 x86_64模拟器11/11，13s、exit0：diplay-tcp-graceful-final-connected.log，
+XML零失败/错误/跳过；debug.checkjni=1，测试进程6225确认already on。
+四ABI均确认十项TCP JNI导出；APK四ABI/16KiB/NX/许可证与源摘要检查通过，SHA-256：
+fe4df497334e1276fd1af29222d45b364400f5f55c181ad84acefa2113c0fbb2。
+public tree及staged diff检查通过。未取得独立评审完成结果，不记作独立评审通过。
+
+尚无tcp_close返回错误分支的运行时注入；公共流/监听器/SessionNetwork策略、全部
+两后端契约、独立kernel peer对新端点接口的验证、真实NCM/iPhone/ARM及长稳仍缺。
+不把关闭原语的已验证路径扩大为完整公共关闭合同；G2/G3及整体目标仍未完成。

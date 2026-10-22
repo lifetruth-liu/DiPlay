@@ -1,6 +1,6 @@
 # P3 TCP宿主核心接口
 
-`LwipTcpCore`把[ABI 3原始TCP桥](tcp-jni.md)的数组和状态码转换为宿主命令可以调用的
+`LwipTcpCore`把[原始TCP桥](tcp-jni.md)的数组和状态码转换为宿主命令可以调用的
 非阻塞接口，`NativePrototypeCore`同时实现UDP/TCP核心接口。全部调用仍在创建线程，
 不自行等待、启动线程或回调Java；生产SessionNetwork与后端选择尚未接入。
 
@@ -28,10 +28,11 @@
 调用原始close回收尚未交付的token；OOM由既有nativeCall转换为RESOURCE_LIMIT。
 这些回收分支尚无Kotlin分配故障的动态注入，不将正常用例视为其全部运行时证据。
 
-普通操作先补充单调时间及熵；两种TCP close只检查创建线程和context存活，不调用
+普通操作先补充单调时间及熵；TCP abort/优雅关闭/listener close只检查创建线程和context存活，不调用
 supply。原型或时间已经失败时，重复supply会阻止释放资源；原始C桥负责失败后的
-停输出清理。context close仍是最终所有权屏障。端点close仍是原始abort，不能作为
-公共TcpStream默认优雅关闭策略；configure/liveness也尚未提供公共实现。
+停输出清理。context close仍是最终所有权屏障。tcpClose为abort；新增tcpCloseGraceful
+把关闭交给协议栈，详见[优雅关闭原语](tcp-graceful-close.md)。公共TcpStream的
+幂等/configure/deadline/liveness策略仍未提供。
 
 Android模拟器用例通过完整IPv6/TCP帧驱动实际JNI和lwIP，覆盖未就绪connect、空
 accept、双向地址/端口、读取缓冲后EOF、零长度读、关闭输出后的错误、主动候选与

@@ -174,6 +174,9 @@ internal class NativePrototypeCore private constructor(private val clockMillis: 
     override fun tcpClose(token: Long) = nativeCall {
         checkOwner(); checkResult(LwipNativeBindings.tcpClose(handle, token))
     }
+    override fun tcpCloseGraceful(token: Long) = nativeCall {
+        checkOwner(); checkResult(LwipNativeBindings.tcpCloseGraceful(handle, token))
+    }
     override fun tcpListenerClose(token: Long) = nativeCall {
         checkOwner(); checkResult(LwipNativeBindings.tcpListenerClose(handle, token))
     }
