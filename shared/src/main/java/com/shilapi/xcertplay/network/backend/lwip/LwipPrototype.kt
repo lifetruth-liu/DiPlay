@@ -48,6 +48,7 @@ class LwipPrototype(
         val txQueuedBytes: Int, val txQueuedFrames: Int,
         val rxDropped: Long, val txSent: Long, val txNotReady: Long,
         val commandCount: Int = 0, val commandBytes: Int = 0,
+        val resourceScopes: Int = 0, val closingResourceScopes: Int = 0,
     )
 
     private val signal = Object()
@@ -75,10 +76,13 @@ class LwipPrototype(
     fun snapshot(): Snapshot = synchronized(signal) {
         val commandState = commands.snapshot()
         Snapshot(state, failure, rxBytes, rx.size, txBytes, tx.size, rxDropped, txSent, txNotReady,
-            commandState.commands, commandState.bytes)
+            commandState.commands, commandState.bytes, commandState.resources, commandState.closingResources)
     }
 
     internal fun newCommandScope() = commands.newScope()
+    internal fun newResourceScope(release: (LwipPrototypeCore) -> Unit) = commands.newResourceScope(release)
+    internal fun closeResourceScope(scope: CoreCommandQueue.Scope): Boolean =
+        commands.closeResource(scope, BackendFailure(BackendFailure.Kind.CANCELLED))
     internal fun cancelCommands(scope: CoreCommandQueue.Scope) =
         commands.cancel(scope, BackendFailure(BackendFailure.Kind.CANCELLED))
 

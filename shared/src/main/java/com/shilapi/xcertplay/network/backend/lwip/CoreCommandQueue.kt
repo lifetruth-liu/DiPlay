@@ -14,9 +14,32 @@ internal class CoreCommandQueue<C>(
     private val wake: () -> Unit,
     private val maxCommands: Int = 128,
     private val maxBytes: Int = 256 * 1024,
+    private val maxResources: Int = 80,
 ) {
-    /** Identity and terminal state only; the queue does not retain a registry of scopes. */
-    class Scope internal constructor(internal val identity: Any) {
+    init { require(maxCommands in 1..128 && maxBytes in 0..256 * 1024 && maxResources in 1..80) }
+    /** Release must be nonblocking and capture only bounded endpoint identity/metadata. */
+    fun newResourceScope(release: (C) -> Unit): Scope = synchronized(signal) {
+        closed?.let { throw it }
+        if (resources.size >= maxResources) throw BackendFailure(BackendFailure.Kind.RESOURCE_LIMIT)
+        Scope(scopeIdentity, true).also { resources[it] = Resource(it, release) }
+    }
+    /** Cancels waiters and schedules one owner-thread release without using a business slot. */
+    fun closeResource(scope: Scope, reason: BackendFailure): Boolean {
+        val scheduled = synchronized(signal) {
+            require(scope.identity === scopeIdentity && scope.resource) { "Invalid resource scope" }
+            if (closed != null) return@synchronized false
+            val resource = resources[scope] ?: return@synchronized false
+            if (resource.phase != ResourcePhase.OPEN) return@synchronized false
+            cancel(scope, reason)
+            resource.phase = ResourcePhase.QUEUED
+            closing.addLast(resource)
+            true
+        }
+        if (scheduled) wake()
+        return scheduled
+    }
+    /** Plain scopes are not registered; resource scopes remain registered through release. */
+    class Scope internal constructor(internal val identity: Any, internal val resource: Boolean = false) {
         internal var failure: BackendFailure? = null
     }
     private val scopeIdentity = Any()
@@ -32,16 +55,18 @@ internal class CoreCommandQueue<C>(
             for (task in live) if (task.scope === scope) task.cancel(reason)
         }
     }
-    data class Snapshot(val commands: Int, val bytes: Int)
+    data class Snapshot(val commands: Int, val bytes: Int, val resources: Int = 0, val closingResources: Int = 0)
     data class Batch(val more: Boolean, val completed: Boolean)
     private enum class Phase { QUEUED, RUNNING, WAITING, DONE }
+    private enum class ResourcePhase { OPEN, QUEUED, RUNNING }
     private val signal = Object()
     private val live = linkedSetOf<Task<*>>()
     private val ready = ArrayDeque<Task<*>>()
+    private val resources = linkedMapOf<Scope, Resource>()
+    private val closing = ArrayDeque<Resource>(maxResources)
     private var retained = 0
     private var closed: BackendFailure? = null
     private var owner: Thread? = null
-    init { require(maxCommands in 1..128 && maxBytes in 0..256 * 1024) }
 
     /** Internal operations and discard handlers must not block. retainedBytes
      * includes all owned payloads retained by the operation/completion. */
@@ -62,8 +87,10 @@ internal class CoreCommandQueue<C>(
         try { wake() } catch (error: Throwable) { synchronized(signal) { task.cancel(error) } }
         return task.await()
     }
-    fun snapshot() = synchronized(signal) { Snapshot(live.size, retained) }
-    fun hasReady() = synchronized(signal) { ready.isNotEmpty() }
+    fun snapshot() = synchronized(signal) {
+        Snapshot(live.size, retained, resources.size, resources.values.count { it.phase != ResourcePhase.OPEN })
+    }
+    fun hasReady() = synchronized(signal) { ready.isNotEmpty() || closing.isNotEmpty() }
 
     /** A real input/timer/readiness event (or another completed operation) may
      * make a previous WOULD_BLOCK operation runnable. No retry busy loop. */
@@ -84,12 +111,22 @@ internal class CoreCommandQueue<C>(
         }
         var completed = false
         repeat(limit) {
+            val resource = synchronized(signal) {
+                closing.pollFirst()?.also { it.phase = ResourcePhase.RUNNING }
+            }
+            if (resource != null) {
+                try { resource.release(core) } finally {
+                    synchronized(signal) { resources.remove(resource.scope) }
+                }
+                completed = true
+                return@repeat
+            }
             val task = synchronized(signal) {
                 ready.pollFirst()?.also { it.active = true; it.phase = Phase.RUNNING }
-            } ?: return Batch(false, completed)
+            } ?: return Batch(hasReady(), completed)
             if (task.run(core)) completed = true
         }
-        return synchronized(signal) { Batch(ready.isNotEmpty(), completed) }
+        return Batch(hasReady(), completed)
     }
     fun nextDelayMillis(): Long = synchronized(signal) {
         val now = clock.nowMillis()
@@ -100,7 +137,15 @@ internal class CoreCommandQueue<C>(
         if (closed == null) {
             closed = reason
             for (task in live) task.cancel(reason)
+            // Context destruction releases all native endpoints. Never invoke an unstarted
+            // endpoint callback after global stop; a running callback still retains its slot.
+            closing.clear()
+            val iterator = resources.values.iterator()
+            while (iterator.hasNext()) if (iterator.next().phase != ResourcePhase.RUNNING) iterator.remove()
         }
+    }
+    private inner class Resource(val scope: Scope, val release: (C) -> Unit) {
+        var phase = ResourcePhase.OPEN
     }
     private fun retire(task: Task<*>) {
         if (task.acknowledged && !task.active && live.remove(task)) {

@@ -15,6 +15,54 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class LwipPrototypeTest {
+    @Test fun resourceCloseWakesCoreAndReleasesOnceWithoutStoppingTheRunner() {
+        val core = Core(emptyList()).apply { timeoutGate = CountDownLatch(1) }
+        val prototype = LwipPrototype(Port()) { core.also { it.owner = Thread.currentThread() } }
+        val released = CountDownLatch(1)
+        val count = AtomicInteger()
+        val owner = AtomicReference<Thread>()
+        try {
+            prototype.start()
+            assertTrue(core.timeoutEntered.await(2, TimeUnit.SECONDS))
+            val scope = prototype.newResourceScope {
+                assertSame(core, it)
+                owner.set(Thread.currentThread()); count.incrementAndGet(); released.countDown()
+            }
+            assertEquals(1, prototype.snapshot().resourceScopes)
+            assertTrue(prototype.closeResourceScope(scope))
+            assertFalse(prototype.closeResourceScope(scope))
+            core.timeoutGate!!.countDown()
+            assertTrue("resource close must wake the core loop", released.await(2, TimeUnit.SECONDS))
+            assertSame(core.owner, owner.get())
+            assertEquals(1, count.get())
+            assertEquals(0, core.closes.get())
+            assertNull(prototype.snapshot().failure)
+            assertEquals(42, prototype.executeCommand(deadlineMillis = prototype.commandClock.nowMillis() + 1000) {
+                CoreAttempt.Ready(42)
+            })
+            assertEquals(0, prototype.snapshot().resourceScopes)
+            assertEquals(0, prototype.snapshot().closingResourceScopes)
+        } finally { core.timeoutGate!!.countDown(); prototype.close() }
+        assertEquals(1, core.closes.get())
+        assertEquals(1, count.get())
+    }
+
+    @Test fun failedResourceReleaseStopsAndDestroysTheContext() {
+        val core = Core(emptyList())
+        val port = Port()
+        val prototype = LwipPrototype(port) { core.also { it.owner = Thread.currentThread() } }
+        val reason = BackendFailure(BackendFailure.Kind.INTERNAL)
+        try {
+            prototype.start()
+            val scope = prototype.newResourceScope { throw reason }
+            prototype.closeResourceScope(scope)
+            assertTrue(prototype.awaitStopped(2000))
+            assertSame(reason, prototype.snapshot().failure)
+            assertEquals(1, core.closes.get())
+            assertEquals(1, port.closes.get())
+            assertEquals(0, prototype.snapshot().resourceScopes)
+        } finally { prototype.close() }
+    }
     @Test fun cancellingOneEndpointLeavesTheRunnerAndOtherCommandsUsable() {
         val core = Core(emptyList())
         val prototype = LwipPrototype(Port()) { core.also { it.owner = Thread.currentThread() } }
@@ -283,6 +331,7 @@ class LwipPrototypeTest {
     }
 
     private class Core(initial: List<ByteArray>) : LwipPrototypeCore {
+        val timeoutEntered = CountDownLatch(1)
         lateinit var owner: Thread
         private val output = ArrayDeque(initial)
         val received = CountDownLatch(1)
@@ -298,7 +347,7 @@ class LwipPrototypeTest {
             checkOwner(); received.countDown(); inputGate?.await(); output.add(frame.copyOf())
         }
         override fun poll() { checkOwner(); polls.incrementAndGet() }
-        override fun nextTimeoutMillis(): Long { checkOwner(); timeoutGate?.await(); return 60_000 }
+        override fun nextTimeoutMillis(): Long { checkOwner(); timeoutEntered.countDown(); timeoutGate?.await(); return 60_000 }
         override fun takeOutput(): ByteArray? {
             checkOwner()
             return output.pollFirst()?.also { taken.incrementAndGet() }

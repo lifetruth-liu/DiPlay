@@ -730,3 +730,38 @@ JUnit共3316项（shared1732/common1578/home6），零失败、错误、跳过�
 0d7a5c359ee1af807a02d37c56d4065daf73961bfa946173ecd2af9f07804cb6。
 公开树检查通过。此批没有修改JNI/native，未重跑设备测试或宿主native套件；
 不将历史设备结果记录为本批新证据，也未取得独立评审完成结果。
+
+### P3 预留核心线程资源关闭配额（2026-10-22）
+
+基于7e5a160a。CoreCommandQueue新增最多80个资源scope控制登记，覆盖OPEN、
+排队关闭、执行释放阶段。创建时预留控制槽和有界关闭队列，关闭不占业务队列。
+closeResource取消scope等待者并最多投递一次释放，返回表示首次投递而非释放完成。
+释放优先于普通命令，仍共享每轮32次预算；迟到业务结果在释放前完成discard。
+普通cancel仍只取消等待者，随后可以显式投递释放。结束后删除登记和回调。
+全会话停止丢弃未执行回调，由原有上下文销毁屏障释放native资源；运行中回调
+继续占槽直至返回。回调失败不重试，传给运行器触发整上下文停止。
+Snapshot增加resourceScopes/closingResourceScopes，不当作native存活数。
+
+资源限额占位实现真实red，未按限额拒绝登记，exit1：
+TEMP/diplay-command-resource-red.log。实现后7项资源测试和11项队列回归通过。
+运行器未转发关闭时red：diplay-command-resource-runner-red.log；接入后补测
+核心线程执行、一次释放、会话继续运行和释放失败后的上下文销毁。
+
+复核发现预分配早于配置校验。在128MiB测试JVM中，Int.MAX_VALUE资源限额的
+期望IllegalArgumentException实际为OutOfMemoryError，真实red、exit1：
+diplay-command-resource-config-red.log。将所有配置校验移至分配之前，最终资源8项、
+队列11项、运行器16项共35项在同一128MiB JVM全部通过：
+diplay-command-resource-final-green.log。运行器唤醒测试先等待核心到达长时间等待
+边界，再投递关闭，不依赖启动竞争窗口。首轮完整CI通过后发生上述调整，其结果
+不用于证明最终候选版本；以最终CI记录为准。
+
+回调只允许捕获有界端点标识/元数据并非阻塞执行；通用接口不检查lambda负载大小。
+此批尚未将公共UDP端点与native release接通，不宣称真实UDP端点关闭已验收。
+复制前缓冲准入、公共UDP/TCP、会话集成及实际设备门槛仍未完成。
+
+最终九项Android CI exit0，7m27s，250任务40执行：
+diplay-command-resource-final-ci.log。JUnit共3326项（shared1742/common1578/home6），
+零失败、错误、跳过。最终APK四ABI/16KiB/NX/许可证及源码摘要检查通过，SHA-256：
+4e919976e61c4d932a4aa7c6f4218c361175b99786fe406ce7ebbe194a8987f3。
+公开树及staged diff检查通过。此批JNI/native未修改，未重跑设备或native宿主套件；
+没有取得独立评审完成结果，不记作独立评审通过。
