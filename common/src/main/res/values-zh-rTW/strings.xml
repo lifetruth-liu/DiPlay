@@ -986,4 +986,14 @@
     <string name="cluster_projection_shape_description">半螢幕會在儀表板地圖旁保留儀表原本的車速與狀態資訊；全螢幕則讓地圖佔滿整個儀表板。CarPlay 地圖出現時 DiPlay 會設定該形態，否則會覆蓋你在車機上選好的導航模式。需要車機已授權網路 ADB。</string>
     <string name="settings_cluster_speedometer_album_color">速度表背景使用專輯顏色</string>
     <string name="settings_cluster_speedometer_album_color_description">平滑過渡至專輯邊框的顏色，並保留所選的不透明度。</string>
+    <string name="settings_wired_backend_title">有線網路後端（實驗性）</string>
+    <string name="settings_wired_backend_mode">模式</string>
+    <string name="settings_wired_backend_description">AUTO 保留目前的 VPN 路徑。VPN 明確使用 Android VPN。USERSPACE 用來測試透過 USB 執行的 lwIP。變更會在下次連線時生效。使用者空間模式不會要求 VPN 授權或 ADB。</string>
+    <string name="settings_wired_backend_auto">自動</string>
+    <string name="settings_wired_backend_vpn">VPN</string>
+    <string name="settings_wired_backend_userspace">使用者空間</string>
+    <string name="settings_wired_backend_clear_validation">清除 lwIP 驗證記錄</string>
+    <string name="settings_wired_backend_validation_cleared">已清除 lwIP 驗證記錄。</string>
+    <string name="wired_backend_failure_native_unavailable">使用者空間網路堆疊無法啟動。請選擇 VPN 或更新 DiPlay。</string>
+    <string name="wired_backend_failure_vpn_unavailable">Android 無法啟動 VPN 網路。請檢查 VPN 授權，或選擇使用者空間模式。</string>
 </resources>

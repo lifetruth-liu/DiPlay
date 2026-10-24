@@ -4,9 +4,89 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      run_lwip_benchmark:
+        description: Run the optional Linux TCP/UDP host microbenchmark
+        required: true
+        default: false
+        type: boolean
+      benchmark_duration_seconds:
+        description: Total measurement duration; 600 seconds is the minimum host benchmark gate
+        required: true
+        default: '600'
+        type: string
 permissions:
   contents: read
 jobs:
+  lwip-host:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify native source and ELF checker contracts
+        run: python3 -m unittest discover -s scripts/tests -p 'test_check_lwip_native.py'
+      - name: Verify fuzz and benchmark entries, metrics and CPU accounting contracts
+        run: python3 -m unittest discover -s scripts/tests -p 'test_lwip*.py'
+      - name: Native frame tests with ASan, UBSan and lwIP pool guards
+        run: bash scripts/test_lwip_host.sh --sanitize
+      - name: Capture lwIP host configuration cost report
+        run: build/lwip-host-linux/lwip_config_cost_report > build/lwip-host-linux/config-cost-report.json
+      - name: Run seeded sanitizer smoke for all native fuzz targets
+        run: |
+          for target in ethernet commands lifecycle; do
+            bash scripts/fuzz_lwip.sh --target "$target" \
+              --output "build/lwip-fuzz/$target" --runs 100 --seed 7
+          done
+      - name: Native test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lwip-host-reports
+          path: |
+            build/lwip-host-linux/ctest.log
+            build/lwip-host-linux/config-cost-report.json
+            build/lwip-host-linux/Testing/
+      - name: Fuzz smoke corpus, logs and build metadata
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lwip-fuzz-smoke
+          if-no-files-found: warn
+          path: |
+            build/lwip-fuzz/*/compiler-version.txt
+            build/lwip-fuzz/*/cmake-version.txt
+            build/lwip-fuzz/*/configure.log
+            build/lwip-fuzz/*/build.log
+            build/lwip-fuzz/*/build-metadata.json
+            build/lwip-fuzz/*/corpus/
+            build/lwip-fuzz/*/campaign-*/report.json
+            build/lwip-fuzz/*/campaign-*/batch-*.log
+            build/lwip-fuzz/*/campaign-*/crashes/
+  lwip-benchmark:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_lwip_benchmark }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run optional release-like Linux host benchmark
+        env:
+          BENCHMARK_SECONDS: ${{ inputs.benchmark_duration_seconds }}
+        run: sudo bash scripts/benchmark_lwip.sh --output build/lwip-benchmark --duration "$BENCHMARK_SECONDS"
+      - name: Host benchmark report and build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lwip-host-benchmark
+          if-no-files-found: warn
+          path: |
+            build/lwip-benchmark/report.json
+            build/lwip-benchmark/peer-report.json
+            build/lwip-benchmark/kernel.log
+            build/lwip-benchmark/configure.log
+            build/lwip-benchmark/build.log
+            build/lwip-benchmark/compiler-version.txt
+            build/lwip-benchmark/cmake-version.txt
+            build/lwip-benchmark/native-source-check.json
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -24,6 +104,8 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - name: Unit tests, lint and source-only debug build
         run: ./gradlew :shared:testDebugUnitTest :common:testDebugUnitTest :home:testDebugUnitTest :mobile:lintDebug :home:lintDebug :maphost:lintDebug :mobile:assembleDebug :home:assembleDebug :maphost:assembleDebug --stacktrace
+      - name: Verify pinned lwIP and four-ABI APK packaging
+        run: python3 scripts/check_lwip_native.py --apk mobile/build/outputs/apk/debug/mobile-debug.apk
       - name: Test reports
         if: always()
         uses: actions/upload-artifact@v4

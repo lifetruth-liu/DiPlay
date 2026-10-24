@@ -1,12 +1,11 @@
 package com.shilapi.xcertplay.airplay
 
 import java.io.Closeable
+import com.shilapi.xcertplay.network.backend.*
+import com.shilapi.xcertplay.network.backend.system.EndpointOwner
 import java.io.InputStream
 import java.net.Inet4Address
 import java.net.InetAddress
-import java.net.InetSocketAddress
-import java.net.ServerSocket
-import java.net.Socket
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -21,6 +20,7 @@ import java.util.concurrent.atomic.AtomicLong
 class IapTunnel(
     private val readKey: ByteArray,
     bindAddress: InetAddress = InetAddress.getByName("0.0.0.0"),
+    network: SessionNetwork? = null,
 ) : Closeable {
     interface Listener {
         fun onOpen(remoteAddress: String?) {}
@@ -29,12 +29,14 @@ class IapTunnel(
         fun onClosed(cause: Throwable?) {}
     }
 
+    private val transport = EndpointOwner(network, "airplay-iap", bindAddress)
+    private val sessionNetwork get() = transport.network
     private val closed = AtomicBoolean(false)
     private val readCounter = AtomicLong(0)
     private val bindAddress =
         if (bindAddress is Inet4Address) InetAddress.getByName("0.0.0.0") else bindAddress
-    private val servers = mutableListOf<ServerSocket>()
-    private var socket: Socket? = null
+    private val servers = mutableListOf<TcpListener>()
+    private var socket: TcpStream? = null
     private val threads = mutableListOf<Thread>()
     private val peerConnected = CountDownLatch(1)
     @Volatile private var listener: Listener = object : Listener {}
@@ -43,30 +45,19 @@ class IapTunnel(
         this.listener = listener
         val bound = bindAny()
         servers += bound
-        listener.onDebug("AirPlay iAP tunnel listener bound=${bound.localSocketAddress}")
+        listener.onDebug("AirPlay iAP tunnel listener bound=${bound.localEndpoint}")
         val secondaryAddress = if (bindAddress is java.net.Inet6Address) {
             InetAddress.getByName("0.0.0.0")
         } else {
             InetAddress.getByName("::")
         }
-        val secondary = ServerSocket()
         runCatching {
-            secondary.apply {
-                reuseAddress = true
-                bind(InetSocketAddress(secondaryAddress, bound.localPort))
-            }
+            transport.listen(sessionNetwork.endpoint(secondaryAddress, bound.localEndpoint.port), reuseAddress = true)
         }.onSuccess { secondary ->
             servers += secondary
-            listener.onDebug(
-                "AirPlay iAP tunnel secondary listener bound=" +
-                    "${secondary.localSocketAddress}",
-            )
+            listener.onDebug("AirPlay iAP tunnel secondary listener bound=${secondary.localEndpoint}")
         }.onFailure { error ->
-            safeClose(secondary)
-            listener.onDebug(
-                "AirPlay iAP tunnel secondary listener failed address=" +
-                    "$secondaryAddress port=${bound.localPort}: ${error.message}",
-            )
+            listener.onDebug("AirPlay iAP tunnel secondary listener failed family=${secondaryAddress.address.size} port=${bound.localEndpoint.port}: ${error.message}")
         }
         servers.forEach { server ->
             threads += Thread({ accept(server) }, "airplay-iap-tunnel").apply {
@@ -74,14 +65,10 @@ class IapTunnel(
                 start()
             }
         }
-        return bound.localPort
+        return bound.localEndpoint.port
     }
 
-    private fun bindAny(): ServerSocket =
-        ServerSocket().apply {
-            reuseAddress = true
-            bind(InetSocketAddress(bindAddress, 0))
-        }
+    private fun bindAny(): TcpListener = transport.listen(sessionNetwork.endpoint(bindAddress, 0), reuseAddress = true)
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
@@ -91,6 +78,7 @@ class IapTunnel(
         threads.toList().forEach(Thread::interrupt)
         threads.clear()
         peerConnected.countDown()
+        transport.close()
     }
 
     /** Waits until the iPhone has connected to the advertised dataPort. */
@@ -104,13 +92,13 @@ class IapTunnel(
         }
     }
 
-    private fun accept(bound: ServerSocket) {
+    private fun accept(bound: TcpListener) {
         listener.onDebug(
-            "AirPlay iAP tunnel accepting local=${bound.localSocketAddress}",
+            "AirPlay iAP tunnel accepting local=${bound.localEndpoint}",
         )
         while (!closed.get()) {
             val accepted = try {
-                bound.accept()
+                transport.accept(bound)
             } catch (error: Exception) {
                 if (!closed.get()) listener.onClosed(error)
                 return
@@ -119,22 +107,23 @@ class IapTunnel(
                 safeClose(accepted)
                 return
             }
-            accepted.setSoLinger(true, 0)
+            accepted.configure(TcpOptions(resetOnClose = true))
             socket = accepted
+            if (closed.get()) { accepted.close(); return }
             readCounter.set(0)
             peerConnected.countDown()
-            listener.onOpen(accepted.remoteSocketAddress?.toString())
+            listener.onOpen(accepted.remoteEndpoint.toString())
             run(accepted)
         }
     }
 
-    private fun run(sock: Socket) {
+    private fun run(sock: TcpStream) {
         var ciphertext = ByteArray(0)
         var plaintext = ByteArray(0)
         var failure: Throwable? = null
         var announcedData = false
         try {
-            val input = sock.getInputStream()
+            val input = sock.inputStream()
             val buffer = ByteArray(READ_CHUNK_BYTES)
             while (!closed.get()) {
                 val read = input.read(buffer)
@@ -156,7 +145,7 @@ class IapTunnel(
             failure = error
         } finally {
             if (socket === sock) socket = null
-            safeClose(sock)
+            runCatching { transport.release(sock) }
             if (!closed.get() && failure != null) listener.onClosed(failure)
         }
     }

@@ -3,3 +3,6 @@ contact_links:
   - name: Installation and connection help
     url: https://github.com/shihabal3amri/DiPlay/blob/main/docs/INSTALL.md
     about: Read setup and troubleshooting steps first.
+  - name: Experimental wired-backend compatibility report
+    url: https://github.com/shihabal3amri/DiPlay/issues/new?template=lwip_compatibility.yml
+    about: Record an explicit USERSPACE test result without implying vehicle certification.

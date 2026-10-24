@@ -5,6 +5,7 @@ LOCAL_MODULE := xcertplay_i2c
 LOCAL_SRC_FILES := linux_i2c_jni.c
 include $(BUILD_SHARED_LIBRARY)
 
+
 include $(CLEAR_VARS)
 LOCAL_MODULE := local_hotspot_radio
 LOCAL_SRC_FILES := local_hotspot_radio.c
@@ -20,3 +21,6 @@ LOCAL_C_INCLUDES := $(LOCAL_PATH)/speexdsp $(LOCAL_PATH)/speexdsp/include
 LOCAL_CFLAGS := -O2 -DFLOATING_POINT -DUSE_KISS_FFT -DEXPORT= -Wno-unused-parameter
 LOCAL_LDLIBS := -lm
 include $(BUILD_SHARED_LIBRARY)
+
+# Keep this at the end: the backend makefile has its own LOCAL_PATH.
+include $(LOCAL_PATH)/lwip_backend/Android.mk

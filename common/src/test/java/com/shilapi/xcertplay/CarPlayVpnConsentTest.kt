@@ -10,6 +10,7 @@ import android.widget.TextView
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.app.ActivityOptionsCompat
+import com.shilapi.xcertplay.network.backend.WiredBackendPreference
 import java.io.File
 import java.lang.reflect.InvocationTargetException
 import java.util.concurrent.ExecutorService
@@ -36,6 +37,7 @@ class CarPlayVpnConsentTest {
 
     @Before fun setUp() {
         VpnConsentTestShadow.failure = null
+        VpnConsentTestShadow.preparations = 0
         VpnConsentTestShadow.consent = Intent().setClassName(
             "com.android.vpndialogs", "com.android.vpndialogs.ConfirmDialog",
         )
@@ -88,6 +90,20 @@ class CarPlayVpnConsentTest {
         assertTrue(field("vpnReady"))
         assertFalse(field("awaitingVpnConsent"))
         assertEquals(0, launches)
+    }
+
+    @Test fun explicitUserspaceStartupDoesNotPrepareOrRequestVpnConsent() {
+        ReflectionHelpers.setField(activity, "wirelessEnabled", false)
+        ReflectionHelpers.setField(activity, "wiredBackendPreference", WiredBackendPreference.USERSPACE)
+        VpnConsentTestShadow.failure = SecurityException("must not be reached")
+
+        invoke("requestStartupPrerequisites")
+
+        assertEquals(0, VpnConsentTestShadow.preparations)
+        assertEquals(0, launches)
+        assertFalse(field("vpnReady"))
+        assertFalse(field("awaitingVpnConsent"))
+        assertFalse(log().contains("VPN consent unavailable"))
     }
 
     @Test fun pendingAuthorizationDoesNotLaunchTwice() {
@@ -162,7 +178,9 @@ class VpnConsentTestShadow {
     companion object {
         var consent: Intent? = null
         var failure: RuntimeException? = null
+        var preparations = 0
         @JvmStatic @Implementation fun prepare(context: Context): Intent? {
+            preparations++
             failure?.let { throw it }
             return consent
         }

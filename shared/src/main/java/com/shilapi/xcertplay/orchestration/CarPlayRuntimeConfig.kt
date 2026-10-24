@@ -3,6 +3,8 @@ package com.shilapi.xcertplay.orchestration
 import com.shilapi.xcertplay.transport.Iap2IdentificationConfig
 import com.shilapi.xcertplay.transport.UsbDeviceId
 import com.shilapi.xcertplay.network.WifiP2pChannels
+import com.shilapi.xcertplay.network.backend.WiredBackendPreference
+import com.shilapi.xcertplay.network.backend.WiredBackendSuccessCache
 import java.net.Inet6Address
 import java.net.InetAddress
 
@@ -70,6 +72,8 @@ class CarPlayRuntimeConfig(
     val wifiP2pPreferredChannel: Int = WifiP2pChannels.AUTO,
     val existingWifiSsid: String = "",
     val existingWifiPassphrase: String = "",
+    val wiredBackendPreference: WiredBackendPreference = WiredBackendPreference.AUTO,
+    val wiredBackendSuccessCache: WiredBackendSuccessCache? = null,
 ) {
     init {
         require(iphoneDevices.all { it.vendorId == APPLE_VENDOR_ID }) {

@@ -39,20 +39,30 @@ class NcmUsbBridge internal constructor(
     private var sequence = 0
     private var loggedWriteTimeout = false
     private var bulkOutAccepted = false
-    private var notReadyFrames = 0
+    @Volatile private var notReadyFrames = 0L
+    @Volatile private var sentFrames = 0L
+    @Volatile private var shortWriteCount = 0L
+    @Volatile private var queueHighWaterFrames = 0L
+    @Volatile private var queueHighWaterBytes = 0L
 
     /** [System.nanoTime] when the iPhone first took a frame on bulk OUT, or null while it still NAKs the pipe. */
     @Volatile var linkOpenedAtNanos: Long? = null
         private set
     private val frames = ArrayDeque<ByteArray>()
     private var queuedBytes = 0
+    private var receiveMaxFrames = MAX_QUEUED_FRAMES
+    private var receiveMaxBytes = MAX_QUEUED_BYTES
+    private var boundedPrototypeReceive = false
+    @Volatile var rejectedReceiveFrames = 0L
+        private set
+    private val rejectReceiveFrame: () -> Unit = { rejectedReceiveFrames++ }
     private var buffered = ByteArray(0)
     private var bufferedSize = 0
     private var optionalShortPacketPad = false
     // A full-speed link uses 64-byte packets; the short-packet pad follows the real packet size.
     private val usbPacketSize = inEndpoint.maxPacketSize.takeIf { it > 0 } ?: USB_PACKET_SIZE
     private val resyncTimes = ArrayDeque<Long>()
-    private var resyncCount = 0
+    @Volatile private var resyncCount = 0L
     private var resyncReason: String? = null
     private var resyncSkipped = 0
     private val readBuffer = ByteArray(READ_CHUNK_BYTES)
@@ -75,9 +85,27 @@ class NcmUsbBridge internal constructor(
     }
 
     /** Wraps one Ethernet frame in one NTB16 block and writes it to bulk OUT. */
-    fun send(frame: ByteArray, timeoutMillis: Int) = synchronized(writeLock) {
-        checkOpen()
+    fun send(frame: ByteArray, timeoutMillis: Int) {
+        when (val result = sendFrame(frame, timeoutMillis)) {
+            is NcmSendResult.Failed -> throw result.cause
+            NcmSendResult.Sent, NcmSendResult.NotReady -> Unit
+        }
+    }
+
+    /** Blocking USB operation for an I/O worker; never call on the lwIP core thread. */
+    fun sendFrame(frame: ByteArray, timeoutMillis: Int): NcmSendResult {
         require(timeoutMillis > 0) { "timeoutMillis must be positive" }
+        return synchronized(writeLock) {
+            try {
+                sendLocked(frame, timeoutMillis)
+            } catch (error: IphoneUsbException) {
+                NcmSendResult.Failed(error)
+            }
+        }
+    }
+
+    private fun sendLocked(frame: ByteArray, timeoutMillis: Int): NcmSendResult {
+        checkOpen()
         val sequence = synchronized(stateLock) {
             checkOpenLocked()
             this.sequence.also { this.sequence = (this.sequence + 1) and 0xffff }
@@ -88,12 +116,30 @@ class NcmUsbBridge internal constructor(
         // timeout, and each USBMUX write of the iAP2 handshake finished only when one expired:
         // ~2 s per step on Android 8.1–14 (#634, #335, #301). Until the phone takes its first
         // frame, a frame that cannot go out at once is dropped, as it was after the full timeout.
-        val transferred = connection.bulkTransfer(
-            outEndpoint,
-            block,
-            block.size,
-            if (bulkOutAccepted) timeoutMillis else minOf(timeoutMillis, NOT_READY_WRITE_TIMEOUT_MILLIS),
-        )
+        val transferred = try {
+            connection.bulkTransfer(
+                outEndpoint,
+                block,
+                block.size,
+                if (bulkOutAccepted) timeoutMillis else minOf(timeoutMillis, NOT_READY_WRITE_TIMEOUT_MILLIS),
+            )
+        } catch (error: RuntimeException) {
+            throw failSession("NCM write failed", error)
+        }
+        // A detach/close may have completed while bulkTransfer was in flight.
+        var readyDiagnostic: String? = null
+        val result = synchronized(stateLock) {
+            checkOpenLocked()
+            val firstAccepted = !bulkOutAccepted && transferred == block.size
+            completeSendLocked(transferred, block.size).also {
+                if (firstAccepted) readyDiagnostic = "NCM bulk-out ready after $notReadyFrames dropped frames"
+            }
+        }
+        readyDiagnostic?.let { message -> runCatching { onDiagnostic(message) } }
+        return result
+    }
+
+    private fun completeSendLocked(transferred: Int, expected: Int): NcmSendResult {
         // Before StartCarPlaySession the phone keeps the NCM data path NAKed. Android reports the
         // resulting timeout as -1; it is not a detach and later packets must be allowed to retry.
         if (transferred <= 0) {
@@ -102,27 +148,47 @@ class NcmUsbBridge internal constructor(
                 loggedWriteTimeout = true
                 Log.i(IphoneCarPlayConfiguration.TAG, "ncm bulk-out not ready; retaining bridge for retry")
             }
-            return@synchronized
+            return NcmSendResult.NotReady
+        }
+        if (transferred != expected) {
+            shortWriteCount++
+            return NcmSendResult.Failed(failSession("NCM write transferred $transferred of $expected bytes"))
         }
         if (!bulkOutAccepted) {
             bulkOutAccepted = true
             linkOpenedAtNanos = System.nanoTime()
-            runCatching { onDiagnostic("NCM bulk-out ready after $notReadyFrames dropped frames") }
         }
-        if (transferred != block.size) {
-            throw IphoneUsbException.DeviceUnavailable(
-                "NCM write transferred $transferred of ${block.size} bytes",
-            )
-        }
+        sentFrames++
         traffic.sent()
         if (loggedWriteTimeout) {
             loggedWriteTimeout = false
             Log.i(IphoneCarPlayConfiguration.TAG, "ncm bulk-out became ready")
         }
+        return NcmSendResult.Sent
     }
 
     /** Frames to and from the iPhone so far, for a report line; see [NcmTrafficCounter]. */
     fun trafficSummary(airPlayPort: Int?): String = traffic.summary(airPlayPort)
+
+    internal data class RuntimeCounters(
+        val txSent: Long,
+        val txNotReady: Long,
+        val txShortWrite: Long,
+        val rxResync: Long,
+        val rxRejected: Long,
+        val rxQueueHighWaterFrames: Long,
+        val rxQueueHighWaterBytes: Long,
+    )
+
+    internal fun runtimeCounters() = RuntimeCounters(
+        txSent = sentFrames,
+        txNotReady = notReadyFrames,
+        txShortWrite = shortWriteCount,
+        rxResync = resyncCount,
+        rxRejected = rejectedReceiveFrames,
+        rxQueueHighWaterFrames = queueHighWaterFrames,
+        rxQueueHighWaterBytes = queueHighWaterBytes,
+    )
 
     /** Whether the iPhone tried to connect to [port] at or after [sinceNanos]; see [NcmTrafficCounter]. */
     fun connectionAttemptSince(port: Int, sinceNanos: Long): Boolean = traffic.connectionAttemptSince(port, sinceNanos)
@@ -149,6 +215,14 @@ class NcmUsbBridge internal constructor(
                 appendBuffered(readBuffer, chunkLength)
             }
         }
+    }
+
+    /** Configure once under exclusive ownership, before starting the prototype I/O workers. */
+    internal fun limitReceiveQueue(maxFrames: Int, maxBytes: Int) = synchronized(readLock) {
+        require(maxFrames in 1..MAX_QUEUED_FRAMES && maxBytes in 1514..MAX_QUEUED_BYTES)
+        checkOpen()
+        if (frames.size > maxFrames || queuedBytes > maxBytes) throw IphoneUsbException.ResourceLimit("NCM receive queue exceeds new budget")
+        receiveMaxFrames = maxFrames; receiveMaxBytes = maxBytes; boundedPrototypeReceive = true
     }
 
     override fun close() {
@@ -237,10 +311,17 @@ class NcmUsbBridge internal constructor(
                 continue
             }
             if (bufferedSize < blockLength) return
-            for (frame in Ntb16Codec.parse(buffered, 0, blockLength)) enqueueFrame(frame)
+            val parsed = try {
+                Ntb16Codec.parseBounded(buffered, 0, blockLength, receiveMaxFrames - frames.size,
+                    receiveMaxBytes - queuedBytes, if (boundedPrototypeReceive) 14 else 1,
+                    if (boundedPrototypeReceive) 1514 else 65_507, rejectReceiveFrame)
+            } catch (_: Ntb16Codec.ReceiveLimitExceeded) { throw receiveLimitFailure() }
+            for (frame in parsed) enqueueFrame(frame)
             discard(blockLength)
             optionalShortPacketPad = blockLength % usbPacketSize == 0
             finishResync()
+            // Let the consumer drain this NTB before admitting the next buffered block.
+            if (boundedPrototypeReceive && frames.isNotEmpty()) return
         }
     }
 
@@ -272,7 +353,7 @@ class NcmUsbBridge internal constructor(
     private fun finishResync() {
         val reason = resyncReason ?: return
         resyncReason = null
-        if (resyncCount <= LOGGED_RESYNCS || resyncCount % 50 == 0) {
+        if (resyncCount <= LOGGED_RESYNCS.toLong() || resyncCount % 50 == 0L) {
             runCatching { onDiagnostic("NCM resynchronized after $reason; skipped=$resyncSkipped resyncs=$resyncCount") }
         }
     }
@@ -306,11 +387,20 @@ class NcmUsbBridge internal constructor(
     }
 
     private fun enqueueFrame(frame: ByteArray) {
-        if (frames.size >= MAX_QUEUED_FRAMES || queuedBytes + frame.size > MAX_QUEUED_BYTES) {
-            throw failSession("NCM frame queue exceeded its bounds")
+        if (frames.size >= receiveMaxFrames || queuedBytes + frame.size > receiveMaxBytes) {
+            throw receiveLimitFailure()
         }
         frames.addLast(frame)
         queuedBytes += frame.size
+        queueHighWaterFrames = maxOf(queueHighWaterFrames, frames.size.toLong())
+        queueHighWaterBytes = maxOf(queueHighWaterBytes, queuedBytes.toLong())
+    }
+
+    private fun receiveLimitFailure(): IphoneUsbException {
+        val error = if (boundedPrototypeReceive) IphoneUsbException.ResourceLimit("NCM receive budget exceeded")
+            else IphoneUsbException.DeviceUnavailable("NCM frame queue exceeded its bounds")
+        synchronized(stateLock) { if (failure == null) failure = error }
+        return error
     }
 
     private fun pollFrame(): ByteArray {

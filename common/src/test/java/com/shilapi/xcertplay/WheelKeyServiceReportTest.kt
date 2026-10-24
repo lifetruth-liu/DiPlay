@@ -182,5 +182,7 @@ class WheelKeyServiceReportTest {
         assertTrue(lines[serviceLine + 2], lines[serviceLine + 2].endsWith("  wheel key service connected"))
         assertTrue(lines[serviceLine + 3], lines[serviceLine + 3].endsWith("  key 137/0 device 7 left to the head unit"))
         assertEquals("", lines[serviceLine + 4])
+        assertTrue(text, text.contains("--- Last wired backend diagnostics ---"))
+        assertTrue(text, text.contains("wired.backend.requested="))
     }
 }

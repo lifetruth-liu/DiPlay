@@ -99,6 +99,8 @@ import com.shilapi.xcertplay.media.AndroidMediaSink
 import com.shilapi.xcertplay.media.CarPlayTouchMapper
 import com.shilapi.xcertplay.media.CarPlayVideoLayout
 import com.shilapi.xcertplay.network.CarPlayVpnService
+import com.shilapi.xcertplay.network.backend.WiredBackendPreference
+import com.shilapi.xcertplay.network.backend.WiredBackendSelector
 import com.shilapi.xcertplay.orchestration.CarPlayController
 import com.shilapi.xcertplay.orchestration.CarPlayRuntimeConfig
 import com.shilapi.xcertplay.network.WirelessStartupFailure
@@ -226,6 +228,8 @@ class CarPlayHostActivity : ComponentActivity() {
         existingWifiPassphrase = existingWifiPassphrase,
         locationReportingEnabled = locationReportingEnabled,
         availableCurrentMilliAmps = AirPlayPersistence.loadUsbChargingCurrent(this).milliAmps,
+        wiredBackendPreference = AirPlayPersistence.loadWiredBackendPreference(this),
+        wiredBackendSuccessCache = AirPlayPersistence.loadWiredBackendSuccessCache(this),
     )
 
     private val vpnConsent =
@@ -544,6 +548,7 @@ class CarPlayHostActivity : ComponentActivity() {
     private var microphoneAvailable = false
     private var microphonePermissionResolved = false
     private var wirelessEnabled = false
+    private var wiredBackendPreference = WiredBackendPreference.AUTO
     private var mfiTarget = MfiTarget.LOCAL
     private var mfiI2cPath = AirPlayPersistence.DEFAULT_MFI_I2C_PATH
     private var remoteMfiServer = ""
@@ -966,6 +971,7 @@ class CarPlayHostActivity : ComponentActivity() {
         wirelessHotspotMode = AirPlayPersistence.loadWirelessHotspotMode(this)
         existingWifiSsid = AirPlayPersistence.loadExistingWifiSsid(this)
         existingWifiPassphrase = AirPlayPersistence.loadExistingWifiPassphrase(this)
+        wiredBackendPreference = AirPlayPersistence.loadWiredBackendPreference(this)
         manualHotspotSsid = AirPlayPersistence.loadManualHotspotSsid(this)
         manualHotspotPassphrase = AirPlayPersistence.loadManualHotspotPassphrase(this)
         manualHotspotBand = AirPlayPersistence.loadManualHotspotBand(this)
@@ -982,7 +988,7 @@ class CarPlayHostActivity : ComponentActivity() {
         if (wirelessEnabled) {
             requestWirelessPermissions()
         } else if (!requestWiredPermissions()) {
-            requestVpnConsent()
+            if (wiredBackendPreference != WiredBackendPreference.USERSPACE) requestVpnConsent()
         }
     }
 
@@ -5623,6 +5629,13 @@ class CarPlayHostActivity : ComponentActivity() {
             } else {
                 null
             },
+            onWiredBackendSuccess = {
+                Build.SUPPORTED_ABIS.firstOrNull()?.let { abi ->
+                    AirPlayPersistence.saveWiredBackendSuccessCache(
+                        this, WiredBackendSelector.STACK_VERSION, abi,
+                    )
+                }
+            },
         )
         controller = next
         resetSidePanel() // a new session starts without the side panel
@@ -5940,7 +5953,8 @@ class CarPlayHostActivity : ComponentActivity() {
             return
         }
         val size = activeDisplaySize ?: return
-        val transportReady = if (wirelessEnabled) wirelessPermissionsReady else vpnReady
+        val transportReady = if (wirelessEnabled) wirelessPermissionsReady
+            else wiredBackendPreference == WiredBackendPreference.USERSPACE || vpnReady
         val locationReady = !locationReportingEnabled || locationPermissionAvailable
         if (
             !transportReady ||
@@ -6275,6 +6289,7 @@ class CarPlayHostActivity : ComponentActivity() {
             airPlayCommandExecutor.shutdown()
             if (terminateProcess) {
                 applicationContext.stopService(Intent(applicationContext, CarPlayVpnService::class.java))
+                applicationContext.stopService(Intent(applicationContext, com.shilapi.xcertplay.network.CarPlaySessionService::class.java))
             }
             Log.i(TAG, "shutdown complete clean=$clean")
             applicationContext.stopService(Intent(applicationContext, DiPlaySessionService::class.java))
@@ -6669,6 +6684,8 @@ class CarPlayHostActivity : ComponentActivity() {
 
     // The keywords are English; matching the English text keeps the result the same in every UI language.
     private fun friendlyStage(message: String, englishMessage: String = message): String = when {
+        message == getString(R.string.wired_backend_failure_native_unavailable) ||
+            message == getString(R.string.wired_backend_failure_vpn_unavailable) -> message
         message == getString(R.string.vpn_authorization_unavailable) -> message
         // It says where to look itself; its word "permissions" would turn it into the generic permission line.
         message == getString(R.string.could_not_start_carplay_return_to_diplay_and_check_app_per) -> message
@@ -6829,11 +6846,17 @@ class CarPlayHostActivity : ComponentActivity() {
             if (wirelessEnabled) res.getString(R.string.starting_airplay_service) else res.getString(R.string.status_attaching_ncm)
         CarPlayStatus.RunningControl -> res.getString(R.string.carplay_control_running)
         CarPlayStatus.ControlEnded -> res.getString(R.string.carplay_control_window_ended)
-        is CarPlayStatus.Failed -> when (startupFailure) {
-            WirelessStartupFailure.HOTSPOT_NOT_READY -> res.getString(R.string.hotspot_network_not_ready)
-            WirelessStartupFailure.FIRST_TCP_TIMEOUT -> res.getString(R.string.first_tcp_timeout)
-            WirelessStartupFailure.WIFI_DIRECT_BESIDE_HOTSPOT -> res.getString(R.string.wifi_direct_refused_beside_hotspot)
-            else -> res.getString(R.string.status_failed, message)
+        is CarPlayStatus.Failed -> when (backendFailure) {
+            com.shilapi.xcertplay.network.backend.BackendDiagnosticFailure.NATIVE_UNAVAILABLE ->
+                res.getString(R.string.wired_backend_failure_native_unavailable)
+            com.shilapi.xcertplay.network.backend.BackendDiagnosticFailure.VPN_UNAVAILABLE ->
+                res.getString(R.string.wired_backend_failure_vpn_unavailable)
+            else -> when (startupFailure) {
+                WirelessStartupFailure.HOTSPOT_NOT_READY -> res.getString(R.string.hotspot_network_not_ready)
+                WirelessStartupFailure.FIRST_TCP_TIMEOUT -> res.getString(R.string.first_tcp_timeout)
+                WirelessStartupFailure.WIFI_DIRECT_BESIDE_HOTSPOT -> res.getString(R.string.wifi_direct_refused_beside_hotspot)
+                else -> res.getString(R.string.status_failed, message)
+            }
         }
     }
 

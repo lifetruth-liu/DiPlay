@@ -926,4 +926,14 @@
     <string name="cluster_projection_shape_description">При половине экрана скорость и состояние, которые панель обычно показывает, остаются рядом с картой; на весь экран карта занимает всю панель. DiPlay задаёт этот вид при каждом появлении карты CarPlay и иначе перекрывает вид, выбранный в машине. Требуется ADB по сети на головном устройстве.</string>
     <string name="settings_cluster_speedometer_album_color">Цвет альбома для фона спидометра</string>
     <string name="settings_cluster_speedometer_album_color_description">Плавно меняет фон на цвет рамки альбома. Сохраняет выбранную непрозрачность.</string>
+    <string name="settings_wired_backend_title">Проводной сетевой механизм (экспериментально)</string>
+    <string name="settings_wired_backend_mode">Режим</string>
+    <string name="settings_wired_backend_description">AUTO сохраняет текущий путь через VPN. VPN явно использует VPN Android. USERSPACE проверяет lwIP через USB. Изменения применяются при следующем подключении. Пользовательский режим не запрашивает разрешение VPN или ADB.</string>
+    <string name="settings_wired_backend_auto">Автоматически</string>
+    <string name="settings_wired_backend_vpn">VPN</string>
+    <string name="settings_wired_backend_userspace">Пользовательский режим</string>
+    <string name="settings_wired_backend_clear_validation">Очистить запись проверки lwIP</string>
+    <string name="settings_wired_backend_validation_cleared">Запись проверки lwIP очищена.</string>
+    <string name="wired_backend_failure_native_unavailable">Не удалось запустить пользовательский сетевой стек. Выберите VPN или обновите DiPlay.</string>
+    <string name="wired_backend_failure_vpn_unavailable">Android не удалось запустить сеть VPN. Проверьте разрешение VPN или выберите пользовательский режим.</string>
 </resources>

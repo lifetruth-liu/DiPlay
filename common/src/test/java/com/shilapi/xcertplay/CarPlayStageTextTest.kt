@@ -3,6 +3,7 @@ package com.shilapi.xcertplay
 import android.os.Handler
 import android.widget.TextView
 import com.shilapi.xcertplay.host.R
+import com.shilapi.xcertplay.network.backend.BackendDiagnosticFailure
 import com.shilapi.xcertplay.orchestration.CarPlayStatus
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.atomic.AtomicBoolean
@@ -45,6 +46,17 @@ class CarPlayStageTextTest {
     @Test @Config(qualifiers = "zh-rCN") fun chineseStages() {
         assertNotEquals("Connection interrupted. Retrying…", activity.getString(R.string.connection_interrupted_retrying))
         stagesFollowTheConnection()
+    }
+
+    @Test @Config(qualifiers = "en") fun wiredBackendFailuresHaveActionableMessages() {
+        assertStage(
+            R.string.wired_backend_failure_native_unavailable,
+            CarPlayStatus.Failed("NATIVE_UNAVAILABLE", backendFailure = BackendDiagnosticFailure.NATIVE_UNAVAILABLE),
+        )
+        assertStage(
+            R.string.wired_backend_failure_vpn_unavailable,
+            CarPlayStatus.Failed("VPN_UNAVAILABLE", backendFailure = BackendDiagnosticFailure.VPN_UNAVAILABLE),
+        )
     }
 
     private fun stagesFollowTheConnection() {

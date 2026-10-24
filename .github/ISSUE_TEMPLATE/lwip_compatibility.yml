@@ -1,0 +1,100 @@
+name: Experimental wired-backend compatibility
+description: Record a reproducible test of DiPlay's experimental USERSPACE backend.
+title: '[Wired compatibility] '
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This form records test evidence; it does not certify a vehicle or request that USERSPACE become the default. Issues and attachments are public. Never attach credentials, pairing material, media, or raw packet captures. A reviewed diagnostic report is optional.
+  - type: input
+    id: app-build
+    attributes:
+      label: DiPlay version and build variant
+      description: Include the exact release/debug version or candidate commit.
+      placeholder: 'For example: 0.2.22-debug / commit SHA'
+    validations:
+      required: true
+  - type: input
+    id: apk-sha256
+    attributes:
+      label: APK SHA-256
+      description: Optional, but recommended for locally built candidates.
+    validations:
+      required: false
+  - type: input
+    id: head-unit
+    attributes:
+      label: Car and head unit
+      description: Include model/year, head-unit model, Android/API, DiLink/firmware version and ABI if known.
+    validations:
+      required: true
+  - type: input
+    id: iphone
+    attributes:
+      label: iPhone and iOS version
+    validations:
+      required: true
+  - type: dropdown
+    id: requested-backend
+    attributes:
+      label: Requested wired backend
+      options:
+        - USERSPACE
+        - AUTO
+        - VPN
+        - Setting unavailable / unsure
+    validations:
+      required: true
+  - type: dropdown
+    id: effective-backend
+    attributes:
+      label: Effective backend from diagnostics
+      options:
+        - USERSPACE
+        - VPN
+        - Failed before backend selection
+        - Not tested / unknown
+    validations:
+      required: true
+  - type: dropdown
+    id: vpn-state
+    attributes:
+      label: VPN authorization state on this device
+      options:
+        - VPN prompt shown and granted
+        - No VPN authorization UI available
+        - Android denied VPN establishment
+        - User declined or cancelled
+        - Not tested / unknown
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: Test result
+      options:
+        - CarPlay session reached the home screen
+        - Failed before NCM was ready
+        - Failed during iAP2 or MFi setup
+        - Failed while attaching the network backend
+        - iPhone did not open the AirPlay control connection
+        - Session started but a media/control channel failed
+        - Not tested / unknown
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps, expected behavior and observed result
+      description: State whether testing used a real iPhone/NCM or an emulator/fake, and include the first failure stage and approximate local time.
+      render: text
+    validations:
+      required: true
+  - type: upload
+    id: diagnostic-report
+    attributes:
+      label: Optional reviewed diagnostic report
+      description: Attach only after reviewing and redacting it. Do not attach raw pcap, media, credentials, pairing data or full device addresses.
+      accept: '.txt,.log,.zip'
+    validations:
+      required: false

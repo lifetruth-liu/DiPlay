@@ -2,6 +2,8 @@ package com.shilapi.xcertplay.backup
 
 import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
+import java.net.ConnectException
+import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.URL
 import java.util.concurrent.atomic.AtomicReference
@@ -378,12 +380,34 @@ class SettingsBackupServerTest {
 
     @Test
     fun severalIdleConnectionsDoNotHoldUpTheNextRequestEither() {
-        val idle = List(6) { Socket("127.0.0.1", endpoint.port) }
+        val idle = mutableListOf<Socket>()
         try {
+            // Six spare connections exceed the listener's pending backlog of four. On Windows
+            // a connect can be refused before the accept thread gets a turn, even while bound.
+            // Prepare accepted idle clients here; the request below tests worker independence.
+            repeat(6) { idle.add(connectIdleClient()) }
             Thread.sleep(200)
             assertEquals(200, get("/b/${endpoint.token}/export").first)
         } finally {
             idle.forEach { it.close() }
+        }
+    }
+
+    private fun connectIdleClient(): Socket {
+        val until = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(2)
+        while (true) {
+            val socket = Socket()
+            try {
+                socket.connect(InetSocketAddress("127.0.0.1", endpoint.port), 1_000)
+                return socket
+            } catch (failure: ConnectException) {
+                socket.close()
+                if (System.nanoTime() >= until) throw failure
+                Thread.sleep(10)
+            } catch (failure: Throwable) {
+                socket.close()
+                throw failure
+            }
         }
     }
 

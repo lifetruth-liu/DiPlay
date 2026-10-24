@@ -1,11 +1,10 @@
 package com.shilapi.xcertplay.airplay
 
 import java.io.Closeable
+import com.shilapi.xcertplay.network.backend.*
+import com.shilapi.xcertplay.network.backend.system.EndpointOwner
 import java.io.IOException
-import java.net.DatagramPacket
-import java.net.DatagramSocket
 import java.net.InetAddress
-import java.net.InetSocketAddress
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -35,6 +34,8 @@ class AudioStream(
     private val key: ByteArray,
     private val streamType: Int = -1,
     private val onDiagnostic: (String) -> Unit = {},
+    network: SessionNetwork? = null,
+    private val receiveMaxAgeMillis: Long = 0,
 ) : Closeable {
     interface Listener {
         fun onStarted(firstSample: Int) {}
@@ -47,26 +48,40 @@ class AudioStream(
         ) {}
     }
 
+    private val transport = EndpointOwner(network, "airplay-audio")
+    private val sessionNetwork get() = transport.network
     private val closed = AtomicBoolean(false)
     private val receivedPackets = AtomicInteger()
     private val decryptedPackets = AtomicInteger()
     private val authenticationFailures = AtomicInteger()
-    private var dataSocket: DatagramSocket? = null
-    private var controlSocket: DatagramSocket? = null
+    private var dataSocket: UdpEndpoint? = null
+    private var controlSocket: UdpEndpoint? = null
     private var dataThread: Thread? = null
     private var controlThread: Thread? = null
     private var started = false
 
+    init {
+        require(receiveMaxAgeMillis in 0..0xffff_ffffL)
+    }
+
     fun listen(listener: Listener): Pair<Int, Int> {
         val data = bindAnyPort()
+        try {
+            if (receiveMaxAgeMillis > 0) {
+                (data as? UdpQueueAgeControl)?.setReceiveMaxAge(receiveMaxAgeMillis)
+            }
+        } catch (error: Throwable) {
+            data.close()
+            throw error
+        }
         // Keep short Wi-Fi bursts in the kernel while decrypting or scheduling pauses
         // the receive thread. The platform may cap this request; log the actual size.
-        val originalBufferBytes = runCatching { data.receiveBufferSize }.getOrDefault(0)
+        val originalBufferBytes = runCatching { data.receiveBufferSize() }.getOrDefault(0)
         if (originalBufferBytes < AUDIO_RECEIVE_BUFFER_BYTES) {
-            runCatching { data.receiveBufferSize = AUDIO_RECEIVE_BUFFER_BYTES }
+            runCatching { data.receiveBufferSize(AUDIO_RECEIVE_BUFFER_BYTES) }
         }
-        onDiagnostic("Audio UDP receive buffer type=$streamType original=$originalBufferBytes requested=$AUDIO_RECEIVE_BUFFER_BYTES actual=${runCatching { data.receiveBufferSize }.getOrDefault(0)}")
-        val control = bindAnyPort()
+        onDiagnostic("Audio UDP receive buffer type=$streamType original=$originalBufferBytes requested=$AUDIO_RECEIVE_BUFFER_BYTES actual=${runCatching { data.receiveBufferSize() }.getOrDefault(0)}")
+        val control = try { bindAnyPort() } catch (error: Throwable) { data.close(); throw error }
         dataSocket = data
         controlSocket = control
         dataThread = Thread({ runData(data, listener) }, "airplay-audio-rx").apply {
@@ -77,7 +92,7 @@ class AudioStream(
             isDaemon = true
             start()
         }
-        return data.localPort to control.localPort
+        return data.localEndpoint.port to control.localEndpoint.port
     }
 
     override fun close() {
@@ -86,30 +101,33 @@ class AudioStream(
         controlSocket?.close()
         dataThread?.interrupt()
         controlThread?.interrupt()
+        transport.close()
     }
 
-    private fun runData(socket: DatagramSocket, listener: Listener) {
+    private fun runData(socket: UdpEndpoint, listener: Listener) {
         // When the head unit opens its 360° camera, default-priority audio threads wait behind it (#737).
         runCatching { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO) }
         val stats = StreamReceiveStats("audio type=$streamType", onDiagnostic)
         val buffer = ByteArray(DATAGRAM_BYTES)
         try {
             while (!closed.get()) {
-                val packet = DatagramPacket(buffer, buffer.size)
-                try {
+                val packet = try {
                     stats.reading()
-                    socket.receive(packet)
+                    socket.receive(buffer)
+                } catch (failure: BackendFailure) {
+                    if (failure.kind == BackendFailure.Kind.TIMEOUT && !closed.get()) continue else return
                 } catch (_: Exception) {
                     if (closed.get()) return else continue
                 }
+                if (packet.truncated) { stats.processed(); continue }
                 stats.received(
-                    size = packet.length,
-                    sequence = if (packet.length >= RTP_HEADER_LEN) {
+                    size = packet.copiedLength,
+                    sequence = if (packet.copiedLength >= RTP_HEADER_LEN) {
                         ((buffer[2].toInt() and 0xff) shl 8) or (buffer[3].toInt() and 0xff)
                     } else null,
-                    timestamp = if (packet.length >= RTP_HEADER_LEN) readU32Be(buffer, 4) else null,
+                    timestamp = if (packet.copiedLength >= RTP_HEADER_LEN) readU32Be(buffer, 4) else null,
                 )
-                val wire = packet.data.copyOf(packet.length)
+                val wire = buffer.copyOf(packet.copiedLength)
                 val packetNumber = receivedPackets.incrementAndGet()
                 if (wire.size < RTP_HEADER_LEN + TAIL_LEN) {
                     if (packetNumber == 1) {
@@ -178,23 +196,20 @@ class AudioStream(
         } finally { stats.flush(ended = true) }
     }
 
-    private fun runControl(socket: DatagramSocket) {
+    private fun runControl(socket: UdpEndpoint) {
         val buffer = ByteArray(DATAGRAM_BYTES)
         while (!closed.get()) {
             try {
-                socket.receive(DatagramPacket(buffer, buffer.size))
+                socket.receive(buffer)
+            } catch (failure: BackendFailure) {
+                if (failure.kind != BackendFailure.Kind.TIMEOUT) return
             } catch (_: Exception) {
                 if (closed.get()) return
             }
         }
     }
 
-    private fun bindAnyPort(): DatagramSocket {
-        val socket = DatagramSocket(null)
-        socket.reuseAddress = true
-        socket.bind(InetSocketAddress(InetAddress.getByName("::"), 0))
-        return socket
-    }
+    private fun bindAnyPort(): UdpEndpoint = transport.bindUdp(sessionNetwork.wildcard())
 
     private fun readU32Be(source: ByteArray, offset: Int): Int =
         ((source[offset].toInt() and 0xff) shl 24) or

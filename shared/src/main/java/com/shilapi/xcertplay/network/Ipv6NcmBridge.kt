@@ -34,6 +34,7 @@ class Ipv6NcmBridge(
     private var loggedInbound = false
     private var loggedOutbound = false
     private var loggedWaitingForPeer = false
+    private val logGate = Ipv6NcmBridgeLogGate()
     private var inboundLogBudget = 16
     private var outboundLogBudget = 24
     private val running = AtomicBoolean(false)
@@ -106,7 +107,7 @@ class Ipv6NcmBridge(
                 }
                 val tunPacket = buffer.copyOf(length)
                 val ipv6 = EthernetIpv6Codec.addNeighborAdvertisementTargetMac(tunPacket, hostMac)
-                if (ipv6.size != tunPacket.size) {
+                if (ipv6.size != tunPacket.size && logGate.shouldLogNeighborAdvertisementRewrite()) {
                     Log.i(TAG, "ncm added target-link-layer option to neighbor advertisement")
                 }
                 if (outboundLogBudget > 0) {

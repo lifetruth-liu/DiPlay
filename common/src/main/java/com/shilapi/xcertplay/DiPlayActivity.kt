@@ -81,6 +81,7 @@ import com.shilapi.xcertplay.network.CarHotspotSettings
 import com.shilapi.xcertplay.network.CarHotspotTethering
 import com.shilapi.xcertplay.network.HotspotCredentials
 import com.shilapi.xcertplay.network.WifiP2pChannels
+import com.shilapi.xcertplay.network.backend.WiredBackendPreference
 import com.shilapi.xcertplay.orchestration.ManualHotspotProvisioning
 import com.shilapi.xcertplay.orchestration.ManualHotspotSecurity
 import com.shilapi.xcertplay.orchestration.ManualHotspotValidation
@@ -122,6 +123,7 @@ internal enum class SettingsSection {
     DISPLAY_AND_PERFORMANCE,
     EXPERIMENTAL_DISPLAY,
     ADVANCED_MEDIA,
+    EXPERIMENTAL_NETWORK,
     AMBIENT_LIGHTING,
     CAR_BUTTON,
     AUDIO_ROUTING,
@@ -160,6 +162,7 @@ internal object SettingsInformationArchitecture {
             SettingsSection.LAUNCHER_BUBBLE,
             SettingsSection.EXPERIMENTAL_DISPLAY,
             SettingsSection.ADVANCED_MEDIA,
+            SettingsSection.EXPERIMENTAL_NETWORK,
             SettingsSection.NAVIGATION_WHEEL,
             SettingsSection.AMBIENT_LIGHTING,
         ),
@@ -2064,6 +2067,29 @@ class DiPlayActivity : ComponentActivity(), AppAppearanceOwner {
                 AirPlayPersistence.loadCarBluetoothAudio(this)) {
                 AirPlayPersistence.saveCarBluetoothAudio(this, it)
                 reconnectIfRunning()
+            }
+        }
+        filteredSection(content, SettingsSection.EXPERIMENTAL_NETWORK,
+            getString(R.string.settings_wired_backend_title), R.drawable.ic_dp_advanced) { card ->
+            card.addView(label(getString(R.string.settings_wired_backend_description), 14, MUTED))
+            val preferences = WiredBackendPreference.entries
+            val labels = listOf(
+                getString(R.string.settings_wired_backend_auto),
+                getString(R.string.settings_wired_backend_vpn),
+                getString(R.string.settings_wired_backend_userspace),
+            )
+            choice(card, getString(R.string.settings_wired_backend_mode), labels,
+                preferences.indexOf(AirPlayPersistence.loadWiredBackendPreference(this)).coerceAtLeast(0),
+                reconnects = false) { index ->
+                AirPlayPersistence.saveWiredBackendPreference(this, preferences[index])
+                markReconnectNeeded()
+            }
+            if (AirPlayPersistence.loadWiredBackendSuccessCache(this) != null) {
+                card.addView(button(getString(R.string.settings_wired_backend_clear_validation), false) {
+                    AirPlayPersistence.clearWiredBackendSuccessCache(this)
+                    toast(getString(R.string.settings_wired_backend_validation_cleared))
+                    render()
+                }, matchButton(0, 60))
             }
         }
         filteredSection(content, SettingsSection.CAR_BUTTON,
@@ -5959,6 +5985,9 @@ class DiPlayActivity : ComponentActivity(), AppAppearanceOwner {
         appendLine("CarPlay size: ${AirPlayPersistence.loadWidthPhysicalMm(appContext).let { mm -> "${com.shilapi.xcertplay.airplay.CarPlaySize.exact(mm)?.label ?: "Custom"}, $mm mm" }}")
         appendLine("Saved resolution preference (may differ from active session): ${AirPlayPersistence.loadDisplayScalePercent(appContext)}%")
         appendLine("Session: ${if (CarPlayBackgroundSession.active) "active" else if (CarPlayBackgroundSession.hasSession()) "connecting" else "stopped"}")
+        appendLine()
+        appendLine("--- Last wired backend diagnostics ---")
+        appendLine(com.shilapi.xcertplay.network.backend.BackendDiagnostics.report().trimEnd())
         appendLine(PhoneWakeDiagnostics.report(appContext))
         appendLine("Head-unit board: ${Build.BOARD}; hardware: ${Build.HARDWARE}; build: ${Build.DISPLAY}")
         appendLine()

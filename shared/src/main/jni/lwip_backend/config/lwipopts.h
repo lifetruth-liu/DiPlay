@@ -1,0 +1,75 @@
+#ifndef DIPLAY_LWIPOPTS_H
+#define DIPLAY_LWIPOPTS_H
+#define NO_SYS 1
+#define SYS_LIGHTWEIGHT_PROT 0
+#define LWIP_SOCKET 0
+#define LWIP_NETCONN 0
+#define LWIP_TCPIP_CORE_LOCKING 0
+#define MEM_ALIGNMENT 8
+#define MEM_SIZE (1024 * 1024)
+#define MEMP_MEM_MALLOC 0
+#define MEM_LIBC_MALLOC 0
+#ifndef MEMP_NUM_TCP_PCB
+#define MEMP_NUM_TCP_PCB 32
+#endif
+#define MEMP_NUM_TCP_PCB_LISTEN 16
+#define MEMP_NUM_TCP_SEG 512
+#define MEMP_NUM_UDP_PCB 32
+#define MEMP_NUM_SYS_TIMEOUT 16
+#define MEMP_NUM_REASSDATA 4
+#define PBUF_POOL_SIZE 256
+#define PBUF_POOL_BUFSIZE 1536
+#define MEMP_NUM_PBUF 64
+#define LWIP_IPV4 0
+#define LWIP_ARP 0
+#define LWIP_DHCP 0
+#define LWIP_AUTOIP 0
+#define LWIP_DNS 0
+#define LWIP_IPV6 1
+#define LWIP_ICMP6 1
+#define LWIP_IPV6_MLD 1
+#define MEMP_NUM_MLD6_GROUP 32
+#define LWIP_IPV6_DHCP6 0
+#define LWIP_IPV6_AUTOCONFIG 0
+#define LWIP_IPV6_NUM_ADDRESSES 3
+#define LWIP_IPV6_SCOPES 1
+#define LWIP_IPV6_DUP_DETECT_ATTEMPTS 1
+#define LWIP_IPV6_REASS 1
+#define IPV6_FRAG_COPYHEADER 1
+#define LWIP_IPV6_FRAG 1
+#define IPV6_REASS_MAXAGE 30
+/* 128 * 1536 = 192 KiB of payload at most; four contexts; leave another 128
+ * pool entries for live traffic so reassembly cannot consume the whole pool. */
+#define IP_REASS_MAX_PBUFS 128
+#define LWIP_ND6_NUM_NEIGHBORS 16
+#define LWIP_ND6_NUM_DESTINATIONS 16
+#define LWIP_ND6_NUM_PREFIXES 4
+#define LWIP_ND6_NUM_ROUTERS 2
+#define MEMP_NUM_ND6_QUEUE 16
+#define LWIP_TCP 1
+#define LWIP_UDP 1
+#define LWIP_ETHERNET 1
+#define LWIP_TCP_KEEPALIVE 1
+#define SO_REUSE 1
+#define TCP_LISTEN_BACKLOG 1
+#define TCP_MSS 1440
+#define LWIP_WND_SCALE 1
+#define TCP_RCV_SCALE 2
+#define TCP_WND 65535
+#define TCP_SND_BUF 32768
+#define TCP_SND_QUEUELEN 96
+#define LWIP_TCP_SACK_OUT 1
+#define LWIP_TCP_TIMESTAMPS 1
+#define LWIP_STATS 1
+#define LWIP_STATS_DISPLAY 0
+#define MEM_STATS 1
+#define MEMP_STATS 1
+#define LWIP_CHECKSUM_CTRL_PER_NETIF 0
+#define CHECKSUM_GEN_IP 1
+#define CHECKSUM_GEN_UDP 1
+#define CHECKSUM_GEN_TCP 1
+#define CHECKSUM_GEN_ICMP6 1
+#define CHECKSUM_CHECK_UDP 1
+#define CHECKSUM_CHECK_TCP 1
+#define CHECKSUM_CHECK_ICMP6 1
+#endif

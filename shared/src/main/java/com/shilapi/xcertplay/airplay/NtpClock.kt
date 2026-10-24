@@ -2,10 +2,10 @@ package com.shilapi.xcertplay.airplay
 
 import java.io.Closeable
 import java.math.BigInteger
-import java.net.DatagramPacket
-import java.net.DatagramSocket
+import com.shilapi.xcertplay.network.backend.*
+import com.shilapi.xcertplay.network.backend.system.SystemSessionNetwork
 import java.net.InetAddress
-import java.net.InetSocketAddress
+import java.net.Inet6Address
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -15,16 +15,30 @@ import java.util.concurrent.atomic.AtomicBoolean
  * transmit timestamp and PT_RESPONSE (211) echoes it while adding the phone's receive and
  * transmit stamps. The resulting offset and round-trip time steer a local monotonic clock onto
  * the phone's media-clock domain, which /feedback reports.
+ *
+ * An injected network is borrowed; only this clock's UDP endpoint is closed. The default
+ * system adapter is owned by the clock and requires the accepted peer's scoped address for
+ * link-local traffic. Closing is terminal, including when no listener was created.
  */
-class NtpClock : Closeable {
+class NtpClock(
+    private val injectedNetwork: SessionNetwork? = null,
+    systemPeer: InetAddress? = null,
+) : Closeable {
+    // The legacy system path must retain the accepted socket's interface scope. An injected
+    // backend owns its own addressing context and must never use an Android interface index.
+    private val network = injectedNetwork ?: SystemSessionNetwork(
+        "airplay-timing", (systemPeer as? Inet6Address)?.scopeId ?: 0,
+    )
     private val running = AtomicBoolean(false)
+    private var closed = false
     private val socketLock = Any()
     private val clockLock = Any()
+    private val sendLock = Any()
 
-    private var socket: DatagramSocket? = null
+    private var socket: UdpEndpoint? = null
     private var receiver: Thread? = null
     private var sender: Thread? = null
-    private var peer: InetSocketAddress? = null
+    private var peer: NetworkEndpoint? = null
 
     private var clockOffsetNs = wallClockNtpOffsetNs(System.nanoTime())
     private val delays = DoubleArray(DELAY_WINDOW) { Double.POSITIVE_INFINITY }
@@ -35,19 +49,25 @@ class NtpClock : Closeable {
     private var pendingT1: BigInteger? = null
     private var synced = false
 
-    fun listen(): Int {
+    fun listen(): Int = synchronized(socketLock) {
+        check(!closed) { "NtpClock is closed" }
         check(!running.getAndSet(true)) { "NtpClock is already running" }
-        val bound = DatagramSocket(null)
-        bound.reuseAddress = true
-        bound.bind(InetSocketAddress(InetAddress.getByName("::"), 0))
-        synchronized(socketLock) { socket = bound }
-        receiver = Thread(::runReceiver, "airplay-ntp-rx").apply { isDaemon = true; start() }
-        return bound.localPort
+        try {
+            val bound = network.bindUdp(NetworkEndpoint(ByteArray(16), 0, network.linkId))
+            socket = bound
+            receiver = Thread(::runReceiver, "airplay-ntp-rx").apply { isDaemon = true; start() }
+            bound.localEndpoint.port
+        } catch (error: Exception) {
+            running.set(false)
+            socket?.close()
+            socket = null
+            throw error
+        }
     }
 
     fun start(peerAddress: InetAddress, port: Int) {
         require(port > 0) { "timing port must be positive" }
-        peer = InetSocketAddress(peerAddress, port)
+        peer = NetworkEndpoint(peerAddress.address, port, network.linkId)
         sender = Thread(::runSender, "airplay-ntp-tx").apply { isDaemon = true; start() }
     }
 
@@ -57,13 +77,15 @@ class NtpClock : Closeable {
     }
 
     override fun close() {
-        running.set(false)
         synchronized(socketLock) {
+            closed = true
+            running.set(false)
             socket?.close()
             socket = null
         }
         sender?.interrupt()
         receiver?.interrupt()
+        if (injectedNetwork == null) network.close()
     }
 
     private fun runSender() {
@@ -92,35 +114,40 @@ class NtpClock : Closeable {
         val t1 = syncedNtp()
         synchronized(clockLock) { pendingT1 = t1 }
         ntpBytes(t1).copyInto(packet, NTP_TRANSMIT_OFFSET)
-        currentSocket()?.send(DatagramPacket(packet, packet.size, destination))
+        send(packet, destination)
     }
 
     private fun runReceiver() {
         val buffer = ByteArray(RECEIVE_BUFFER_BYTES)
         while (running.get()) {
             val sock = currentSocket() ?: return
-            val packet = DatagramPacket(buffer, buffer.size)
-            try {
-                sock.receive(packet)
+            val packet = try {
+                sock.receive(buffer)
+            } catch (failure: BackendFailure) {
+                if (failure.kind == BackendFailure.Kind.TIMEOUT && running.get()) continue
+                running.set(false)
+                return
             } catch (_: Exception) {
                 if (running.get()) continue else return
             }
-            val message = packet.data.copyOf(packet.length)
-            val address = packet.address
-            if (message.size >= NTP_PACKET_BYTES && address != null) {
-                handleMessage(message, InetSocketAddress(address, packet.port))
+            if (!packet.truncated && packet.copiedLength >= NTP_PACKET_BYTES) {
+                try {
+                    handleMessage(buffer.copyOf(packet.copiedLength), packet.source)
+                } catch (_: Exception) {
+                    if (!running.get()) return
+                }
             }
         }
     }
 
-    private fun handleMessage(message: ByteArray, source: InetSocketAddress) {
+    private fun handleMessage(message: ByteArray, source: NetworkEndpoint) {
         when (message[1].toInt() and 0xff) {
             PT_REQUEST -> respondToRequest(message, source)
             PT_RESPONSE -> handleResponse(message)
         }
     }
 
-    private fun respondToRequest(request: ByteArray, source: InetSocketAddress) {
+    private fun respondToRequest(request: ByteArray, source: NetworkEndpoint) {
         val response = ByteArray(NTP_PACKET_BYTES)
         response[0] = 0x80.toByte()
         response[1] = PT_RESPONSE.toByte()
@@ -128,7 +155,11 @@ class NtpClock : Closeable {
         request.copyInto(response, NTP_ORIGINATE_OFFSET, NTP_TRANSMIT_OFFSET, NTP_PACKET_BYTES)
         ntpBytes(syncedNtp()).copyInto(response, NTP_RECEIVE_OFFSET)
         ntpBytes(syncedNtp()).copyInto(response, NTP_TRANSMIT_OFFSET)
-        currentSocket()?.send(DatagramPacket(response, response.size, source))
+        send(response, source)
+    }
+
+    private fun send(bytes: ByteArray, destination: NetworkEndpoint) = synchronized(sendLock) {
+        currentSocket()?.send(bytes, destination)
     }
 
     private fun handleResponse(response: ByteArray) {
@@ -178,7 +209,7 @@ class NtpClock : Closeable {
         }
     }
 
-    private fun currentSocket(): DatagramSocket? = synchronized(socketLock) { socket }
+    private fun currentSocket(): UdpEndpoint? = synchronized(socketLock) { socket }
 
     private companion object {
         const val PT_REQUEST = 210

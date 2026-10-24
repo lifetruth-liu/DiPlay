@@ -42,3 +42,7 @@ release-signing.properties
 
 # Written by scripts/download_count.py when the site is deployed
 site/assets/downloads.json
+
+# Python verification tools
+__pycache__/
+*.pyc

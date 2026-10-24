@@ -1,0 +1,3749 @@
+#include "diplay_lwip.h"
+#include "diplay_endpoints.h"
+#include "diplay_prototype.h"
+#include "diplay_tcp.h"
+#include "echo_services.h"
+/* Keep lwIP byte-order aliases out of the Windows SDK declarations below. */
+#define LWIP_DONT_PROVIDE_BYTEORDER_FUNCTIONS
+#include "lwip/nd6.h"
+#include "lwip/ip6_frag.h"
+#include "lwip/netif.h"
+#include "lwip/memp.h"
+#include "lwip/mem.h"
+#include "lwip/stats.h"
+#include "lwip/tcp.h"
+#include "lwip/timeouts.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <pthread.h>
+#include <dirent.h>
+#endif
+
+#define CHECK(x)                                                                                   \
+    do {                                                                                           \
+        if (!(x)) {                                                                                \
+            fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #x);                                \
+            exit(1);                                                                               \
+        }                                                                                          \
+    } while (0)
+#define FRAME_MAX 1514
+#ifdef DP_WRAP_ALLOCATION
+static struct { size_t calls, fail_at, calloc_calls, malloc_calls, rejected;
+                size_t sys_timeout_calls, fail_sys_timeout_at;
+                int armed, persistent, fail_malloc, fail_nd6_queue, fail_reassdata;
+                struct sys_timeo *last_timeout; } allocation_fault;
+static size_t null_tcp_abort_calls;
+static size_t nonnull_tcp_abort_calls;
+static size_t fail_tcp_close_calls;
+void __real_tcp_abort(struct tcp_pcb *pcb);
+void __wrap_tcp_abort(struct tcp_pcb *pcb) {
+    if (!pcb) ++null_tcp_abort_calls;
+    else ++nonnull_tcp_abort_calls;
+    __real_tcp_abort(pcb);
+}
+err_t __real_tcp_close(struct tcp_pcb *pcb);
+err_t __wrap_tcp_close(struct tcp_pcb *pcb) {
+    if (fail_tcp_close_calls) {
+        --fail_tcp_close_calls;
+        return ERR_MEM;
+    }
+    return __real_tcp_close(pcb);
+}
+void *__real_mem_malloc(mem_size_t size);
+void *__real_calloc(size_t count, size_t size);
+void *__real_malloc(size_t size);
+#if MEMP_OVERFLOW_CHECK
+void *__real_memp_malloc_fn(memp_t type, const char *file, int line);
+#else
+void *__real_memp_malloc(memp_t type);
+#endif
+static int reject_allocation(void) {
+    if (!allocation_fault.armed) return 0;
+    ++allocation_fault.calls;
+    if (allocation_fault.fail_at && (allocation_fault.calls == allocation_fault.fail_at ||
+        (allocation_fault.persistent && allocation_fault.calls > allocation_fault.fail_at))) {
+        allocation_fault.rejected++;
+        return 1;
+    }
+    return 0;
+}
+static int reject_memp_allocation(memp_t type) {
+    if (allocation_fault.armed && allocation_fault.fail_sys_timeout_at && type == MEMP_SYS_TIMEOUT) {
+        ++allocation_fault.sys_timeout_calls;
+        if (allocation_fault.sys_timeout_calls >= allocation_fault.fail_sys_timeout_at &&
+            (allocation_fault.sys_timeout_calls == allocation_fault.fail_sys_timeout_at ||
+             allocation_fault.persistent)) {
+            if (!allocation_fault.persistent)
+                allocation_fault.fail_sys_timeout_at = 0;
+            allocation_fault.calls++;
+            allocation_fault.rejected++;
+            return 1;
+        }
+    }
+    if (allocation_fault.armed && allocation_fault.fail_nd6_queue && type == MEMP_ND6_QUEUE) {
+        allocation_fault.calls++;
+        allocation_fault.rejected++;
+        return 1;
+    }
+    if (allocation_fault.armed && allocation_fault.fail_reassdata && type == MEMP_IP6_REASSDATA) {
+        if (!allocation_fault.persistent)
+            allocation_fault.fail_reassdata = 0;
+        allocation_fault.calls++;
+        allocation_fault.rejected++;
+        return 1;
+    }
+    return reject_allocation();
+}
+void *__wrap_mem_malloc(mem_size_t size) {
+    if (reject_allocation()) { MEM_STATS_INC(err); return NULL; }
+    return __real_mem_malloc(size);
+}
+void *__wrap_calloc(size_t count, size_t size) {
+    if (allocation_fault.armed) allocation_fault.calloc_calls++;
+    return reject_allocation() ? NULL : __real_calloc(count, size);
+}
+void *__wrap_malloc(size_t size) {
+    if (allocation_fault.armed) {
+        allocation_fault.malloc_calls++;
+        if (allocation_fault.fail_malloc) {
+            allocation_fault.calls++;
+            allocation_fault.rejected++;
+            return NULL;
+        }
+    }
+    return reject_allocation() ? NULL : __real_malloc(size);
+}
+#if MEMP_OVERFLOW_CHECK
+void *__wrap_memp_malloc_fn(memp_t type, const char *file, int line) {
+    if (reject_memp_allocation(type)) { STATS_INC(memp[type]->err); return NULL; }
+    void *result = __real_memp_malloc_fn(type, file, line);
+    if (type == MEMP_SYS_TIMEOUT && result) allocation_fault.last_timeout = result;
+    return result;
+}
+#else
+void *__wrap_memp_malloc(memp_t type) {
+    if (reject_memp_allocation(type)) { STATS_INC(memp[type]->err); return NULL; }
+    void *result = __real_memp_malloc(type);
+    if (type == MEMP_SYS_TIMEOUT && result) allocation_fault.last_timeout = result;
+    return result;
+}
+#endif
+#endif
+struct frame {
+    size_t length;
+    uint8_t bytes[FRAME_MAX];
+};
+struct fixture {
+    dp_core *core;
+    uint64_t now;
+    uint32_t random;
+    int ready;
+    size_t count;
+    size_t fail_after;
+    struct frame frames[64];
+};
+static const uint8_t local_mac[6] = {2, 0, 0, 0, 0, 1};
+static const uint8_t peer_mac[6] = {2, 0, 0, 0, 0, 2};
+static const uint8_t local_ip[16] = {0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+static const uint8_t peer_ip[16] = {0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2};
+static const uint8_t solicited[16] = {0xff, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0xff, 0, 0, 1};
+static const uint8_t all_nodes[16] = {0xff, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+static const uint8_t global_destination[16] = {0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x99};
+static const uint8_t invalid_redirect_target[16] = {0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x88};
+static const uint8_t other_router[16] = {0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3};
+static const uint8_t unspecified_ip[16] = {0};
+static uint16_t u16(const uint8_t *p) {
+    return (uint16_t)((p[0] << 8) | p[1]);
+}
+static uint32_t u32(const uint8_t *p) {
+    return ((uint32_t)u16(p) << 16) | u16(p + 2);
+}
+static void w16(uint8_t *p, uint16_t n) {
+    p[0] = (uint8_t)(n >> 8);
+    p[1] = (uint8_t)n;
+}
+static void w32(uint8_t *p, uint32_t n) {
+    w16(p, (uint16_t)(n >> 16));
+    w16(p + 2, (uint16_t)n);
+}
+static uint32_t sum(const uint8_t *p, size_t n) {
+    uint32_t s = 0;
+    for (; n >= 2; n -= 2, p += 2)
+        s += u16(p);
+    if (n)
+        s += (uint32_t)p[0] << 8;
+    return s;
+}
+static uint16_t checksum(const uint8_t *ip, const uint8_t *payload, size_t n, uint8_t protocol) {
+    uint32_t s = sum(ip + 8, 32) + sum(payload, n) + (uint32_t)n + protocol;
+    while (s >> 16)
+        s = (s & 65535) + (s >> 16);
+    return (uint16_t)~s;
+}
+static uint64_t clock_ms(void *arg) {
+    return ((struct fixture *)arg)->now;
+}
+static uint32_t random32(void *arg) {
+    struct fixture *f = arg;
+    f->random ^= f->random << 13;
+    f->random ^= f->random >> 17;
+    f->random ^= f->random << 5;
+    return f->random;
+}
+static dp_tx_result output(void *arg, const uint8_t *bytes, size_t length) {
+    struct fixture *f = arg;
+    if (f->ready < 0 || (f->fail_after && f->count >= f->fail_after))
+        return DP_TX_FAILED;
+    if (!f->ready)
+        return DP_TX_NOT_READY;
+    CHECK(length <= FRAME_MAX && f->count < 64);
+    f->frames[f->count].length = length;
+    memcpy(f->frames[f->count++].bytes, bytes, length);
+    return DP_TX_ACCEPTED;
+}
+static void open_core(struct fixture *f, int ready) {
+    memset(f, 0, sizeof(*f));
+    f->random = 1234567;
+    f->ready = ready;
+    dp_config config = {0};
+    memcpy(config.mac, local_mac, 6);
+    memcpy(config.ipv6, local_ip, 16);
+    config.mtu = 1500;
+    config.opaque = f;
+    config.clock_ms = clock_ms;
+    config.random32 = random32;
+    config.output = output;
+    CHECK(dp_core_create(&config, &f->core) == DP_OK);
+    CHECK(dp_core_set_link_ready(f->core, ready) == DP_OK);
+}
+static void advance(struct fixture *f, uint64_t millis) {
+    uint64_t end = f->now + millis;
+    while (f->now < end) {
+        f->now += 250;
+        CHECK(dp_core_poll(f->core) == DP_OK);
+    }
+}
+static dp_address_state address_state(struct fixture *f) {
+    dp_address_state state;
+    CHECK(dp_core_address_state(f->core, &state) == DP_OK);
+    return state;
+}
+static void close_core(struct fixture *f) {
+    CHECK(dp_core_destroy(&f->core) == DP_OK);
+    CHECK(!f->core);
+}
+static void ethernet(uint8_t *frame, const uint8_t *destination) {
+    memcpy(frame, destination, 6);
+    memcpy(frame + 6, peer_mac, 6);
+    w16(frame + 12, 0x86dd);
+}
+static uint8_t *ipv6(uint8_t *frame, const uint8_t *destination, uint8_t proto, uint16_t size) {
+    uint8_t *ip = frame + 14;
+    memset(ip, 0, 40 + size);
+    ip[0] = 0x60;
+    w16(ip + 4, size);
+    ip[6] = proto;
+    ip[7] = proto == 58 ? 255 : 64;
+    memcpy(ip + 8, peer_ip, 16);
+    memcpy(ip + 24, destination, 16);
+    return ip + 40;
+}
+static void neighbor(struct fixture *f, int advertisement) {
+    uint8_t frame[86] = {0};
+    uint8_t multicast[6] = {0x33, 0x33, 0xff, 0, 0, 1};
+    if (advertisement) {
+        multicast[2] = 0;
+        multicast[5] = 1;
+    }
+    ethernet(frame, multicast);
+    uint8_t *p = ipv6(frame, advertisement ? all_nodes : solicited, 58, 32);
+    p[0] = advertisement ? 136 : 135;
+    p[4] = advertisement ? 0x20 : 0;
+    memcpy(p + 8, local_ip, 16);
+    p[24] = advertisement ? 2 : 1;
+    p[25] = 1;
+    memcpy(p + 26, peer_mac, 6);
+    w16(p + 2, checksum(frame + 14, p, 32, 58));
+    dp_result result = dp_core_input(f->core, frame, sizeof(frame));
+    CHECK(result == (advertisement ? DP_ADDRESS_CONFLICT : DP_OK));
+}
+static struct frame *find(struct fixture *f, uint8_t proto, int type, int data) {
+    for (size_t i = 0; i < f->count; i++) {
+        struct frame *frame = &f->frames[i];
+        const uint8_t *ip = frame->bytes + 14;
+        if (frame->length < 54 || ip[6] != proto)
+            continue;
+        if (type >= 0 && ip[40] != (uint8_t)type)
+            continue;
+        if (data && (proto != 6 || u16(ip + 4) <= (ip[52] >> 4) * 4))
+            continue;
+        CHECK(frame->length >= (size_t)54 + u16(ip + 4));
+        CHECK(checksum(ip, ip + 40, u16(ip + 4), proto) == 0);
+        return frame;
+    }
+    return NULL;
+}
+static void ready_core(struct fixture *f) {
+    open_core(f, 1);
+    advance(f, 3000);
+    CHECK(address_state(f) == DP_ADDRESS_PREFERRED);
+    f->count = 0;
+    neighbor(f, 0);
+    CHECK(find(f, 58, 136, 0));
+    f->count = 0;
+}
+static void test_ndp(void) {
+    struct fixture f;
+    ready_core(&f);
+    neighbor(&f, 0);
+    struct frame *reply = find(&f, 58, 136, 0);
+    CHECK(reply);
+    CHECK(!memcmp(reply->bytes, peer_mac, 6));
+    CHECK(!memcmp(reply->bytes + 6, local_mac, 6));
+    CHECK(!memcmp(reply->bytes + 54 + 8, local_ip, 16));
+    close_core(&f);
+}
+static void test_ndp_options(void) {
+    /* Do not pre-populate the peer cache: the response must use the address
+     * learned from the source-LL option, skipping the preceding unknown one. */
+    for (int malformed = 0; malformed < 3; ++malformed) {
+        struct fixture f;
+        open_core(&f, 1);
+        advance(&f, 3000);
+        f.count = 0;
+        uint8_t frame[94] = {0};
+        const uint8_t multicast[6] = {0x33, 0x33, 0xff, 0, 0, 1};
+        ethernet(frame, multicast);
+        uint8_t *p = ipv6(frame, solicited, 58, 40);
+        p[0] = 135;
+        memcpy(p + 8, local_ip, 16);
+        p[24] = 254; /* Unknown option is valid and must be skipped. */
+        p[25] = malformed == 1 ? 0 : 1;
+        memset(p + 26, 0xa5, 6);
+        p[32] = 1;
+        p[33] = malformed == 2 ? 2 : 1; /* Advertised length exceeds packet. */
+        memcpy(p + 34, peer_mac, 6);
+        w16(p + 2, checksum(frame + 14, p, 40, 58));
+        CHECK(dp_core_input(f.core, frame, sizeof(frame)) == DP_OK);
+        struct frame *reply = find(&f, 58, 136, 0);
+        if (malformed) CHECK(reply == NULL);
+        else {
+            CHECK(reply != NULL);
+            CHECK(!memcmp(reply->bytes, peer_mac, 6));
+        }
+        close_core(&f);
+    }
+}
+static void inject_na_with_invalid_form(struct fixture *f, const uint8_t *destination,
+                                        const uint8_t *ethernet_destination, uint8_t flags,
+                                        int zero_length_option, const uint8_t *source) {
+    uint8_t frame[88] = {0};
+    size_t icmp_length = zero_length_option ? 34 : 32;
+    const uint8_t changed_mac[6] = {2, 0, 0, 0, 0, 99};
+    ethernet(frame, ethernet_destination);
+    uint8_t *p = ipv6(frame, destination, 58, (uint16_t)icmp_length);
+    p[0] = 136;
+    p[4] = flags;
+    memcpy(frame + 22, source, 16);
+    p[24] = 2; /* Target link-layer address. */
+    p[25] = 1;
+    memcpy(p + 26, changed_mac, sizeof(changed_mac));
+    if (zero_length_option) {
+        p[32] = 254; /* Unknown options are skipped, but length zero is invalid. */
+        p[33] = 0;
+    }
+    w16(p + 2, checksum(frame + 14, p, icmp_length, 58));
+    CHECK(dp_core_input(f->core, frame, 14 + 40 + icmp_length) == DP_OK);
+}
+static void check_peer_cache_mac(struct fixture *f, const uint8_t *expected_mac) {
+    uint64_t endpoint;
+    uint16_t port;
+    CHECK(dp_udp_bind(f->core, 0, &endpoint, &port) == DP_OK);
+    f->count = 0;
+    CHECK(dp_udp_send(f->core, endpoint, peer_ip, 50000, (const uint8_t *)"x", 1) == DP_OK);
+    struct frame *sent = find(f, 17, -1, 0);
+    CHECK(sent != NULL);
+    CHECK(!memcmp(sent->bytes, expected_mac, 6));
+}
+static void test_ndp_na_rejects_solicited_multicast(void) {
+    struct fixture f;
+    ready_core(&f);
+    const uint8_t multicast_mac[6] = {0x33, 0x33, 0, 0, 0, 1};
+    inject_na_with_invalid_form(&f, all_nodes, multicast_mac, 0x60, 0, peer_ip);
+    check_peer_cache_mac(&f, peer_mac);
+    close_core(&f);
+}
+static void test_ndp_na_rejects_zero_length_trailing_option(void) {
+    struct fixture f;
+    ready_core(&f);
+    inject_na_with_invalid_form(&f, local_ip, local_mac, 0x60, 1, peer_ip);
+    check_peer_cache_mac(&f, peer_mac);
+    close_core(&f);
+}
+static void test_ndp_na_rejects_unspecified_source(void) {
+    struct fixture f;
+    ready_core(&f);
+    inject_na_with_invalid_form(&f, local_ip, local_mac, 0x60, 0, unspecified_ip);
+    check_peer_cache_mac(&f, peer_mac);
+    close_core(&f);
+}
+static void test_ndp_ns_rejects_zero_length_trailing_option(void) {
+    struct fixture f;
+    ready_core(&f);
+    uint8_t frame[96] = {0};
+    const uint8_t solicited_mac[6] = {0x33, 0x33, 0xff, 0, 0, 1};
+    ethernet(frame, solicited_mac);
+    uint8_t *p = ipv6(frame, solicited, 58, 42);
+    p[0] = 135;
+    memcpy(p + 8, local_ip, 16);
+    p[24] = 1; /* Valid source link-layer option. */
+    p[25] = 1;
+    memcpy(p + 26, peer_mac, 6);
+    p[32] = 254; /* A malformed option after the one the parser needs. */
+    p[33] = 0;
+    w16(p + 2, checksum(frame + 14, p, 42, 58));
+    CHECK(dp_core_input(f.core, frame, sizeof(frame)) == DP_OK);
+    CHECK(find(&f, 58, 136, 0) == NULL);
+    close_core(&f);
+}
+static void test_ndp_ns_unspecified_source_requires_solicited_destination(void) {
+    struct fixture f;
+    ready_core(&f);
+    uint8_t frame[78] = {0};
+    const uint8_t multicast_mac[6] = {0x33, 0x33, 0, 0, 0, 1};
+    ethernet(frame, multicast_mac);
+    uint8_t *p = ipv6(frame, all_nodes, 58, 24);
+    memcpy(frame + 22, unspecified_ip, 16);
+    p[0] = 135;
+    memcpy(p + 8, local_ip, 16);
+    w16(p + 2, checksum(frame + 14, p, 24, 58));
+    CHECK(dp_core_input(f.core, frame, sizeof(frame)) == DP_OK);
+    CHECK(find(&f, 58, 136, 0) == NULL);
+    close_core(&f);
+}
+static void test_ndp_ns_unspecified_source_rejects_source_ll_option(void) {
+    struct fixture f;
+    ready_core(&f);
+    uint8_t frame[86] = {0};
+    const uint8_t solicited_mac[6] = {0x33, 0x33, 0xff, 0, 0, 1};
+    ethernet(frame, solicited_mac);
+    uint8_t *p = ipv6(frame, solicited, 58, 32);
+    memcpy(frame + 22, unspecified_ip, 16);
+    p[0] = 135;
+    memcpy(p + 8, local_ip, 16);
+    p[24] = 1;
+    p[25] = 1;
+    memcpy(p + 26, peer_mac, 6);
+    w16(p + 2, checksum(frame + 14, p, 32, 58));
+    CHECK(dp_core_input(f.core, frame, sizeof(frame)) == DP_OK);
+    CHECK(find(&f, 58, 136, 0) == NULL);
+    close_core(&f);
+}
+static void send_ra(struct fixture *f, int zero_length_option) {
+    uint8_t frame[88] = {0};
+    const uint8_t multicast_mac[6] = {0x33, 0x33, 0, 0, 0, 1};
+    size_t icmp_length = zero_length_option ? 18 : 16;
+    ethernet(frame, multicast_mac);
+    uint8_t *p = ipv6(frame, all_nodes, 58, (uint16_t)icmp_length);
+    p[0] = 134;
+    w16(p + 6, 1800);
+    if (zero_length_option) {
+        p[16] = 254;
+        p[17] = 0;
+    }
+    w16(p + 2, checksum(frame + 14, p, icmp_length, 58));
+    CHECK(dp_core_input(f->core, frame, 14 + 40 + icmp_length) == DP_OK);
+}
+static void test_ndp_ra_rejects_zero_length_option_before_route_change(void) {
+    struct fixture f;
+    ready_core(&f);
+    send_ra(&f, 1);
+    uint64_t endpoint;
+    uint16_t port;
+    CHECK(dp_udp_bind(f.core, 0, &endpoint, &port) == DP_OK);
+    f.count = 0;
+    CHECK(dp_udp_send(f.core, endpoint, global_destination, 50000,
+                      (const uint8_t *)"x", 1) == DP_LINK_IO);
+    CHECK(find(&f, 17, -1, 0) == NULL);
+    close_core(&f);
+}
+static void send_valid_ra(struct fixture *f) {
+    uint8_t frame[94] = {0};
+    const uint8_t multicast_mac[6] = {0x33, 0x33, 0, 0, 0, 1};
+    const uint8_t router_mac[6] = {2, 0, 0, 0, 0, 2};
+    ethernet(frame, multicast_mac);
+    uint8_t *p = ipv6(frame, all_nodes, 58, 24);
+    p[0] = 134;
+    w16(p + 6, 1800);
+    p[16] = 1; /* Source link-layer address option. */
+    p[17] = 1;
+    memcpy(p + 18, router_mac, 6);
+    w16(p + 2, checksum(frame + 14, p, 24, 58));
+    CHECK(dp_core_input(f->core, frame, sizeof(frame)) == DP_OK);
+}
+static void send_redirect(struct fixture *f, const uint8_t *source, const uint8_t *target,
+                          const uint8_t *destination, int zero_length_option) {
+    uint8_t frame[96] = {0};
+    size_t icmp_length = zero_length_option ? 42 : 40;
+    ethernet(frame, local_mac);
+    uint8_t *p = ipv6(frame, local_ip, 58, (uint16_t)icmp_length);
+    memcpy(frame + 22, source, 16);
+    p[0] = 137;
+    memcpy(p + 8, target, 16);
+    memcpy(p + 24, destination, 16);
+    if (zero_length_option) {
+        p[40] = 254;
+        p[41] = 0;
+    }
+    w16(p + 2, checksum(frame + 14, p, icmp_length, 58));
+    CHECK(dp_core_input(f->core, frame, 14 + 40 + icmp_length) == DP_OK);
+}
+static void test_ndp_redirect_rejects_invalid_target(void) {
+    struct fixture f;
+    ready_core(&f);
+    send_valid_ra(&f);
+    uint64_t endpoint;
+    uint16_t port;
+    CHECK(dp_udp_bind(f.core, 0, &endpoint, &port) == DP_OK);
+    f.count = 0;
+    CHECK(dp_udp_send(f.core, endpoint, global_destination, 50000,
+                      (const uint8_t *)"a", 1) == DP_OK);
+    CHECK(find(&f, 17, -1, 0) != NULL);
+    f.count = 0;
+    send_redirect(&f, peer_ip, invalid_redirect_target, global_destination, 0);
+    CHECK(dp_udp_send(f.core, endpoint, global_destination, 50000,
+                      (const uint8_t *)"b", 1) == DP_OK);
+    CHECK(find(&f, 17, -1, 0) != NULL);
+    CHECK(find(&f, 58, 135, 0) == NULL);
+    close_core(&f);
+}
+static void test_ndp_redirect_rejects_non_router_source(void) {
+    struct fixture f;
+    ready_core(&f);
+    send_valid_ra(&f);
+    uint64_t endpoint;
+    uint16_t port;
+    CHECK(dp_udp_bind(f.core, 0, &endpoint, &port) == DP_OK);
+    CHECK(dp_udp_send(f.core, endpoint, global_destination, 50000,
+                      (const uint8_t *)"a", 1) == DP_OK);
+    f.count = 0;
+    send_redirect(&f, other_router, other_router, global_destination, 0);
+    CHECK(dp_udp_send(f.core, endpoint, global_destination, 50000,
+                      (const uint8_t *)"b", 1) == DP_OK);
+    CHECK(find(&f, 17, -1, 0) != NULL);
+    CHECK(find(&f, 58, 135, 0) == NULL);
+    close_core(&f);
+}
+static void test_ndp_redirect_rejects_zero_length_option(void) {
+    struct fixture f;
+    ready_core(&f);
+    send_valid_ra(&f);
+    uint64_t endpoint;
+    uint16_t port;
+    CHECK(dp_udp_bind(f.core, 0, &endpoint, &port) == DP_OK);
+    CHECK(dp_udp_send(f.core, endpoint, global_destination, 50000,
+                      (const uint8_t *)"a", 1) == DP_OK);
+    f.count = 0;
+    send_redirect(&f, peer_ip, other_router, global_destination, 1);
+    CHECK(dp_udp_send(f.core, endpoint, global_destination, 50000,
+                      (const uint8_t *)"b", 1) == DP_OK);
+    CHECK(find(&f, 17, -1, 0) != NULL);
+    CHECK(find(&f, 58, 135, 0) == NULL);
+    close_core(&f);
+}
+static void test_dad(void) {
+    struct fixture f;
+    open_core(&f, 1);
+    advance(&f, 1000);
+    CHECK(address_state(&f) == DP_ADDRESS_TENTATIVE);
+    struct frame *probe = find(&f, 58, 135, 0);
+    CHECK(probe);
+    uint8_t zero[16] = {0};
+    CHECK(!memcmp(probe->bytes + 22, zero, 16));
+    neighbor(&f, 1);
+    CHECK(address_state(&f) == DP_ADDRESS_DUPLICATE);
+    close_core(&f);
+}
+static void send_tcp_pair(struct fixture *f, uint16_t port, uint16_t destination, uint8_t flags, uint32_t sequence, uint32_t ack,
+                           const void *data, size_t n) {
+    uint8_t frame[1514];
+    CHECK(n <= 1440);
+    ethernet(frame, local_mac);
+    uint8_t *p = ipv6(frame, local_ip, 6, (uint16_t)(20 + n));
+    w16(p, port);
+    w16(p + 2, destination);
+    w32(p + 4, sequence);
+    w32(p + 8, ack);
+    p[12] = 0x50;
+    p[13] = flags;
+    w16(p + 14, 32768);
+    memcpy(p + 20, data, n);
+    w16(p + 16, checksum(frame + 14, p, 20 + n, 6));
+    CHECK(dp_core_input(f->core, frame, 74 + n) == DP_OK);
+}
+static void send_tcp_port(struct fixture *f, uint16_t port, uint8_t flags, uint32_t sequence, uint32_t ack,
+                          const void *data, size_t n) {
+    send_tcp_pair(f, port, 7000, flags, sequence, ack, data, n);
+}
+static void send_tcp_bytes(struct fixture *f, uint8_t flags, uint32_t sequence, uint32_t ack,
+                           const void *data, size_t n) {
+    send_tcp_port(f, 50000, flags, sequence, ack, data, n);
+}
+static void send_tcp(struct fixture *f, uint8_t flags, uint32_t sequence, uint32_t ack,
+                     const char *data) {
+    send_tcp_bytes(f, flags, sequence, ack, data, strlen(data));
+}
+static void collect_echo(struct fixture *f, uint32_t server, const uint8_t *expected, uint8_t *seen,
+                         size_t total) {
+    for (size_t i = 0; i < f->count; i++) {
+        const uint8_t *p = f->frames[i].bytes;
+        if (f->frames[i].length < 74 || p[20] != 6)
+            continue;
+        size_t header = (p[66] >> 4) * 4;
+        size_t length = u16(p + 18) - header;
+        if (!length)
+            continue;
+        uint32_t offset = u32(p + 58) - (server + 1);
+        CHECK(offset <= total && length <= total - offset);
+        CHECK(checksum(p + 14, p + 54, u16(p + 18), 6) == 0);
+        CHECK(!memcmp(p + 54 + header, expected + offset, length));
+        memset(seen + offset, 1, length);
+    }
+    f->count = 0;
+}
+static uint32_t establish(struct fixture *f, uint16_t port) {
+    f->count = 0;
+    send_tcp_port(f, port, 2, 1000, 0, "", 0);
+    struct frame *syn = find(f, 6, -1, 0);
+    CHECK(syn && (syn->bytes[67] & 0x12) == 0x12);
+    uint32_t sequence = u32(syn->bytes + 58);
+    f->count = 0;
+    send_tcp_port(f, port, 16, 1001, sequence + 1, "", 0);
+    return sequence;
+}
+static uint64_t accept_stream(struct fixture *f, uint64_t listener) {
+    uint64_t stream = 0;
+    dp_tcp_info info;
+    CHECK(dp_tcp_accept(f->core, listener, &stream, &info) == DP_OK && stream);
+    CHECK(!memcmp(info.local, local_ip, 16) && !memcmp(info.remote, peer_ip, 16));
+    CHECK(info.local_port == 7000 && info.remote_port >= 50000);
+    return stream;
+}
+static void test_tcp_endpoint(void) {
+    struct fixture f;
+    ready_core(&f);
+    uint64_t listener, stream = 99;
+    uint16_t port;
+    dp_tcp_info info;
+    CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK && port == 7000);
+    CHECK(dp_tcp_accept(f.core, listener, &stream, &info) == DP_WOULD_BLOCK && stream == 0);
+    uint32_t server = establish(&f, 50000);
+    send_tcp(&f, 24, 1001, server + 1, "hello");
+    stream = accept_stream(&f, listener);
+    uint8_t bytes[8]; size_t count = 99;
+    CHECK(dp_tcp_read(f.core, stream, NULL, 0, &count) == DP_OK && count == 0);
+    CHECK(dp_tcp_read(f.core, stream, bytes, 2, &count) == DP_OK && count == 2 && !memcmp(bytes, "he", 2));
+    send_tcp(&f, 17, 1006, server + 1, "");
+    CHECK(dp_tcp_read(f.core, stream, bytes, sizeof(bytes), &count) == DP_OK && count == 3 && !memcmp(bytes, "llo", 3));
+    CHECK(dp_tcp_read(f.core, stream, bytes, sizeof(bytes), &count) == DP_PEER_CLOSED && count == 0);
+    CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+    CHECK(dp_tcp_read(f.core, stream, bytes, 1, &count) == DP_PEER_CLOSED);
+    CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+    CHECK(dp_tcp_close(f.core, stream) == DP_INVALID_ARGUMENT);
+    CHECK(dp_tcp_read(f.core, stream, bytes, 1, &count) == DP_INVALID_ARGUMENT);
+    CHECK(dp_tcp_listen(f.core, 7000, 1, &listener, &port) == DP_OK);
+    server = establish(&f, 50001);
+    stream = accept_stream(&f, listener);
+    send_tcp_port(&f, 50001, 20, 1001, server + 1, "", 0);
+    CHECK(dp_tcp_read(f.core, stream, bytes, 1, &count) == DP_PEER_RESET);
+    CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+    server = establish(&f, 50002); /* An unclaimed, data-bearing connection belongs to the listener. */
+    send_tcp_port(&f, 50002, 24, 1001, server + 1, "held", 4);
+    CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+    dp_stats stats;
+    CHECK(dp_core_get_stats(f.core, &stats) == DP_OK && stats.tcp_active == 0 && stats.heap_used == 0 && stats.pbuf_used == 0);
+    close_core(&f);
+}
+static uint16_t last_window(struct fixture *f) {
+    uint16_t window = 65535;
+    int found = 0;
+    for (size_t i = 0; i < f->count; ++i) if (f->frames[i].bytes[20] == 6 && f->frames[i].length >= 74) {
+        window = u16(f->frames[i].bytes + 68); found = 1;
+    }
+    CHECK(found);
+    f->count = 0;
+    return window;
+}
+static void test_tcp_backpressure(void) {
+    struct fixture f;
+    ready_core(&f);
+    uint64_t listener; uint16_t port;
+    CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK);
+    uint32_t server = establish(&f, 50000);
+    uint64_t stream = accept_stream(&f, listener);
+    uint8_t payload[65535], target[65535];
+    for (size_t i = 0; i < sizeof(payload); ++i) payload[i] = (uint8_t)(i ^ (i >> 8));
+    for (size_t i = 0; i < sizeof(payload); i += 1440) {
+        size_t length = sizeof(payload) - i < 1440 ? sizeof(payload) - i : 1440;
+        send_tcp_bytes(&f, 24, 1001 + (uint32_t)i, server + 1, payload + i, length);
+    }
+    advance(&f, 250);
+    CHECK(last_window(&f) == 0);
+    advance(&f, 10000); /* No receive credit is released merely by polling timers. */
+    f.count = 0;
+    size_t copied;
+    CHECK(dp_tcp_read(f.core, stream, target, 32768, &copied) == DP_OK && copied == 32768);
+    CHECK(last_window(&f) >= 32768);
+    CHECK(dp_tcp_read(f.core, stream, target + 32768, sizeof(target) - 32768, &copied) == DP_OK && copied == sizeof(target) - 32768);
+    CHECK(!memcmp(target, payload, sizeof(payload)));
+    CHECK(dp_tcp_read(f.core, stream, target, 1, &copied) == DP_WOULD_BLOCK && copied == 0);
+    f.count = 0;
+    close_core(&f); /* Held and already consumed chains must both leave zero pool usage. */
+    open_core(&f, 0);
+    dp_stats stats; CHECK(dp_core_get_stats(f.core, &stats) == DP_OK && stats.pbuf_used == 0 && stats.heap_used == 0);
+    close_core(&f);
+}
+static void test_tcp_endpoint_limits(void) {
+    struct fixture f;
+    open_core(&f, 0); /* Listeners must be preparable before USB readiness and DAD. */
+    uint64_t listeners[16], stream = 99, extra = 99; uint16_t port = 99;
+    CHECK(dp_tcp_listen(f.core, 0, 0, &extra, &port) == DP_INVALID_ARGUMENT && extra == 0 && port == 0);
+    for (unsigned i = 0; i < 16; ++i) CHECK(dp_tcp_listen(f.core, 0, 1, &listeners[i], &port) == DP_OK && port);
+    CHECK(dp_tcp_listen(f.core, 0, 1, &extra, &port) == DP_RESOURCE_LIMIT && extra == 0 && port == 0);
+    CHECK(dp_tcp_close(f.core, listeners[0]) == DP_INVALID_ARGUMENT);
+    for (unsigned i = 0; i < 16; ++i) CHECK(dp_tcp_listener_close(f.core, listeners[i]) == DP_OK);
+    close_core(&f);
+    ready_core(&f);
+    CHECK(dp_tcp_listen(f.core, 7000, 32, &listeners[0], &port) == DP_OK);
+    for (unsigned i = 0; i < 32; ++i) establish(&f, (uint16_t)(50000 + i));
+    f.count = 0;
+    send_tcp_port(&f, 50032, 2, 1000, 0, "", 0);
+    uint64_t streams[32];
+    for (unsigned i = 0; i < 32; ++i) streams[i] = accept_stream(&f, listeners[0]);
+    dp_tcp_info info;
+    CHECK(dp_tcp_accept(f.core, listeners[0], &stream, &info) == DP_WOULD_BLOCK && stream == 0);
+    uint8_t byte; size_t count;
+    for (unsigned i = 0; i < 32; ++i) CHECK(dp_tcp_read(f.core, streams[i], &byte, 1, &count) == DP_WOULD_BLOCK);
+    f.count = 0;
+    for (unsigned i = 0; i < 32; ++i) CHECK(dp_tcp_close(f.core, streams[i]) == DP_OK);
+    CHECK(dp_tcp_listener_close(f.core, listeners[0]) == DP_OK);
+    CHECK(dp_tcp_listen(f.core, 7000, 1, &extra, &port) == DP_OK && extra != listeners[0]);
+    f.count = 0; send_tcp(&f, 2, 1000, 0, ""); /* Close during SYN_RCVD, before raw accept. */
+    CHECK(dp_tcp_listener_close(f.core, extra) == DP_OK);
+    dp_stats stats; CHECK(dp_core_get_stats(f.core, &stats) == DP_OK && stats.tcp_active == 0 && stats.tcp_listeners == 0 && stats.heap_used == 0);
+    close_core(&f);
+}
+static void test_tcp_half_open_capacity(void) {
+    struct fixture f;
+    ready_core(&f);
+    uint64_t listener;
+    uint16_t port;
+    CHECK(dp_tcp_listen(f.core, 7000, DP_TCP_MAX_BACKLOG, &listener, &port) == DP_OK && port == 7000);
+
+    /* Fill the configured half-open backlog and the TCP PCB pool with real SYN frames. */
+    for (unsigned i = 0; i < MEMP_NUM_TCP_PCB; ++i) {
+        const uint16_t remote_port = (uint16_t)(51000 + i);
+        f.count = 0;
+        send_tcp_port(&f, remote_port, 2, 1000, 0, "", 0);
+        unsigned syn_acks = 0;
+        for (size_t frame = 0; frame < f.count; ++frame) {
+            const uint8_t *bytes = f.frames[frame].bytes;
+            if (f.frames[frame].length >= 74 && bytes[20] == 6 &&
+                u16(bytes + 54) == 7000 && u16(bytes + 56) == remote_port &&
+                (bytes[67] & 0x12) == 0x12)
+                ++syn_acks;
+        }
+        CHECK(syn_acks == 1);
+        dp_stats stats;
+        CHECK(dp_core_get_stats(f.core, &stats) == DP_OK);
+        CHECK(stats.tcp_active == i + 1 && stats.tcp_listeners == 1);
+        CHECK(lwip_stats.memp[MEMP_TCP_PCB]->used == i + 1);
+    }
+
+    /* A further SYN is refused without evicting existing half-open PCBs. */
+    f.count = 0;
+    send_tcp_port(&f, 51000 + MEMP_NUM_TCP_PCB, 2, 1000, 0, "", 0);
+    CHECK(f.count == 0);
+    dp_stats full;
+    CHECK(dp_core_get_stats(f.core, &full) == DP_OK);
+    CHECK(full.tcp_active == MEMP_NUM_TCP_PCB && full.tcp_listeners == 1);
+    CHECK(lwip_stats.memp[MEMP_TCP_PCB]->used == MEMP_NUM_TCP_PCB);
+
+    /* Closing the saturated listener retires every SYN_RCVD child and releases the port. */
+    CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+    dp_stats cleared;
+    CHECK(dp_core_get_stats(f.core, &cleared) == DP_OK);
+    CHECK(cleared.tcp_active == 0 && cleared.tcp_listeners == 0 && cleared.heap_used == 0);
+    CHECK(lwip_stats.memp[MEMP_TCP_PCB]->used == 0);
+    CHECK(lwip_stats.memp[MEMP_TCP_PCB_LISTEN]->used == 0);
+
+    CHECK(dp_tcp_listen(f.core, 7000, 1, &listener, &port) == DP_OK && port == 7000);
+    establish(&f, 50000);
+    uint64_t stream = accept_stream(&f, listener);
+    CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+    CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+    close_core(&f);
+}
+static void test_tcp_half_open_pool_exhaustion(void) {
+    struct fixture f;
+    ready_core(&f);
+    uint64_t small_listener, large_listener;
+    uint16_t port;
+    CHECK(dp_tcp_listen(f.core, 7000, 1, &small_listener, &port) == DP_OK && port == 7000);
+    CHECK(dp_tcp_listen(f.core, 7001, DP_TCP_MAX_BACKLOG, &large_listener, &port) == DP_OK && port == 7001);
+
+    /* Leave one SYN_RCVD child on the first listener and fill the shared PCB pool on the second. */
+    f.count = 0;
+    send_tcp_port(&f, 51000, 2, 1000, 0, "", 0);
+    CHECK(f.count == 1 && (f.frames[0].bytes[67] & 0x12) == 0x12);
+    for (unsigned i = 0; i < MEMP_NUM_TCP_PCB - 1; ++i) {
+        const uint16_t remote_port = (uint16_t)(51100 + i);
+        f.count = 0;
+        send_tcp_pair(&f, remote_port, 7001, 2, 1000, 0, "", 0);
+        CHECK(f.count == 1 && u16(f.frames[0].bytes + 54) == 7001 &&
+              u16(f.frames[0].bytes + 56) == remote_port &&
+              (f.frames[0].bytes[67] & 0x12) == 0x12);
+    }
+    CHECK(lwip_stats.memp[MEMP_TCP_PCB]->used == MEMP_NUM_TCP_PCB);
+
+#ifdef DP_WRAP_ALLOCATION
+    null_tcp_abort_calls = 0;
+#endif
+    f.count = 0;
+    send_tcp_pair(&f, 51200, 7001, 2, 1000, 0, "", 0);
+    CHECK(f.count == 0); /* Pool exhaustion rejects the SYN and preserves existing half-opens. */
+    CHECK(lwip_stats.memp[MEMP_TCP_PCB]->used == MEMP_NUM_TCP_PCB);
+#ifdef DP_WRAP_ALLOCATION
+    CHECK(null_tcp_abort_calls == 0); /* lwIP reports this failure with pcb == NULL. */
+#endif
+
+    CHECK(dp_tcp_listener_close(f.core, small_listener) == DP_OK);
+    f.count = 0;
+    send_tcp_pair(&f, 51200, 7001, 2, 1000, 0, "", 0);
+    CHECK(f.count == 1 && u16(f.frames[0].bytes + 54) == 7001 &&
+          u16(f.frames[0].bytes + 56) == 51200 &&
+          (f.frames[0].bytes[67] & 0x12) == 0x12);
+    CHECK(lwip_stats.memp[MEMP_TCP_PCB]->used == MEMP_NUM_TCP_PCB);
+
+    CHECK(dp_tcp_listener_close(f.core, large_listener) == DP_OK);
+    dp_stats cleared;
+    CHECK(dp_core_get_stats(f.core, &cleared) == DP_OK);
+    CHECK(cleared.tcp_active == 0 && cleared.tcp_listeners == 0 && cleared.heap_used == 0);
+    CHECK(lwip_stats.memp[MEMP_TCP_PCB]->used == 0);
+    CHECK(lwip_stats.memp[MEMP_TCP_PCB_LISTEN]->used == 0);
+    CHECK(dp_tcp_listen(f.core, 7000, 1, &small_listener, &port) == DP_OK && port == 7000);
+    CHECK(dp_tcp_listen(f.core, 7001, 1, &large_listener, &port) == DP_OK && port == 7001);
+    CHECK(dp_tcp_listener_close(f.core, small_listener) == DP_OK);
+    CHECK(dp_tcp_listener_close(f.core, large_listener) == DP_OK);
+    close_core(&f);
+}
+static void test_tcp_endpoint_lifecycle(void) {
+    uint64_t previous = 0;
+    for (unsigned cycle = 0; cycle < 8; ++cycle) {
+        struct fixture f;
+        ready_core(&f);
+        uint64_t listener, stream = 0; uint16_t port;
+        dp_tcp_info info; size_t copied; uint8_t bytes[3];
+        CHECK(dp_tcp_listen(f.core, 7000, 1, &listener, &port) == DP_OK);
+        if (previous) CHECK(dp_tcp_read(f.core, previous, bytes, 1, &copied) == DP_INVALID_ARGUMENT);
+        dp_stats baseline, stats;
+        CHECK(dp_core_get_stats(f.core, &baseline) == DP_OK);
+        uint32_t server = establish(&f, 50000);
+        send_tcp_port(&f, 50000, 24, 1001, server + 1, "abc", 3);
+        send_tcp_port(&f, 50000, 20, 1004, server + 1, "", 0);
+        CHECK(dp_tcp_accept(f.core, listener, &stream, &info) == DP_WOULD_BLOCK && stream == 0);
+        CHECK(dp_core_get_stats(f.core, &stats) == DP_OK && stats.heap_used == baseline.heap_used && stats.pbuf_used == 0 && stats.tcp_active == 0);
+        server = establish(&f, 50001);
+        stream = accept_stream(&f, listener);
+        send_tcp_port(&f, 50001, 24, 1001, server + 1, "xyz", 3);
+        send_tcp_port(&f, 50001, 20, 1004, server + 1, "", 0);
+        CHECK(dp_tcp_read(f.core, stream, bytes, 2, &copied) == DP_OK && copied == 2 && !memcmp(bytes, "xy", 2));
+        CHECK(dp_tcp_read(f.core, stream, bytes, 3, &copied) == DP_OK && copied == 1 && bytes[0] == 'z');
+        CHECK(dp_tcp_read(f.core, stream, bytes, 3, &copied) == DP_PEER_RESET);
+        previous = stream;
+        CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+        establish(&f, 50002);
+        f.count = 0;
+        send_tcp_port(&f, 50003, 2, 1000, 0, "", 0);
+        CHECK(find(&f, 6, -1, 0) == NULL); /* Full delayed-accept backlog rejects a new SYN. */
+        stream = accept_stream(&f, listener);
+        establish(&f, 50003); /* Application accept restored the backlog slot. */
+        CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+        CHECK(dp_tcp_read(f.core, stream, bytes, 1, &copied) == DP_WOULD_BLOCK);
+        CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+        CHECK(dp_core_get_stats(f.core, &stats) == DP_OK && stats.heap_used == 0 && stats.pbuf_used == 0 && stats.tcp_active == 0);
+        close_core(&f);
+    }
+}
+static void test_tcp_write(void) {
+    struct fixture f; ready_core(&f);
+    uint64_t listener; uint16_t port;
+    CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK);
+    uint32_t server = establish(&f, 50000);
+    uint64_t stream = accept_stream(&f, listener);
+    enum { TOTAL = 40320 };
+    uint8_t source[TOTAL], expected[TOTAL], seen[TOTAL];
+    for (size_t i = 0; i < TOTAL; ++i) source[i] = expected[i] = (uint8_t)(i ^ (i >> 8));
+    memset(seen, 0, sizeof(seen));
+    size_t copied = 99;
+    CHECK(dp_tcp_write(f.core, stream, NULL, 0, &copied) == DP_OK && copied == 0);
+    CHECK(dp_tcp_write(f.core, listener, source, 1, &copied) == DP_INVALID_ARGUMENT && copied == 0);
+    CHECK(dp_tcp_write(f.core, stream, NULL, 1, &copied) == DP_INVALID_ARGUMENT && copied == 0);
+    CHECK(dp_tcp_write(f.core, stream, source, TOTAL, &copied) == DP_OK && copied == 32768);
+    size_t accepted_bytes = copied;
+    memset(source, 0, copied); /* Already accepted bytes must no longer borrow this buffer. */
+    CHECK(dp_tcp_write(f.core, stream, source, 1, &copied) == DP_WOULD_BLOCK && copied == 0);
+    size_t received_bytes = 0;
+    for (unsigned attempt = 0; received_bytes < TOTAL && attempt < 64; ++attempt) {
+        collect_echo(&f, server, expected, seen, TOTAL);
+        while (received_bytes < TOTAL && seen[received_bytes]) received_bytes++;
+        send_tcp(&f, 16, 1001, server + 1 + (uint32_t)received_bytes, "");
+        if (accepted_bytes < TOTAL) {
+            dp_result result = dp_tcp_write(f.core, stream, source + accepted_bytes, TOTAL - accepted_bytes, &copied);
+            CHECK(result == DP_OK || (result == DP_WOULD_BLOCK && copied == 0));
+            accepted_bytes += copied;
+        }
+        advance(&f, 250);
+    }
+    CHECK(accepted_bytes == TOTAL && received_bytes == TOTAL);
+    f.count = 0;
+    CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+    CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+    dp_stats stats; CHECK(dp_core_get_stats(f.core, &stats) == DP_OK && stats.heap_used == 0 && stats.pbuf_used == 0);
+    close_core(&f);
+}
+static void test_tcp_half_close(void) {
+    for (unsigned mode = 0; mode < 4; ++mode) {
+        struct fixture f; ready_core(&f);
+        uint64_t listener; uint16_t port;
+        CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK);
+        uint32_t server = establish(&f, 50000);
+        uint64_t stream = accept_stream(&f, listener);
+        uint8_t target[8]; size_t copied;
+        uint32_t fin_ack = server + 2;
+        if (mode == 1) {
+            send_tcp(&f, 25, 1001, server + 1, "after");
+            CHECK(dp_tcp_write(f.core, stream, (const uint8_t *)"R", 1, &copied) == DP_OK && copied == 1);
+            fin_ack++;
+        }
+        f.count = 0;
+        CHECK(dp_tcp_shutdown_output(f.core, stream) == DP_OK);
+        size_t frames = f.count;
+        CHECK(dp_tcp_shutdown_output(f.core, stream) == DP_OK && f.count == frames);
+        int fin = 0;
+        for (size_t i = 0; i < f.count; ++i) if (f.frames[i].bytes[20] == 6 && (f.frames[i].bytes[67] & 1)) {
+            CHECK(u32(f.frames[i].bytes + 58) == fin_ack - 1); fin = 1;
+        }
+        CHECK(fin);
+        CHECK(dp_tcp_write(f.core, stream, (const uint8_t *)"x", 1, &copied) == DP_PEER_CLOSED && copied == 0);
+        if (mode == 3) {
+            send_tcp(&f, 20, 1001, fin_ack, "");
+            CHECK(dp_tcp_read(f.core, stream, target, 1, &copied) == DP_PEER_RESET);
+            CHECK(dp_tcp_write(f.core, stream, (const uint8_t *)"x", 1, &copied) == DP_PEER_RESET && copied == 0);
+            CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+            CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+            close_core(&f);
+            continue;
+        }
+        if (mode == 0) {
+            send_tcp(&f, 16, 1001, fin_ack, "");
+            send_tcp(&f, 25, 1001, fin_ack, "after");
+        } else if (mode == 2) {
+            send_tcp(&f, 25, 1001, server + 1, "after"); /* FIN arrives before acknowledgment of our FIN. */
+            send_tcp(&f, 16, 1007, fin_ack, "");
+        } else send_tcp(&f, 16, 1007, fin_ack, "");
+        if (mode != 1) {
+            f.count = 0;
+            send_tcp(&f, 17, 1006, fin_ack, ""); /* TIME_WAIT still acknowledges a duplicate FIN. */
+            struct frame *ack = find(&f, 6, -1, 0);
+            CHECK(ack && (ack->bytes[67] & 0x14) == 0x10 && u32(ack->bytes + 62) == 1007);
+        }
+        f.count = 0;
+        advance(&f, 121000); /* Expire TIME_WAIT without dereferencing its former PCB. */
+        establish(&f, 50001);
+        uint64_t fresh = accept_stream(&f, listener);
+        CHECK(dp_tcp_read(f.core, stream, target, sizeof(target), &copied) == DP_OK && copied == 5 && !memcmp(target, "after", 5));
+        CHECK(dp_tcp_read(f.core, stream, target, 1, &copied) == DP_PEER_CLOSED && copied == 0);
+        CHECK(dp_tcp_shutdown_output(f.core, stream) == DP_OK);
+        CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+        CHECK(dp_tcp_read(f.core, fresh, target, 1, &copied) == DP_WOULD_BLOCK);
+        f.count = 0;
+        CHECK(dp_tcp_close(f.core, fresh) == DP_OK);
+        CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+        dp_stats stats; CHECK(dp_core_get_stats(f.core, &stats) == DP_OK && stats.heap_used == 0 && stats.pbuf_used == 0);
+        close_core(&f);
+    }
+}
+static void test_tcp_write_io(void) {
+    struct fixture f; ready_core(&f);
+    uint64_t listener; uint16_t port;
+    CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK);
+    uint32_t server = establish(&f, 50000);
+    uint64_t stream = accept_stream(&f, listener);
+    size_t copied;
+    CHECK(dp_core_set_link_ready(f.core, 0) == DP_OK);
+    CHECK(dp_tcp_write(f.core, stream, (const uint8_t *)"x", 1, &copied) == DP_WOULD_BLOCK && copied == 0);
+    CHECK(dp_core_set_link_ready(f.core, 1) == DP_OK);
+    f.count = 0; f.ready = 0;
+    uint8_t source[4] = {'h', 'e', 'l', 'd'}, seen[4] = {0};
+    CHECK(dp_tcp_write(f.core, stream, source, sizeof(source), &copied) == DP_OK && copied == sizeof(source));
+    memset(source, 0, sizeof(source));
+    f.ready = 1;
+    CHECK(dp_core_set_link_ready(f.core, 1) == DP_OK);
+    advance(&f, 5000);
+    collect_echo(&f, server, (const uint8_t *)"held", seen, sizeof(seen));
+    CHECK(seen[0] && seen[1] && seen[2] && seen[3]);
+    send_tcp(&f, 16, 1001, server + 5, "");
+    f.ready = -1;
+    CHECK(dp_tcp_write(f.core, stream, (const uint8_t *)"bad", 3, &copied) == DP_LINK_IO && copied == 3);
+    close_core(&f); /* Fatal output failure does not strand copied data or endpoint records. */
+}
+struct segment_pressure { void *blocks[512]; size_t count; int release; };
+static int pressure_segments(void *arg) {
+    struct segment_pressure *pressure = arg;
+    if (pressure->release) {
+        while (pressure->count) memp_free(MEMP_TCP_SEG, pressure->blocks[--pressure->count]);
+    } else {
+        void *block;
+        while ((block = memp_malloc(MEMP_TCP_SEG)) != NULL) {
+            CHECK(pressure->count < 512);
+            pressure->blocks[pressure->count++] = block;
+        }
+    }
+    return 0;
+}
+static void test_tcp_shutdown_pressure(void) {
+    for (unsigned cancel = 0; cancel < 2; ++cancel) {
+        struct fixture f; ready_core(&f);
+        uint64_t listener; uint16_t port;
+        CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK);
+        uint32_t server = establish(&f, 50000);
+        uint64_t stream = accept_stream(&f, listener);
+        struct segment_pressure pressure = {0};
+        CHECK(dp_core_execute(f.core, pressure_segments, &pressure) == DP_OK && pressure.count > 0);
+        f.count = 0;
+        CHECK(dp_tcp_shutdown_output(f.core, stream) == DP_OK && f.count == 0);
+        size_t copied;
+        CHECK(dp_tcp_write(f.core, stream, (const uint8_t *)"x", 1, &copied) == DP_PEER_CLOSED && copied == 0);
+        if (cancel) CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+        pressure.release = 1;
+        CHECK(dp_core_execute(f.core, pressure_segments, &pressure) == DP_OK && pressure.count == 0);
+        if (!cancel) {
+            advance(&f, 500);
+            struct frame *fin = find(&f, 6, -1, 0);
+            CHECK(fin && (fin->bytes[67] & 1));
+            send_tcp(&f, 17, 1001, server + 2, "");
+            uint8_t byte;
+            CHECK(dp_tcp_read(f.core, stream, &byte, 1, &copied) == DP_PEER_CLOSED);
+            CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+        }
+        f.count = 0;
+        CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+        close_core(&f);
+    }
+}
+static void test_tcp_graceful_close(void) {
+    for (unsigned mode = 0; mode < 3; ++mode) {
+        struct fixture f; ready_core(&f);
+        uint64_t listener; uint16_t port;
+        CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK);
+        uint32_t server = establish(&f, 50000);
+        uint64_t stream = accept_stream(&f, listener);
+        size_t copied;
+        uint8_t source[4] = {'t', 'a', 'i', 'l'}, seen[4] = {0};
+        if (mode == 0) {
+            CHECK(dp_tcp_write(f.core, stream, source, 4, &copied) == DP_OK && copied == 4);
+            memset(source, 0, sizeof(source));
+        } else send_tcp(&f, mode == 1 ? 17 : 24, 1001, server + 1, mode == 1 ? "" : "unread");
+        f.count = 0;
+        CHECK(dp_tcp_close_graceful(f.core, listener) == DP_INVALID_ARGUMENT);
+        CHECK(dp_tcp_close_graceful(f.core, stream) == DP_OK);
+        CHECK(dp_tcp_close(f.core, stream) == DP_INVALID_ARGUMENT);
+        CHECK(dp_tcp_read(f.core, stream, source, 1, &copied) == DP_INVALID_ARGUMENT);
+        struct frame *reply = find(&f, 6, -1, 0);
+        CHECK(reply && (reply->bytes[67] & (mode == 2 ? 4 : 1)));
+        if (mode != 2) {
+            for (size_t i = 0; i < f.count; ++i) CHECK(f.frames[i].bytes[20] != 6 || !(f.frames[i].bytes[67] & 4));
+            if (mode == 0) {
+                f.count = 0; advance(&f, 5000);
+                collect_echo(&f, server, (const uint8_t *)"tail", seen, 4);
+                CHECK(seen[0] && seen[1] && seen[2] && seen[3]);
+                send_tcp(&f, 17, 1001, server + 6, "");
+                f.count = 0;
+                send_tcp(&f, 17, 1001, server + 6, ""); /* Detached TIME_WAIT still answers duplicate FIN. */
+                reply = find(&f, 6, -1, 0);
+                CHECK(reply && !(reply->bytes[67] & 4) && u32(reply->bytes + 62) == 1002);
+                advance(&f, 121000);
+            } else send_tcp(&f, 16, 1002, server + 2, "");
+        }
+        CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+        dp_stats stats; CHECK(dp_core_get_stats(f.core, &stats) == DP_OK);
+        CHECK(stats.tcp_active == 0 && stats.heap_used == 0 && stats.pbuf_used == 0);
+        CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK);
+        establish(&f, 50001);
+        uint64_t fresh = accept_stream(&f, listener);
+        CHECK(fresh != stream && dp_tcp_close_graceful(f.core, stream) == DP_INVALID_ARGUMENT);
+        CHECK(dp_tcp_read(f.core, fresh, source, 1, &copied) == DP_WOULD_BLOCK);
+        CHECK(dp_tcp_close(f.core, fresh) == DP_OK);
+        CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+        close_core(&f);
+    }
+}
+#ifdef DP_WRAP_ALLOCATION
+static void test_tcp_graceful_close_error_reclaims_endpoint(void) {
+    struct fixture f;
+    ready_core(&f);
+    uint64_t listener;
+    uint16_t port;
+    CHECK(dp_tcp_listen(f.core, 7000, 1, &listener, &port) == DP_OK);
+    dp_stats listener_baseline, before, after;
+    CHECK(dp_core_get_stats(f.core, &listener_baseline) == DP_OK && listener_baseline.tcp_active == 0);
+    establish(&f, 50000);
+    uint64_t stream = accept_stream(&f, listener);
+    CHECK(dp_core_get_stats(f.core, &before) == DP_OK && before.tcp_active == 1);
+
+    size_t aborts_before = nonnull_tcp_abort_calls;
+    fail_tcp_close_calls = 1;
+    CHECK(dp_tcp_close_graceful(f.core, stream) == DP_INTERNAL);
+    CHECK(fail_tcp_close_calls == 0);
+    CHECK(nonnull_tcp_abort_calls == aborts_before + 1);
+    CHECK(dp_tcp_close_graceful(f.core, stream) == DP_INVALID_ARGUMENT);
+    uint8_t byte;
+    size_t copied;
+    CHECK(dp_tcp_read(f.core, stream, &byte, 1, &copied) == DP_INVALID_ARGUMENT);
+    CHECK(dp_core_get_stats(f.core, &after) == DP_OK);
+    CHECK(after.tcp_active == 0 && after.tcp_listeners == 1 &&
+          after.heap_used == listener_baseline.heap_used);
+    CHECK(lwip_stats.memp[MEMP_TCP_PCB]->used == 0);
+
+    CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+    CHECK(dp_core_get_stats(f.core, &after) == DP_OK);
+    CHECK(after.tcp_active == 0 && after.tcp_listeners == 0 && after.heap_used == 0);
+    CHECK(lwip_stats.memp[MEMP_TCP_PCB]->used == 0);
+    CHECK(lwip_stats.memp[MEMP_TCP_PCB_LISTEN]->used == 0);
+    close_core(&f);
+}
+#endif
+static void test_tcp_graceful_pressure(void) {
+    for (unsigned complete = 0; complete < 3; ++complete) {
+        struct fixture f; ready_core(&f);
+        uint64_t listener; uint16_t port;
+        CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK);
+        uint32_t server = establish(&f, 50000);
+        uint64_t stream = accept_stream(&f, listener);
+        struct segment_pressure pressure = {0};
+        if (complete != 2)
+            CHECK(dp_core_execute(f.core, pressure_segments, &pressure) == DP_OK && pressure.count > 0);
+        else f.ready = 0; /* Output backpressure, rather than allocation pressure. */
+        f.count = 0;
+        CHECK(dp_tcp_close_graceful(f.core, stream) == DP_OK && f.count == 0);
+        CHECK(dp_tcp_close_graceful(f.core, stream) == DP_INVALID_ARGUMENT);
+        pressure.release = 1;
+        CHECK(dp_core_execute(f.core, pressure_segments, &pressure) == DP_OK && pressure.count == 0);
+        f.ready = 1;
+        if (complete == 2) CHECK(dp_core_set_link_ready(f.core, 1) == DP_OK);
+        if (complete) {
+            advance(&f, complete == 2 ? 5000 : 500);
+            struct frame *fin = find(&f, 6, -1, 0);
+            CHECK(fin && (fin->bytes[67] & 1) && !(fin->bytes[67] & 4));
+            send_tcp(&f, 17, 1001, server + 2, "");
+            advance(&f, 121000);
+        }
+        CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+        close_core(&f); /* Also frees detached FIN-pending PCBs before any retry. */
+    }
+}
+static void test_tcp_graceful_failure(void) {
+    for (unsigned mode = 0; mode < 3; ++mode) {
+        struct fixture f; ready_core(&f);
+        uint64_t stream, listener = 0; uint16_t port;
+        if (!mode) CHECK(dp_tcp_connect(f.core, peer_ip, 9000, &stream) == DP_OK);
+        else {
+            CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK);
+            establish(&f, 50000); stream = accept_stream(&f, listener);
+        }
+        f.count = 0;
+        if (mode == 1) { f.now--; CHECK(dp_core_poll(f.core) == DP_CLOCK_REVERSED); }
+        if (mode == 2) f.ready = -1;
+        dp_result expected = mode == 1 ? DP_CLOCK_REVERSED : (mode == 2 ? DP_LINK_IO : DP_OK);
+        CHECK(dp_tcp_close_graceful(f.core, stream) == expected);
+        if (mode == 1) CHECK(f.count == 0); /* Failed cores suppress cleanup output. */
+        if (!mode) {
+            struct frame *reset = find(&f, 6, -1, 0);
+            CHECK(reset && (reset->bytes[67] & 4)); /* A pending candidate is cancelled by abort. */
+        }
+        dp_stats stats; CHECK(dp_core_get_stats(f.core, &stats) == DP_OK);
+        CHECK(stats.failure == expected);
+        if (mode != 2) CHECK(stats.tcp_active == 0 && stats.pbuf_used == 0);
+        if (listener) CHECK(dp_tcp_listener_close(f.core, listener) == expected);
+        close_core(&f);
+        ready_core(&f);
+        CHECK(dp_core_get_stats(f.core, &stats) == DP_OK);
+        CHECK(stats.heap_used == 0 && stats.pbuf_used == 0 && stats.tcp_active == 0);
+        close_core(&f);
+    }
+}
+static void test_tcp_liveness(void) {
+    struct fixture f; ready_core(&f);
+    uint64_t listener; uint16_t port;
+    CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK);
+    uint32_t server = establish(&f, 50000);
+    uint64_t stream = accept_stream(&f, listener);
+    CHECK(dp_tcp_configure_liveness(f.core, stream) == DP_OK);
+    uint8_t target; size_t copied;
+    for (unsigned round = 0; round < 3; ++round) {
+        f.count = 0; advance(&f, 11000);
+        struct frame *probe = find(&f, 6, -1, 0);
+        CHECK(probe && probe->length == 74 && probe->bytes[67] == 16 && u32(probe->bytes + 58) == server);
+        send_tcp(&f, 16, 1001, server + 1, ""); /* A healthy idle peer stays connected. */
+        CHECK(dp_tcp_read(f.core, stream, &target, 1, &copied) == DP_WOULD_BLOCK);
+    }
+    CHECK(dp_tcp_configure_liveness(f.core, listener) == DP_INVALID_ARGUMENT);
+    f.count = 0; advance(&f, 21000); /* Drop all probe replies. */
+    CHECK(dp_tcp_read(f.core, stream, &target, 1, &copied) == DP_PEER_RESET);
+    CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+    CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+    close_core(&f);
+}
+static void test_tcp_reuse(void) {
+    for (int old_reuse = 0; old_reuse < 2; ++old_reuse) for (int new_reuse = 0; new_reuse < 2; ++new_reuse) {
+        struct fixture f; ready_core(&f);
+        uint64_t listener, extra; uint16_t port;
+        CHECK(dp_tcp_listen_with_options(f.core, 7000, 2, 2, &listener, &port) == DP_INVALID_ARGUMENT && !listener && !port);
+        CHECK(dp_tcp_listen_with_options(f.core, 7000, 2, old_reuse, &listener, &port) == DP_OK);
+        establish(&f, 50000); uint64_t stream = accept_stream(&f, listener);
+        CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+        dp_result expected = old_reuse && new_reuse ? DP_OK : DP_ADDRESS_IN_USE;
+        CHECK(dp_tcp_listen_with_options(f.core, 7000, 2, new_reuse, &listener, &port) == expected);
+        if (expected == DP_OK) {
+            CHECK(dp_tcp_listen_with_options(f.core, 7000, 2, 1, &extra, &port) == DP_ADDRESS_IN_USE && !extra);
+            uint8_t byte; size_t copied;
+            CHECK(dp_tcp_read(f.core, stream, &byte, 1, &copied) == DP_WOULD_BLOCK);
+            uint32_t fresh_server = establish(&f, 50001);
+            uint64_t fresh = accept_stream(&f, listener);
+            CHECK(fresh != stream);
+            send_tcp_port(&f, 50001, 24, 1001, fresh_server + 1, "N", 1);
+            CHECK(dp_tcp_read(f.core, fresh, &byte, 1, &copied) == DP_OK && copied == 1 && byte == 'N');
+            CHECK(dp_tcp_read(f.core, stream, &byte, 1, &copied) == DP_WOULD_BLOCK);
+            CHECK(dp_tcp_close(f.core, fresh) == DP_OK);
+            CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+        }
+        CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+        close_core(&f);
+    }
+    for (int reuse = 0; reuse < 2; ++reuse) {
+        struct fixture f; ready_core(&f);
+        uint64_t listener; uint16_t port;
+        CHECK(dp_tcp_listen_with_options(f.core, 7000, 2, 1, &listener, &port) == DP_OK);
+        uint32_t server = establish(&f, 50000); uint64_t stream = accept_stream(&f, listener);
+        CHECK(dp_tcp_close_graceful(f.core, stream) == DP_OK);
+        send_tcp(&f, 17, 1001, server + 2, "");
+        CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+        CHECK(dp_tcp_listen_with_options(f.core, 7000, 2, reuse, &listener, &port) == (reuse ? DP_OK : DP_ADDRESS_IN_USE));
+        if (reuse) CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+        close_core(&f);
+    }
+}
+static uint32_t connect_begin(struct fixture *f, uint64_t *stream, uint16_t *local_port) {
+    f->count = 0;
+    CHECK(dp_tcp_connect(f->core, peer_ip, 9000, stream) == DP_OK && *stream);
+    struct frame *syn = find(f, 6, -1, 0);
+    CHECK(syn && (syn->bytes[67] & 0x12) == 2);
+    CHECK(!memcmp(syn->bytes + 22, local_ip, 16) && !memcmp(syn->bytes + 38, peer_ip, 16));
+    CHECK(u16(syn->bytes + 56) == 9000);
+    *local_port = u16(syn->bytes + 54);
+    CHECK(*local_port != 0);
+    return u32(syn->bytes + 58);
+}
+static void test_tcp_connect(void) {
+    struct fixture f; open_core(&f, 0);
+    uint64_t stream = 99; uint16_t local_port;
+    CHECK(dp_tcp_connect(f.core, peer_ip, 9000, &stream) == DP_WOULD_BLOCK && stream == 0);
+    CHECK(dp_core_set_link_ready(f.core, 1) == DP_OK);
+    CHECK(dp_tcp_connect(f.core, peer_ip, 9000, &stream) == DP_WOULD_BLOCK && stream == 0);
+    dp_stats stats; CHECK(dp_core_get_stats(f.core, &stats) == DP_OK && stats.heap_used == 0 && stats.tcp_active == 0);
+    close_core(&f); ready_core(&f);
+    uint32_t sequence = connect_begin(&f, &stream, &local_port);
+    dp_tcp_info info;
+    memset(&info, 99, sizeof(info));
+    CHECK(dp_tcp_connect_status(f.core, stream, &info) == DP_WOULD_BLOCK && info.local_port == 0 && info.remote_port == 0);
+    uint8_t bytes[8]; size_t copied;
+    CHECK(dp_tcp_write(f.core, stream, (const uint8_t *)"early", 5, &copied) == DP_WOULD_BLOCK && copied == 0);
+    CHECK(dp_tcp_shutdown_output(f.core, stream) == DP_WOULD_BLOCK);
+    f.count = 0;
+    send_tcp_pair(&f, 9000, local_port, 18, 7000, sequence + 1, "", 0);
+    CHECK(dp_tcp_connect_status(f.core, stream, &info) == DP_OK);
+    CHECK(info.local_port == local_port && info.remote_port == 9000);
+    CHECK(!memcmp(info.local, local_ip, 16) && !memcmp(info.remote, peer_ip, 16));
+    f.count = 0;
+    CHECK(dp_tcp_write(f.core, stream, (const uint8_t *)"hi", 2, &copied) == DP_OK && copied == 2);
+    uint8_t seen[2] = {0};
+    collect_echo(&f, sequence, (const uint8_t *)"hi", seen, 2);
+    CHECK(seen[0] && seen[1]);
+    send_tcp_pair(&f, 9000, local_port, 25, 7001, sequence + 3, "reply", 5);
+    CHECK(dp_tcp_connect_status(f.core, stream, &info) == DP_OK); /* Completed before peer EOF. */
+    CHECK(dp_tcp_read(f.core, stream, bytes, sizeof(bytes), &copied) == DP_OK && copied == 5 && !memcmp(bytes, "reply", 5));
+    CHECK(dp_tcp_read(f.core, stream, bytes, 1, &copied) == DP_PEER_CLOSED);
+    CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+    CHECK(dp_core_get_stats(f.core, &stats) == DP_OK && stats.heap_used == 0 && stats.pbuf_used == 0);
+    close_core(&f);
+}
+static void test_tcp_connect_cancel(void) {
+    struct fixture f; ready_core(&f);
+    uint64_t stream; uint16_t port; dp_tcp_info info;
+    uint32_t sequence = connect_begin(&f, &stream, &port);
+    send_tcp_pair(&f, 9000, port, 20, 0, sequence + 1, "", 0);
+    CHECK(dp_tcp_connect_status(f.core, stream, &info) == DP_PEER_RESET);
+    CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+    sequence = connect_begin(&f, &stream, &port);
+    uint64_t stale = stream;
+    uint16_t cancelled_port = port;
+    uint32_t cancelled_sequence = sequence;
+    CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+    send_tcp_pair(&f, 9000, port, 18, 7000, sequence + 1, "", 0);
+    CHECK(dp_tcp_connect_status(f.core, stale, &info) == DP_INVALID_ARGUMENT);
+    sequence = connect_begin(&f, &stream, &port);
+    CHECK(stream != stale && dp_tcp_connect_status(f.core, stream, &info) == DP_WOULD_BLOCK);
+    send_tcp_pair(&f, 9000, cancelled_port, 18, 7000, cancelled_sequence + 1, "", 0);
+    CHECK(dp_tcp_connect_status(f.core, stream, &info) == DP_WOULD_BLOCK);
+    send_tcp_pair(&f, 9000, port, 18, 7000, sequence + 1, "", 0);
+    CHECK(dp_tcp_connect_status(f.core, stream, &info) == DP_OK);
+    CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+    connect_begin(&f, &stale, &port);
+    close_core(&f); /* Pending SYN belongs to the context when never explicitly cancelled. */
+    ready_core(&f);
+    connect_begin(&f, &stream, &port);
+    CHECK(dp_tcp_connect_status(f.core, stale, &info) == DP_INVALID_ARGUMENT);
+    CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+    close_core(&f);
+}
+static void test_tcp_connect_limits(void) {
+    struct fixture f; ready_core(&f);
+    uint64_t streams[32], extra = 99; uint16_t port; dp_tcp_info info;
+    uint8_t invalid[16] = {0};
+    CHECK(dp_tcp_connect(f.core, invalid, 9000, &extra) == DP_INVALID_ARGUMENT && extra == 0);
+    invalid[0] = 255;
+    CHECK(dp_tcp_connect(f.core, invalid, 9000, &extra) == DP_INVALID_ARGUMENT && extra == 0);
+    CHECK(dp_tcp_connect(f.core, peer_ip, 0, &extra) == DP_INVALID_ARGUMENT && extra == 0);
+    struct segment_pressure pressure = {0};
+    CHECK(dp_core_execute(f.core, pressure_segments, &pressure) == DP_OK && pressure.count > 0);
+    CHECK(dp_tcp_connect(f.core, peer_ip, 9000, &extra) == DP_RESOURCE_LIMIT && extra == 0);
+    dp_stats stats;
+    CHECK(dp_core_get_stats(f.core, &stats) == DP_OK && stats.tcp_active == 0 && stats.heap_used == 0 && stats.pbuf_used == 0);
+    pressure.release = 1;
+    CHECK(dp_core_execute(f.core, pressure_segments, &pressure) == DP_OK);
+    for (unsigned i = 0; i < 32; ++i) connect_begin(&f, &streams[i], &port);
+    CHECK(dp_tcp_connect(f.core, peer_ip, 9000, &extra) == DP_RESOURCE_LIMIT && extra == 0);
+    for (unsigned i = 0; i < 32; ++i) CHECK(dp_tcp_connect_status(f.core, streams[i], &info) == DP_WOULD_BLOCK);
+    f.count = 0;
+    for (unsigned i = 0; i < 32; ++i) CHECK(dp_tcp_close(f.core, streams[i]) == DP_OK);
+    f.count = 0;
+    CHECK(dp_core_get_stats(f.core, &stats) == DP_OK && stats.tcp_active == 0 && stats.heap_used == 0 && stats.pbuf_used == 0);
+    f.ready = -1;
+    CHECK(dp_tcp_connect(f.core, peer_ip, 9000, &extra) == DP_LINK_IO && extra == 0);
+    CHECK(dp_core_get_stats(f.core, &stats) == DP_OK && stats.tcp_active == 0 && stats.heap_used == 0 && stats.pbuf_used == 0);
+    close_core(&f);
+}
+static void test_tcp_connect_retry(void) {
+    struct fixture f; ready_core(&f);
+    uint64_t stream; dp_tcp_info info;
+    f.ready = 0;
+    CHECK(dp_tcp_connect(f.core, peer_ip, 9000, &stream) == DP_OK && stream);
+    CHECK(dp_tcp_connect_status(f.core, stream, &info) == DP_WOULD_BLOCK);
+    f.count = 0; f.ready = 1;
+    CHECK(dp_core_set_link_ready(f.core, 1) == DP_OK);
+    advance(&f, 5000);
+    struct frame *syn = find(&f, 6, -1, 0);
+    CHECK(syn && (syn->bytes[67] & 0x12) == 2);
+    uint16_t port = u16(syn->bytes + 54);
+    uint32_t sequence = u32(syn->bytes + 58);
+    for (size_t i = 0; i < f.count; ++i) if (f.frames[i].bytes[20] == 6) {
+        CHECK(u16(f.frames[i].bytes + 54) == port && u32(f.frames[i].bytes + 58) == sequence);
+    }
+    send_tcp_pair(&f, 9000, port, 18, 7000, sequence + 1, "", 0);
+    CHECK(dp_tcp_connect_status(f.core, stream, &info) == DP_OK);
+    CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+    connect_begin(&f, &stream, &port);
+    dp_result state = DP_WOULD_BLOCK;
+    for (unsigned i = 0; i < 120 && state == DP_WOULD_BLOCK; ++i) {
+        f.count = 0;
+        advance(&f, 2000);
+        state = dp_tcp_connect_status(f.core, stream, &info);
+    }
+    CHECK(state == DP_PEER_RESET); /* Protocol retry exhaustion, not a Java operation deadline. */
+    CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+    f.count = 0; advance(&f, 4000);
+    dp_stats stats;
+    CHECK(dp_core_get_stats(f.core, &stats) == DP_OK && stats.tcp_active == 0 && stats.heap_used == 0 && stats.pbuf_used == 0);
+    close_core(&f);
+}
+static void test_tcp_large_refused(void) {
+    struct fixture f;
+    ready_core(&f);
+    CHECK(dp_core_execute(f.core, echo_services_start, NULL) == DP_OK);
+    send_tcp(&f, 2, 1000, 0, "");
+    struct frame *syn = find(&f, 6, -1, 0);
+    CHECK(syn);
+    uint32_t server = u32(syn->bytes + 58);
+    f.count = 0;
+    send_tcp(&f, 16, 1001, server + 1, "");
+    enum { TOTAL = 28 * 1440 };
+    uint8_t payload[TOTAL], seen[TOTAL];
+    for (size_t i = 0; i < TOTAL; i++)
+        payload[i] = (uint8_t)(i ^ (i >> 8));
+    memset(seen, 0, sizeof(seen));
+    /* Close a 1440-byte hole after 27 out-of-order segments: one callback then
+     * receives 40320 bytes, larger than the unchanged 32768-byte send budget. */
+    for (size_t i = 1440; i < TOTAL; i += 1440)
+        send_tcp_bytes(&f, 24, 1001 + (uint32_t)i, server + 1, payload + i, 1440);
+    send_tcp_bytes(&f, 24, 1001, server + 1, payload, 1440);
+    collect_echo(&f, server, payload, seen, TOTAL);
+    CHECK(seen[0] && !seen[32768]);
+    size_t received = 0;
+    for (int attempt = 0; received < TOTAL && attempt < 16; attempt++) {
+        size_t before = received;
+        while (received < TOTAL && seen[received])
+            received++;
+        CHECK(received > before);
+        send_tcp(&f, 16, 1001 + TOTAL, server + 1 + (uint32_t)received, "");
+        advance(&f, 250);
+        collect_echo(&f, server, payload, seen, TOTAL);
+    }
+    CHECK(received == TOTAL);
+    for (size_t i = 0; i < TOTAL; i++)
+        CHECK(seen[i]);
+    send_tcp(&f, 16, 1001 + TOTAL, server + 1 + TOTAL, "");
+    close_core(&f);
+}
+static void test_tcp(void) {
+    struct fixture f;
+    ready_core(&f);
+    CHECK(dp_core_execute(f.core, echo_services_start, NULL) == DP_OK);
+    send_tcp(&f, 2, 1000, 0, "");
+    struct frame *syn = find(&f, 6, -1, 0);
+    CHECK(syn);
+    CHECK((syn->bytes[67] & 0x12) == 0x12);
+    uint32_t server = u32(syn->bytes + 58);
+    CHECK(u32(syn->bytes + 62) == 1001);
+    f.count = 0;
+    send_tcp(&f, 16, 1001, server + 1, "");
+    send_tcp(&f, 24, 1001, server + 1, "hello");
+    struct frame *echo = find(&f, 6, -1, 1);
+    CHECK(echo);
+    size_t header = (echo->bytes[66] >> 4) * 4;
+    CHECK(u16(echo->bytes + 18) == header + 5);
+    CHECK(!memcmp(echo->bytes + 54 + header, "hello", 5));
+    f.count = 0;
+    send_tcp(&f, 16, 1006, server + 6, "");
+    close_core(&f);
+}
+static void send_udp_bytes(struct fixture *f, uint16_t port, const uint8_t *data, size_t n) {
+    uint8_t frame[1514];
+    CHECK(n <= 1452);
+    ethernet(frame, local_mac);
+    uint8_t *p = ipv6(frame, local_ip, 17, (uint16_t)(8 + n));
+    w16(p, 50000);
+    w16(p + 2, port);
+    w16(p + 4, (uint16_t)(8 + n));
+    memcpy(p + 8, data, n);
+    uint16_t c = checksum(frame + 14, p, 8 + n, 17);
+    w16(p + 6, c ? c : 65535);
+    CHECK(dp_core_input(f->core, frame, 62 + n) == DP_OK);
+}
+static void send_udp(struct fixture *f, uint16_t port, const char *data) {
+    send_udp_bytes(f, port, (const uint8_t *)data, strlen(data));
+}
+static void test_ipv6_unjoined_multicast_flood(void) {
+    struct fixture f;
+    ready_core(&f);
+
+    dp_stats baseline;
+    CHECK(dp_core_get_stats(f.core, &baseline) == DP_OK);
+    u16_t baseline_pools[MEMP_MAX];
+    for (unsigned pool = 0; pool < MEMP_MAX; ++pool)
+        baseline_pools[pool] = lwip_stats.memp[pool]->used;
+
+    uint64_t endpoint;
+    uint16_t port;
+    CHECK(dp_udp_bind(f.core, 0, &endpoint, &port) == DP_OK);
+    dp_stats endpoint_stats;
+    CHECK(dp_core_get_stats(f.core, &endpoint_stats) == DP_OK);
+    u16_t endpoint_pools[MEMP_MAX];
+    for (unsigned pool = 0; pool < MEMP_MAX; ++pool)
+        endpoint_pools[pool] = lwip_stats.memp[pool]->used;
+
+    /* Each frame targets a distinct unjoined link-local group. */
+    for (unsigned i = 1; i <= 4096; ++i) {
+        uint8_t frame[66] = {0};
+        uint8_t group[16] = {0xff, 0x02};
+        const unsigned group_id = 0x1000 + i;
+        group[14] = (uint8_t)(group_id >> 8);
+        group[15] = (uint8_t)group_id;
+        const uint8_t mac[6] = {0x33, 0x33, group[12], group[13], group[14], group[15]};
+        ethernet(frame, mac);
+        uint8_t *udp = ipv6(frame, group, 17, 12);
+        w16(udp, 50000);
+        w16(udp + 2, port);
+        w16(udp + 4, 12);
+        w16(udp + 8, (uint16_t)i);
+        uint16_t udp_checksum = checksum(frame + 14, udp, 12, 17);
+        w16(udp + 6, udp_checksum ? udp_checksum : 0xffff);
+        CHECK(dp_core_input(f.core, frame, sizeof(frame)) == DP_OK);
+    }
+
+    dp_stats after_flood;
+    CHECK(dp_core_get_stats(f.core, &after_flood) == DP_OK);
+    CHECK(after_flood.failure == DP_OK);
+    CHECK(after_flood.heap_used == endpoint_stats.heap_used);
+    CHECK(after_flood.pbuf_used == endpoint_stats.pbuf_used);
+    CHECK(f.count == 0);
+    dp_udp_datagram datagram;
+    uint8_t received[8] = {0};
+    CHECK(dp_udp_receive(f.core, endpoint, received, sizeof(received), &datagram) == DP_WOULD_BLOCK);
+    for (unsigned pool = 0; pool < MEMP_MAX; ++pool)
+        CHECK(lwip_stats.memp[pool]->used == endpoint_pools[pool]);
+    CHECK(lwip_stats.memp[MEMP_MLD6_GROUP]->used == endpoint_pools[MEMP_MLD6_GROUP]);
+
+    /* Valid unicast traffic and endpoint teardown still work after the flood. */
+    send_udp(&f, port, "live");
+    CHECK(dp_udp_receive(f.core, endpoint, received, sizeof(received), &datagram) == DP_OK);
+    CHECK(datagram.original_length == 4 && datagram.copied_length == 4);
+    CHECK(!memcmp(received, "live", 4));
+    CHECK(dp_udp_close(f.core, endpoint) == DP_OK);
+    CHECK(dp_core_get_stats(f.core, &after_flood) == DP_OK);
+    CHECK(after_flood.heap_used == baseline.heap_used && after_flood.pbuf_used == baseline.pbuf_used);
+    for (unsigned pool = 0; pool < MEMP_MAX; ++pool)
+        CHECK(lwip_stats.memp[pool]->used == baseline_pools[pool]);
+    close_core(&f);
+}
+static void test_udp(void) {
+    struct fixture f;
+    ready_core(&f);
+    CHECK(dp_core_execute(f.core, echo_services_start, NULL) == DP_OK);
+    send_udp(&f, 6000, "hello");
+    struct frame *echo = find(&f, 17, -1, 0);
+    CHECK(echo);
+    CHECK(u16(echo->bytes + 54) == 6000 && u16(echo->bytes + 56) == 50000);
+    CHECK(!memcmp(echo->bytes + 62, "hello", 5));
+    f.count = 0;
+    send_udp(&f, 6000, "");
+    echo = find(&f, 17, -1, 0);
+    CHECK(echo && u16(echo->bytes + 18) == 8);
+    f.count = 0;
+    send_udp(&f, 6001, "x");
+    CHECK(find(&f, 58, 1, 0));
+    close_core(&f);
+}
+static void test_udp_endpoint(void) {
+    struct fixture f;
+    open_core(&f, 0);
+    uint64_t prepared;
+    uint16_t prepared_port;
+    CHECK(dp_udp_bind(f.core, 0, &prepared, &prepared_port) == DP_OK);
+    CHECK(dp_udp_send(f.core, prepared, peer_ip, 50000, NULL, 0) == DP_WOULD_BLOCK);
+    close_core(&f);
+    ready_core(&f);
+    uint64_t handle = 0, conflict = 9;
+    uint16_t port = 0, conflict_port = 9;
+    CHECK(dp_udp_bind(f.core, 0, &handle, &port) == DP_OK);
+    CHECK(handle > 0 && port != 0);
+    CHECK(dp_udp_bind(f.core, port, &conflict, &conflict_port) == DP_ADDRESS_IN_USE);
+    CHECK(conflict == 0 && conflict_port == 0);
+    dp_udp_datagram datagram;
+    uint8_t data[16] = {0};
+    CHECK(dp_udp_receive(f.core, handle, data, sizeof(data), &datagram) == DP_WOULD_BLOCK);
+    send_udp(&f, port, "");
+    CHECK(dp_udp_receive(f.core, handle, NULL, 0, &datagram) == DP_OK);
+    CHECK(datagram.original_length == 0 && datagram.copied_length == 0);
+    CHECK(datagram.source_port == 50000 && !memcmp(datagram.source, peer_ip, 16));
+    send_udp(&f, port, "hello");
+    CHECK(dp_udp_receive(f.core, handle, data, 2, &datagram) == DP_OK);
+    CHECK(datagram.original_length == 5 && datagram.copied_length == 2 && !memcmp(data, "he", 2));
+    CHECK(dp_udp_receive(f.core, handle, data, sizeof(data), &datagram) == DP_WOULD_BLOCK);
+    f.count = 0;
+    CHECK(dp_udp_send(f.core, handle, peer_ip, 50000, (const uint8_t *)"reply", 5) == DP_OK);
+    struct frame *reply = find(&f, 17, -1, 0);
+    CHECK(reply && u16(reply->bytes + 54) == port && !memcmp(reply->bytes + 62, "reply", 5));
+    f.count = 0;
+    CHECK(dp_udp_send(f.core, handle, peer_ip, 50000, NULL, 0) == DP_OK);
+    reply = find(&f, 17, -1, 0);
+    CHECK(reply && u16(reply->bytes + 18) == 8 && u16(reply->bytes + 54) == port);
+    f.count = 0;
+    f.ready = 0; /* The queue can stop accepting after the initial ready check. */
+    CHECK(dp_udp_send(f.core, handle, peer_ip, 50000, (const uint8_t *)"x", 1) == DP_WOULD_BLOCK);
+    f.ready = 1;
+    CHECK(dp_core_set_link_ready(f.core, 1) == DP_OK);
+    for (unsigned i = 0; i <= DP_UDP_QUEUE_PACKETS; ++i) send_udp(&f, port, "");
+    dp_udp_queue_stats queued;
+    CHECK(dp_udp_get_queue_stats(f.core, handle, &queued) == DP_OK);
+    CHECK(queued.packets == DP_UDP_QUEUE_PACKETS && queued.bytes == 0 && queued.dropped == 1);
+    for (unsigned i = 0; i < DP_UDP_QUEUE_PACKETS; ++i)
+        CHECK(dp_udp_receive(f.core, handle, NULL, 0, &datagram) == DP_OK);
+    uint8_t large[1000], received[1000];
+    for (size_t i = 0; i < sizeof(large); ++i) large[i] = (uint8_t)i;
+    /* Exercise the byte ceiling independently of the packet ceiling. */
+    for (unsigned i = 0; i < 66; ++i) {
+        w16(large, (uint16_t)i);
+        send_udp_bytes(&f, port, large, sizeof(large));
+    }
+    CHECK(dp_udp_get_queue_stats(f.core, handle, &queued) == DP_OK);
+    CHECK(queued.packets == 65 && queued.bytes == 65000 && queued.dropped == 2);
+    /* Pop, then wrap both descriptor and payload rings and verify each byte. */
+    for (unsigned i = 0; i < 130; ++i) {
+        CHECK(dp_udp_receive(f.core, handle, received, sizeof(received), &datagram) == DP_OK);
+        CHECK(datagram.original_length == sizeof(large) && u16(received) == i);
+        CHECK(!memcmp(large + 2, received + 2, sizeof(large) - 2));
+        if (i < 65) {
+            w16(large, (uint16_t)(65 + i));
+            send_udp_bytes(&f, port, large, sizeof(large));
+        }
+    }
+    CHECK(dp_udp_get_queue_stats(f.core, handle, &queued) == DP_OK);
+    CHECK(queued.packets == 0 && queued.bytes == 0);
+    CHECK(dp_udp_close(f.core, handle) == DP_OK);
+    CHECK(dp_udp_receive(f.core, handle, data, sizeof(data), &datagram) == DP_INVALID_ARGUMENT);
+    uint64_t stale = handle;
+    CHECK(dp_udp_bind(f.core, port, &handle, &port) == DP_OK && handle != stale);
+    send_udp(&f, port, "queued at close");
+    dp_stats stats;
+    CHECK(dp_core_get_stats(f.core, &stats) == DP_OK);
+    CHECK(stats.pbuf_used == 0 && stats.heap_used >= DP_UDP_QUEUE_BYTES);
+    uint16_t ports[32];
+    uint64_t endpoint_handles[32];
+    ports[0] = port;
+    endpoint_handles[0] = handle;
+    for (unsigned i = 1; i < 32; ++i) {
+        uint64_t another;
+        uint16_t another_port;
+        CHECK(dp_udp_bind(f.core, 0, &another, &another_port) == DP_OK);
+        ports[i] = another_port;
+        endpoint_handles[i] = another;
+    }
+    CHECK(dp_core_get_stats(f.core, &stats) == DP_OK);
+    CHECK(stats.udp_pcbs == 32 && stats.configured_bytes < 16 * 1024 * 1024);
+    CHECK(stats.heap_used <= DP_UDP_GLOBAL_QUEUE_BYTES);
+    CHECK(dp_udp_bind(f.core, 0, &conflict, &conflict_port) == DP_RESOURCE_LIMIT);
+    CHECK(conflict == 0 && conflict_port == 0);
+    uint64_t total_bytes = 0, total_dropped = 0;
+    /* The plan's 512 KiB UDP receive ceiling applies across all endpoints. */
+    for (unsigned i = 0; i < 32; ++i)
+        for (unsigned packet = 0; packet < 17; ++packet)
+            send_udp_bytes(&f, ports[i], large, sizeof(large));
+    for (unsigned i = 0; i < 32; ++i) {
+        CHECK(dp_udp_get_queue_stats(f.core, endpoint_handles[i], &queued) == DP_OK);
+        total_bytes += queued.bytes;
+        total_dropped += queued.dropped;
+    }
+    CHECK(total_bytes <= 512 * 1024 && total_dropped > 0);
+    close_core(&f); /* Queued data and PCB must be reclaimed by registry teardown. */
+    open_core(&f, 0);
+    CHECK(dp_udp_close(f.core, stale) == DP_INVALID_ARGUMENT);
+    CHECK(dp_core_get_stats(f.core, &stats) == DP_OK);
+    CHECK(stats.udp_pcbs == 0 && stats.pbuf_used == 0 && stats.heap_used == 0);
+    close_core(&f);
+}
+static int read_peer_mtu(void *arg) {
+    ip6_addr_t address;
+    IP6_ADDR(&address, PP_HTONL(0xfe800000), 0, 0, PP_HTONL(2));
+    ip6_addr_assign_zone(&address, IP6_UNICAST, netif_list);
+    *(uint16_t *)arg = nd6_get_destination_mtu(&address, netif_list);
+    return 0;
+}
+static void test_pmtu(void) {
+    const uint32_t advertised[] = {1, 0, 1279, 1280, 1400, 65535, 65536, 0xffffffff};
+    for (size_t i = 0; i < sizeof(advertised) / sizeof(advertised[0]); ++i) {
+        struct fixture f;
+        ready_core(&f);
+        CHECK(dp_core_execute(f.core, echo_services_start, NULL) == DP_OK);
+        send_udp(&f, 6000, "before");
+        struct frame *echo = find(&f, 17, -1, 0);
+        CHECK(echo != NULL);
+        uint8_t quote[40];
+        memcpy(quote, echo->bytes + 14, sizeof(quote));
+        f.count = 0;
+        uint8_t frame[102];
+        ethernet(frame, local_mac);
+        uint8_t *icmp = ipv6(frame, local_ip, 58, 48);
+        icmp[0] = 2;
+        w32(icmp + 4, advertised[i]);
+        memcpy(icmp + 8, quote, sizeof(quote));
+        w16(icmp + 2, checksum(frame + 14, icmp, 48, 58));
+        CHECK(dp_core_input(f.core, frame, sizeof(frame)) == DP_OK);
+        uint16_t mtu = 0;
+        CHECK(dp_core_execute(f.core, read_peer_mtu, &mtu) == DP_OK);
+        uint16_t expected = advertised[i] < 1280 ? 1500 :
+            (advertised[i] > 65535 ? 65535 : (uint16_t)advertised[i]);
+        CHECK(mtu == expected);
+        send_udp(&f, 6000, "after");
+        echo = find(&f, 17, -1, 0);
+        CHECK(echo && !memcmp(echo->bytes + 62, "after", 5));
+        close_core(&f);
+    }
+}
+static void test_udp_queue_age(void) {
+    struct fixture f; ready_core(&f);
+    uint64_t media, control; uint16_t media_port, control_port;
+    CHECK(dp_udp_bind(f.core, 47000, &media, &media_port) == DP_OK);
+    CHECK(dp_udp_bind(f.core, 47001, &control, &control_port) == DP_OK);
+    CHECK(dp_udp_set_queue_max_age(f.core, media, 100) == DP_OK);
+    send_udp(&f, media_port, "old"); send_udp(&f, control_port, "control");
+    f.now += 99; /* Existing advance() rounds to 250ms timer ticks. */
+    send_udp(&f, media_port, "fresh");
+    f.now++;
+    uint8_t bytes[16]; dp_udp_datagram info;
+    CHECK(dp_udp_receive(f.core, media, bytes, sizeof(bytes), &info) == DP_OK);
+    CHECK(info.copied_length == 5 && !memcmp(bytes, "fresh", 5));
+    uint64_t expired = UINT64_MAX;
+    CHECK(dp_udp_get_expired_count(f.core, media, &expired) == DP_OK && expired == 1);
+    dp_udp_queue_stats stats;
+    CHECK(dp_udp_get_queue_stats(f.core, media, &stats) == DP_OK && stats.packets == 0 && stats.bytes == 0 && stats.dropped == 1);
+    CHECK(dp_udp_receive(f.core, control, bytes, sizeof(bytes), &info) == DP_OK);
+    CHECK(info.copied_length == 7 && !memcmp(bytes, "control", 7));
+    for (unsigned i = 0; i < DP_UDP_QUEUE_PACKETS; ++i) send_udp(&f, media_port, "");
+    advance(&f, 100);
+    send_udp(&f, media_port, "replacement"); /* Prune before capacity rejection, including zero-length packets. */
+    CHECK(dp_udp_receive(f.core, media, bytes, sizeof(bytes), &info) == DP_OK && info.copied_length == 11);
+    CHECK(!memcmp(bytes, "replacement", 11));
+    CHECK(dp_udp_get_expired_count(f.core, media, &expired) == DP_OK && expired == 1 + DP_UDP_QUEUE_PACKETS);
+    CHECK(dp_udp_set_queue_max_age(f.core, media, 0) == DP_OK);
+    send_udp(&f, media_port, "retained"); advance(&f, 500);
+    CHECK(dp_udp_set_queue_max_age(f.core, media, 100) == DP_OK);
+    memset(bytes, 0xa5, sizeof(bytes));
+    CHECK(dp_udp_receive(f.core, media, bytes, sizeof(bytes), &info) == DP_WOULD_BLOCK && bytes[0] == 0xa5);
+    /* Cross a 32-bit lwIP clock wrap without losing queue age. */
+    CHECK(dp_udp_set_queue_max_age(f.core, media, UINT32_MAX) == DP_OK);
+    send_udp(&f, media_port, "wrapped");
+    f.now += (uint64_t)UINT32_MAX + 1;
+    CHECK(dp_udp_get_expired_count(f.core, media, &expired) == DP_OK && expired == 3 + DP_UDP_QUEUE_PACKETS);
+    CHECK(dp_udp_get_queue_stats(f.core, media, &stats) == DP_OK && stats.packets == 0 && stats.bytes == 0);
+    CHECK(dp_udp_close(f.core, media) == DP_OK);
+    expired = UINT64_MAX;
+    CHECK(dp_udp_get_expired_count(f.core, media, &expired) == DP_INVALID_ARGUMENT && expired == 0);
+    CHECK(dp_udp_set_queue_max_age(f.core, media, 1) == DP_INVALID_ARGUMENT);
+    CHECK(dp_udp_get_expired_count(f.core, control, NULL) == DP_INVALID_ARGUMENT);
+    CHECK(dp_udp_close(f.core, control) == DP_OK);
+    dp_stats final;
+    CHECK(dp_core_get_stats(f.core, &final) == DP_OK && final.heap_used == 0 && final.pbuf_used == 0);
+    close_core(&f);
+}
+static void test_lifecycle(void) {
+    for (int i = 0; i < 100; i++) {
+        struct fixture f;
+        open_core(&f, 0);
+        CHECK(dp_core_execute(f.core, echo_services_start, NULL) == DP_OK);
+        dp_core *other = NULL;
+        dp_config config = {0};
+        memcpy(config.mac, local_mac, 6);
+        memcpy(config.ipv6, local_ip, 16);
+        config.mtu = 1500;
+        config.opaque = &f;
+        config.clock_ms = clock_ms;
+        config.random32 = random32;
+        config.output = output;
+        CHECK(dp_core_create(&config, &other) == DP_RESOURCE_LIMIT && !other);
+        dp_stats stats;
+        CHECK(dp_core_get_stats(f.core, &stats) == DP_OK);
+        CHECK(stats.tcp_listeners == 1 && stats.udp_pcbs == 1 && stats.tcp_active == 0);
+        CHECK(stats.configured_bytes < 16 * 1024 * 1024 && stats.pbuf_used == 0);
+        close_core(&f);
+    }
+}
+#ifndef _WIN32
+static unsigned count_process_entries(const char *path) {
+    DIR *directory = opendir(path);
+    CHECK(directory);
+    unsigned count = 0;
+    struct dirent *entry;
+    while ((entry = readdir(directory)) != NULL)
+        if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, "..")) count++;
+    CHECK(closedir(directory) == 0);
+    return count;
+}
+#endif
+static void test_lifecycle_soak(void) {
+    struct fixture f; ready_core(&f); close_core(&f);
+    uint32_t heap = lwip_stats.mem.used, pools[MEMP_MAX];
+    for (unsigned pool = 0; pool < MEMP_MAX; ++pool) pools[pool] = lwip_stats.memp[pool]->used;
+#ifdef _WIN32
+    DWORD handles;
+    CHECK(GetProcessHandleCount(GetCurrentProcess(), &handles));
+#else
+    unsigned fds = count_process_entries("/proc/self/fd");
+    unsigned threads = count_process_entries("/proc/self/task");
+#endif
+    for (unsigned iteration = 0; iteration < 10000; ++iteration) {
+        ready_core(&f);
+        uint64_t endpoint = 0, listener = 0; uint16_t port;
+        switch (iteration % 3) {
+        case 0: break;
+        case 1: {
+            CHECK(dp_udp_bind(f.core, 47000, &endpoint, &port) == DP_OK && port == 47000);
+            uint8_t frame[66]; ethernet(frame, local_mac);
+            uint8_t *p = ipv6(frame, local_ip, 17, 12);
+            w16(p, 50000); w16(p + 2, port); w16(p + 4, 12);
+            memcpy(p + 8, "seed", 4);
+            w16(p + 6, checksum(frame + 14, p, 12, 17));
+            CHECK(dp_core_input(f.core, frame, sizeof(frame)) == DP_OK);
+            CHECK(dp_udp_send(f.core, endpoint, peer_ip, 50000, (const uint8_t *)"reply", 5) == DP_OK);
+            break;
+        }
+        default: {
+            CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK);
+            uint32_t server = establish(&f, 50000);
+            endpoint = accept_stream(&f, listener);
+            send_tcp(&f, 24, 1001, server + 1, "queued");
+            size_t copied;
+            CHECK(dp_tcp_write(f.core, endpoint, (const uint8_t *)"unacked", 7, &copied) == DP_OK && copied == 7);
+            break;
+        }
+        }
+        /* Alternate explicit endpoint cleanup with destruction of live queued endpoints. */
+        if (iteration % 2 && endpoint) {
+            CHECK((iteration % 3 == 1 ? dp_udp_close(f.core, endpoint) : dp_tcp_close(f.core, endpoint)) == DP_OK);
+            if (listener) CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+        }
+        close_core(&f);
+        CHECK(dp_core_destroy(&f.core) == DP_OK); /* Repeated destroy must be harmless. */
+        CHECK(netif_list == NULL && netif_default == NULL && lwip_stats.mem.used == heap);
+        for (unsigned pool = 0; pool < MEMP_MAX; ++pool) {
+            /* The global TCP timer has NULL arg and retires at its next tick after the last PCB.
+             * It may retain one timeout node, never an application endpoint or its context. */
+            uint32_t maximum = pools[pool] + (pool == MEMP_SYS_TIMEOUT ? 1u : 0u);
+            if (lwip_stats.memp[pool]->used < pools[pool] || lwip_stats.memp[pool]->used > maximum)
+                fprintf(stderr, "cycle=%u pool=%u used=%u baseline=%u\n", iteration, pool,
+                        (unsigned)lwip_stats.memp[pool]->used, (unsigned)pools[pool]);
+            CHECK(lwip_stats.memp[pool]->used >= pools[pool] && lwip_stats.memp[pool]->used <= maximum);
+        }
+        if ((iteration + 1) % 1000 == 0) {
+            ready_core(&f); advance(&f, 500); close_core(&f);
+            for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == pools[pool]);
+#ifdef _WIN32
+            DWORD current;
+            CHECK(GetProcessHandleCount(GetCurrentProcess(), &current) && current == handles);
+            printf("lifecycle cycles=%u process_handles=%lu\n", iteration + 1, (unsigned long)current);
+#else
+            CHECK(count_process_entries("/proc/self/fd") == fds);
+            CHECK(count_process_entries("/proc/self/task") == threads);
+            printf("lifecycle cycles=%u fds=%u threads=%u\n", iteration + 1, fds, threads);
+#endif
+        }
+    }
+}
+static void test_not_ready(void) {
+    struct fixture f;
+    open_core(&f, 0);
+    CHECK(dp_core_execute(f.core, echo_services_start, NULL) == DP_OK);
+    advance(&f, 5000);
+    CHECK(f.count == 0);
+    CHECK(address_state(&f) == DP_ADDRESS_TENTATIVE);
+    f.ready = 1;
+    CHECK(dp_core_set_link_ready(f.core, 1) == DP_OK);
+    advance(&f, 3000);
+    CHECK(address_state(&f) == DP_ADDRESS_PREFERRED);
+    close_core(&f);
+}
+static void test_tx_not_ready(void) {
+    struct fixture f;
+    open_core(&f, 1);
+    f.ready = 0;
+    advance(&f, 5000);
+    CHECK(f.count == 0);
+    CHECK(address_state(&f) == DP_ADDRESS_TENTATIVE);
+    f.ready = 1;
+    CHECK(dp_core_set_link_ready(f.core, 1) == DP_OK);
+    advance(&f, 3000);
+    CHECK(address_state(&f) == DP_ADDRESS_PREFERRED);
+    close_core(&f);
+}
+static void test_malformed(void) {
+    struct fixture f;
+    ready_core(&f);
+    uint8_t frame[1515] = {0};
+    CHECK(dp_core_input(f.core, frame, 13) == DP_INVALID_ARGUMENT);
+    CHECK(dp_core_input(f.core, frame, sizeof(frame)) == DP_INVALID_ARGUMENT);
+    CHECK(dp_core_input(f.core, frame, 64) == DP_UNSUPPORTED);
+    for (int i = 0; i < 100; i++) {
+        ethernet(frame, local_mac);
+        CHECK(dp_core_input(f.core, frame, 64) == DP_OK);
+    }
+    dp_stats stats;
+    CHECK(dp_core_get_stats(f.core, &stats) == DP_OK);
+    CHECK(stats.pbuf_used == 0);
+    close_core(&f);
+}
+static void fragment(struct fixture *f, const uint8_t *datagram, size_t offset, size_t length,
+                     int more, uint32_t id) {
+    uint8_t frame[1514];
+    CHECK(length <= 1448 && offset % 8 == 0);
+    ethernet(frame, local_mac);
+    uint8_t *p = ipv6(frame, local_ip, 44, (uint16_t)(8 + length));
+    p[0] = 17;
+    w16(p + 2, (uint16_t)(offset | (more ? 1 : 0)));
+    w32(p + 4, id);
+    memcpy(p + 8, datagram + offset, length);
+    CHECK(dp_core_input(f->core, frame, 62 + length) == DP_OK);
+}
+static void test_fragments(void) {
+    struct fixture f;
+    ready_core(&f);
+    CHECK(dp_core_execute(f.core, echo_services_start, NULL) == DP_OK);
+    uint8_t datagram[2056] = {0};
+    w16(datagram, 50000);
+    w16(datagram + 2, 6000);
+    w16(datagram + 4, sizeof(datagram));
+    for (size_t i = 8; i < sizeof(datagram); i++)
+        datagram[i] = (uint8_t)i;
+    uint8_t pseudo[40] = {0};
+    memcpy(pseudo + 8, peer_ip, 16);
+    memcpy(pseudo + 24, local_ip, 16);
+    w16(datagram + 6, checksum(pseudo, datagram, sizeof(datagram), 17));
+    /* Out-of-order input must reassemble without losing UDP boundaries. */
+    fragment(&f, datagram, 1200, 856, 0, 42);
+    fragment(&f, datagram, 0, 1200, 1, 42);
+    uint8_t reply[2056] = {0};
+    size_t total = 0, pieces = 0;
+    for (size_t i = 0; i < f.count; i++) {
+        const uint8_t *ip = f.frames[i].bytes + 14;
+        if (ip[6] != 44)
+            continue;
+        const uint8_t *p = ip + 40;
+        CHECK(p[0] == 17 && u16(ip + 4) >= 8);
+        size_t offset = u16(p + 2) & 0xfff8;
+        size_t length = u16(ip + 4) - 8;
+        CHECK(offset + length <= sizeof(reply));
+        memcpy(reply + offset, p + 8, length);
+        pieces++;
+        if (!(u16(p + 2) & 1))
+            total = offset + length;
+    }
+    CHECK(pieces >= 2 && total == sizeof(reply));
+    CHECK(u16(reply) == 6000 && u16(reply + 2) == 50000);
+    CHECK(!memcmp(reply + 8, datagram + 8, sizeof(reply) - 8));
+    memcpy(pseudo + 8, local_ip, 16);
+    memcpy(pseudo + 24, peer_ip, 16);
+    CHECK(checksum(pseudo, reply, sizeof(reply), 17) == 0);
+    /* Incomplete reassembly must not survive a context generation. */
+    fragment(&f, datagram, 0, 1200, 1, 43);
+    dp_stats stats;
+    CHECK(dp_core_get_stats(f.core, &stats) == DP_OK);
+    CHECK(stats.pbuf_used > 0);
+    close_core(&f);
+    open_core(&f, 0);
+    CHECK(dp_core_get_stats(f.core, &stats) == DP_OK);
+    CHECK(stats.pbuf_used == 0 && stats.heap_used == 0);
+    close_core(&f);
+}
+#ifdef DP_WRAP_ALLOCATION
+static void test_reassembly_quota_evicts_oldest_context(void) {
+    struct fixture f;
+    ready_core(&f);
+    uint64_t endpoint;
+    uint16_t port;
+    CHECK(dp_udp_bind(f.core, 0, &endpoint, &port) == DP_OK);
+    dp_stats before, after;
+    uint8_t datagram[1024] = {0};
+    w16(datagram, 50000);
+    w16(datagram + 2, port);
+    w16(datagram + 4, sizeof(datagram));
+    for (size_t i = 8; i < sizeof(datagram); ++i) datagram[i] = (uint8_t)i;
+    uint8_t pseudo[40] = {0};
+    memcpy(pseudo + 8, peer_ip, 16);
+    memcpy(pseudo + 24, local_ip, 16);
+    w16(datagram + 6, checksum(pseudo, datagram, sizeof(datagram), 17));
+
+    /* One-pbuf Ethernet fragments fill the configured reassembly pbuf quota. */
+    for (size_t offset = 0; offset < sizeof(datagram); offset += 8)
+        fragment(&f, datagram, offset, 8, 1, 7401);
+    CHECK(lwip_stats.memp[MEMP_PBUF_POOL]->used == IP_REASS_MAX_PBUFS);
+    CHECK(lwip_stats.memp[MEMP_IP6_REASSDATA]->used == 1);
+    CHECK(dp_core_get_stats(f.core, &before) == DP_OK && before.failure == DP_OK);
+
+    /* A fresh fragment evicts the old incomplete datagram and stays bounded. */
+    fragment(&f, datagram, 0, 8, 1, 7402);
+    CHECK(lwip_stats.memp[MEMP_IP6_REASSDATA]->used == 1);
+    CHECK(lwip_stats.memp[MEMP_PBUF_POOL]->used == 1);
+    CHECK(dp_core_get_stats(f.core, &after) == DP_OK && after.failure == DP_OK);
+    CHECK(after.heap_used == before.heap_used && after.pbuf_used + IP_REASS_MAX_PBUFS - 1 == before.pbuf_used);
+
+    for (size_t offset = 8; offset < sizeof(datagram); offset += 8)
+        fragment(&f, datagram, offset, 8, offset + 8 < sizeof(datagram), 7402);
+    uint8_t received[sizeof(datagram) - 8];
+    dp_udp_datagram info;
+    CHECK(dp_udp_receive(f.core, endpoint, received, sizeof(received), &info) == DP_OK);
+    CHECK(info.source_port == 50000 && info.original_length == sizeof(received) &&
+          info.copied_length == sizeof(received));
+    CHECK(!memcmp(received, datagram + 8, sizeof(received)));
+    CHECK(lwip_stats.memp[MEMP_PBUF_POOL]->used == 0);
+    CHECK(lwip_stats.memp[MEMP_IP6_REASSDATA]->used == 0);
+    CHECK(dp_core_get_stats(f.core, &after) == DP_OK && after.failure == DP_OK);
+    CHECK(dp_udp_close(f.core, endpoint) == DP_OK);
+    CHECK(lwip_stats.memp[MEMP_UDP_PCB]->used == 0);
+    CHECK(dp_core_get_stats(f.core, &after) == DP_OK && after.failure == DP_OK && after.pbuf_used == 0);
+    close_core(&f);
+}
+static void test_reassembly_context_quota_evicts_oldest(void) {
+    struct fixture f;
+    ready_core(&f);
+    uint64_t endpoint;
+    uint16_t port;
+    CHECK(dp_udp_bind(f.core, 0, &endpoint, &port) == DP_OK);
+    uint8_t datagram[16] = {0};
+    w16(datagram, 50000);
+    w16(datagram + 2, port);
+    w16(datagram + 4, sizeof(datagram));
+    for (size_t i = 8; i < sizeof(datagram); ++i) datagram[i] = (uint8_t)(0xa0 + i);
+    uint8_t pseudo[40] = {0};
+    memcpy(pseudo + 8, peer_ip, 16);
+    memcpy(pseudo + 24, local_ip, 16);
+    w16(datagram + 6, checksum(pseudo, datagram, sizeof(datagram), 17));
+
+    /* Occupy every reassembly context with one incomplete datagram. */
+    for (unsigned i = 0; i < MEMP_NUM_REASSDATA; ++i)
+        fragment(&f, datagram, 0, 8, 1, 7501 + i);
+    CHECK(lwip_stats.memp[MEMP_IP6_REASSDATA]->used == MEMP_NUM_REASSDATA);
+    CHECK(lwip_stats.memp[MEMP_PBUF_POOL]->used == MEMP_NUM_REASSDATA);
+
+    /* The fifth context evicts the oldest (7501) and reuses its pool slot. */
+    const uint32_t newest = 7501 + MEMP_NUM_REASSDATA;
+    fragment(&f, datagram, 0, 8, 1, newest);
+    CHECK(lwip_stats.memp[MEMP_IP6_REASSDATA]->used == MEMP_NUM_REASSDATA);
+    CHECK(lwip_stats.memp[MEMP_PBUF_POOL]->used == MEMP_NUM_REASSDATA);
+
+    /* A tail for 7501 must start a new context; the former first fragment is gone. */
+    fragment(&f, datagram, 8, 8, 0, 7501);
+    uint8_t received[sizeof(datagram) - 8];
+    dp_udp_datagram info;
+    CHECK(dp_udp_receive(f.core, endpoint, received, sizeof(received), &info) == DP_WOULD_BLOCK);
+    CHECK(lwip_stats.memp[MEMP_IP6_REASSDATA]->used == MEMP_NUM_REASSDATA);
+
+    /* The new datagram completes independently and is delivered intact. */
+    fragment(&f, datagram, 8, 8, 0, newest);
+    CHECK(dp_udp_receive(f.core, endpoint, received, sizeof(received), &info) == DP_OK);
+    CHECK(info.source_port == 50000 && info.original_length == sizeof(received) &&
+          info.copied_length == sizeof(received));
+    CHECK(!memcmp(received, datagram + 8, sizeof(received)));
+
+    /* Reintroducing 7501's first fragment completes only its new tail context. */
+    fragment(&f, datagram, 0, 8, 1, 7501);
+    CHECK(dp_udp_receive(f.core, endpoint, received, sizeof(received), &info) == DP_OK);
+    CHECK(!memcmp(received, datagram + 8, sizeof(received)));
+    for (unsigned i = 2; i < MEMP_NUM_REASSDATA; ++i) {
+        fragment(&f, datagram, 8, 8, 0, 7501 + i);
+        CHECK(dp_udp_receive(f.core, endpoint, received, sizeof(received), &info) == DP_OK);
+        CHECK(!memcmp(received, datagram + 8, sizeof(received)));
+    }
+    CHECK(lwip_stats.memp[MEMP_IP6_REASSDATA]->used == 0);
+    CHECK(lwip_stats.memp[MEMP_PBUF_POOL]->used == 0);
+    dp_stats stats;
+    CHECK(dp_core_get_stats(f.core, &stats) == DP_OK && stats.failure == DP_OK && stats.pbuf_used == 0);
+    CHECK(dp_udp_close(f.core, endpoint) == DP_OK);
+    CHECK(lwip_stats.memp[MEMP_UDP_PCB]->used == 0);
+    close_core(&f);
+}
+static void test_reassembly_context_allocation_failure_without_victim(void) {
+    struct fixture f;
+    ready_core(&f);
+    uint64_t endpoint;
+    uint16_t port;
+    CHECK(dp_udp_bind(f.core, 0, &endpoint, &port) == DP_OK);
+    uint8_t datagram[16] = {0};
+    w16(datagram, 50000);
+    w16(datagram + 2, port);
+    w16(datagram + 4, sizeof(datagram));
+    for (size_t i = 8; i < sizeof(datagram); ++i) datagram[i] = (uint8_t)(0xd0 + i);
+    uint8_t pseudo[40] = {0};
+    memcpy(pseudo + 8, peer_ip, 16);
+    memcpy(pseudo + 24, local_ip, 16);
+    w16(datagram + 6, checksum(pseudo, datagram, sizeof(datagram), 17));
+
+    dp_stats before, after;
+    CHECK(dp_core_get_stats(f.core, &before) == DP_OK && before.failure == DP_OK);
+    CHECK(lwip_stats.memp[MEMP_IP6_REASSDATA]->used == 0);
+    CHECK(lwip_stats.memp[MEMP_PBUF_POOL]->used == 0);
+
+    /* With no old context to evict, fail both allocation attempts and drop this fragment. */
+    allocation_fault.calls = 0;
+    allocation_fault.rejected = 0;
+    allocation_fault.fail_at = 0;
+    allocation_fault.persistent = 1;
+    allocation_fault.fail_reassdata = 1;
+    allocation_fault.armed = 1;
+    fragment(&f, datagram, 0, 8, 1, 7603);
+    allocation_fault.armed = 0;
+    CHECK(allocation_fault.rejected == 2 && allocation_fault.fail_reassdata == 1);
+    CHECK(lwip_stats.memp[MEMP_IP6_REASSDATA]->used == 0);
+    CHECK(lwip_stats.memp[MEMP_PBUF_POOL]->used == 0);
+    CHECK(dp_core_get_stats(f.core, &after) == DP_OK && after.failure == DP_OK &&
+          after.heap_used == before.heap_used && after.pbuf_used == before.pbuf_used);
+    allocation_fault.persistent = 0;
+    allocation_fault.fail_reassdata = 0;
+
+    /* Once allocation recovers, a fresh datagram with the same ID is delivered intact. */
+    fragment(&f, datagram, 0, 8, 1, 7603);
+    fragment(&f, datagram, 8, 8, 0, 7603);
+    uint8_t received[sizeof(datagram) - 8];
+    dp_udp_datagram info;
+    CHECK(dp_udp_receive(f.core, endpoint, received, sizeof(received), &info) == DP_OK);
+    CHECK(info.source_port == 50000 && info.original_length == sizeof(received) &&
+          info.copied_length == sizeof(received));
+    CHECK(!memcmp(received, datagram + 8, sizeof(received)));
+    CHECK(lwip_stats.memp[MEMP_IP6_REASSDATA]->used == 0);
+    CHECK(lwip_stats.memp[MEMP_PBUF_POOL]->used == 0);
+    CHECK(dp_core_get_stats(f.core, &after) == DP_OK && after.failure == DP_OK &&
+          after.pbuf_used == 0);
+    CHECK(dp_udp_close(f.core, endpoint) == DP_OK);
+    CHECK(lwip_stats.memp[MEMP_UDP_PCB]->used == 0);
+    close_core(&f);
+}
+static void test_reassembly_context_allocation_failure_recovers(void) {
+    struct fixture f;
+    ready_core(&f);
+    uint64_t endpoint;
+    uint16_t port;
+    CHECK(dp_udp_bind(f.core, 0, &endpoint, &port) == DP_OK);
+    uint8_t datagram[16] = {0};
+    w16(datagram, 50000);
+    w16(datagram + 2, port);
+    w16(datagram + 4, sizeof(datagram));
+    for (size_t i = 8; i < sizeof(datagram); ++i) datagram[i] = (uint8_t)(0xc0 + i);
+    uint8_t pseudo[40] = {0};
+    memcpy(pseudo + 8, peer_ip, 16);
+    memcpy(pseudo + 24, local_ip, 16);
+    w16(datagram + 6, checksum(pseudo, datagram, sizeof(datagram), 17));
+
+    fragment(&f, datagram, 0, 8, 1, 7601);
+    CHECK(lwip_stats.memp[MEMP_IP6_REASSDATA]->used == 1);
+    CHECK(lwip_stats.memp[MEMP_PBUF_POOL]->used == 1);
+
+    /* A one-shot context allocation failure evicts the old context, then retries. */
+    allocation_fault.calls = 0;
+    allocation_fault.rejected = 0;
+    allocation_fault.fail_at = 0;
+    allocation_fault.persistent = 0;
+    allocation_fault.fail_reassdata = 1;
+    allocation_fault.armed = 1;
+    fragment(&f, datagram, 0, 8, 1, 7602);
+    allocation_fault.armed = 0;
+    CHECK(allocation_fault.rejected == 1 && allocation_fault.fail_reassdata == 0);
+    CHECK(lwip_stats.memp[MEMP_IP6_REASSDATA]->used == 1);
+    CHECK(lwip_stats.memp[MEMP_PBUF_POOL]->used == 1);
+
+    /* The evicted first fragment cannot be joined to a later tail. */
+    fragment(&f, datagram, 8, 8, 0, 7601);
+    uint8_t received[sizeof(datagram) - 8];
+    dp_udp_datagram info;
+    CHECK(dp_udp_receive(f.core, endpoint, received, sizeof(received), &info) == DP_WOULD_BLOCK);
+
+    fragment(&f, datagram, 8, 8, 0, 7602);
+    CHECK(dp_udp_receive(f.core, endpoint, received, sizeof(received), &info) == DP_OK);
+    CHECK(info.source_port == 50000 && info.original_length == sizeof(received) &&
+          info.copied_length == sizeof(received));
+    CHECK(!memcmp(received, datagram + 8, sizeof(received)));
+
+    /* Replaying the first fragment completes only the new tail context. */
+    fragment(&f, datagram, 0, 8, 1, 7601);
+    CHECK(dp_udp_receive(f.core, endpoint, received, sizeof(received), &info) == DP_OK);
+    CHECK(!memcmp(received, datagram + 8, sizeof(received)));
+    CHECK(lwip_stats.memp[MEMP_IP6_REASSDATA]->used == 0);
+    CHECK(lwip_stats.memp[MEMP_PBUF_POOL]->used == 0);
+    dp_stats stats;
+    CHECK(dp_core_get_stats(f.core, &stats) == DP_OK && stats.failure == DP_OK && stats.pbuf_used == 0);
+    CHECK(dp_udp_close(f.core, endpoint) == DP_OK);
+    CHECK(lwip_stats.memp[MEMP_UDP_PCB]->used == 0);
+    close_core(&f);
+}
+#endif
+static void test_udp_endpoint_fragments_case(size_t payload_length, int ordered) {
+    struct fixture f;
+    ready_core(&f);
+    uint64_t handle;
+    uint16_t port;
+    CHECK(dp_udp_bind(f.core, 0, &handle, &port) == DP_OK);
+    uint8_t datagram[65535] = {0}, received[65527], reply[65535] = {0};
+    const size_t datagram_length = payload_length + 8;
+    w16(datagram, 50000); w16(datagram + 2, port); w16(datagram + 4, (uint16_t)datagram_length);
+    for (size_t i = 8; i < datagram_length; ++i) datagram[i] = (uint8_t)(i ^ (i >> 8));
+    uint8_t pseudo[40] = {0};
+    memcpy(pseudo + 8, peer_ip, 16); memcpy(pseudo + 24, local_ip, 16);
+    w16(datagram + 6, checksum(pseudo, datagram, datagram_length, 17));
+    const size_t tail = ((datagram_length - 1) / 1200) * 1200;
+    if (!ordered) fragment(&f, datagram, tail, datagram_length - tail, 0, 345);
+    for (size_t offset = 0; offset < (ordered ? datagram_length : tail); offset += 1200) {
+        size_t length = datagram_length - offset < 1200 ? datagram_length - offset : 1200;
+        fragment(&f, datagram, offset, length, offset + length < datagram_length, 345);
+    }
+    dp_udp_datagram info;
+    CHECK(dp_udp_receive(f.core, handle, received, sizeof(received), &info) == DP_OK);
+    CHECK(info.original_length == payload_length && info.copied_length == payload_length);
+    CHECK(!memcmp(received, datagram + 8, payload_length));
+    CHECK(info.source_port == 50000 && !memcmp(info.source, peer_ip, 16));
+    f.count = 0;
+    CHECK(dp_udp_send(f.core, handle, peer_ip, 50000, received, payload_length) == DP_OK);
+    size_t total = 0, pieces = 0;
+    for (size_t i = 0; i < f.count; ++i) {
+        const uint8_t *ip = f.frames[i].bytes + 14;
+        if (ip[6] != 44) continue;
+        const uint8_t *frag = ip + 40;
+        size_t offset = u16(frag + 2) & 0xfff8, length = u16(ip + 4) - 8;
+        CHECK(frag[0] == 17 && offset + length <= datagram_length);
+        memcpy(reply + offset, frag + 8, length);
+        if (!(u16(frag + 2) & 1)) total = offset + length;
+        pieces++;
+    }
+    CHECK(pieces > 1 && total == datagram_length);
+    CHECK(u16(reply) == port && u16(reply + 2) == 50000);
+    CHECK(!memcmp(reply + 8, received, payload_length));
+    memcpy(pseudo + 8, local_ip, 16); memcpy(pseudo + 24, peer_ip, 16);
+    CHECK(checksum(pseudo, reply, datagram_length, 17) == 0);
+    close_core(&f);
+
+    if (payload_length != 65527 || ordered) return;
+
+    const size_t failures[] = {0, 1, 45};
+    for (size_t attempt = 0; attempt < sizeof(failures) / sizeof(failures[0]); ++attempt) {
+        ready_core(&f);
+        CHECK(dp_udp_bind(f.core, 0, &handle, &port) == DP_OK);
+        f.fail_after = failures[attempt];
+        if (!f.fail_after) f.ready = -1;
+        CHECK(dp_udp_send(f.core, handle, peer_ip, 50000, received, sizeof(received)) == DP_LINK_IO);
+        CHECK(f.count == failures[attempt]);
+        CHECK(dp_udp_close(f.core, handle) == DP_LINK_IO);
+        dp_stats failure_stats;
+        CHECK(dp_core_get_stats(f.core, &failure_stats) == DP_OK);
+        CHECK(failure_stats.failure == DP_LINK_IO && failure_stats.udp_pcbs == 0 && failure_stats.pbuf_used == 0);
+        close_core(&f);
+    }
+}
+static void test_udp_endpoint_fragments(void) {
+    const size_t sizes[] = {32768, 65487, 65488, 65527};
+    for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); ++i) {
+        test_udp_endpoint_fragments_case(sizes[i], 0);
+        test_udp_endpoint_fragments_case(sizes[i], 1);
+    }
+}
+static void extension_fragment(struct fixture *f, const uint8_t *datagram, size_t offset,
+                               size_t length, int more, unsigned extensions, uint8_t first,
+                               uint8_t fragment_next) {
+    uint8_t frame[1514];
+    CHECK(extensions <= 2 && length <= 1200);
+    ethernet(frame, local_mac);
+    uint8_t *p = ipv6(frame, local_ip, first, (uint16_t)(extensions * 8 + 8 + length));
+    for (unsigned i = 0; i < extensions; ++i) p[i * 8] = i + 1 < extensions ? 60 : 44;
+    p += extensions * 8;
+    p[0] = fragment_next; w16(p + 2, (uint16_t)(offset | (more ? 1 : 0))); w32(p + 4, 731);
+    memcpy(p + 8, datagram + offset, length);
+    CHECK(dp_core_input(f->core, frame, 62 + extensions * 8 + length) == DP_OK);
+}
+static void test_udp_extension_fragments(void) {
+    for (unsigned extensions = 1; extensions <= 2; ++extensions) {
+        const size_t sizes[] = {64, 65487 - extensions * 8, 65488 - extensions * 8,
+                                65527 - extensions * 8, 65528 - extensions * 8};
+        for (unsigned first_kind = 0; first_kind < 2; ++first_kind) {
+            for (unsigned ordered = 0; ordered < 2; ++ordered) {
+                for (size_t vector = 0; vector < sizeof(sizes) / sizeof(sizes[0]); ++vector) {
+                    struct fixture f;
+                    ready_core(&f);
+                    uint64_t handle; uint16_t port;
+                    CHECK(dp_udp_bind(f.core, 0, &handle, &port) == DP_OK);
+                    uint8_t datagram[65535] = {0}, received[65527], pseudo[40] = {0};
+                    const size_t length = sizes[vector] + 8;
+                    w16(datagram, 50000); w16(datagram + 2, port); w16(datagram + 4, (uint16_t)length);
+                    for (size_t n = 8; n < length; ++n) datagram[n] = (uint8_t)(n ^ (n >> 8));
+                    memcpy(pseudo + 8, peer_ip, 16); memcpy(pseudo + 24, local_ip, 16);
+                    w16(datagram + 6, checksum(pseudo, datagram, length, 17));
+                    const size_t pieces = (length + 1199) / 1200;
+                    for (size_t n = 0; n < pieces; ++n) {
+                        size_t at = (ordered ? n : pieces - n - 1) * 1200;
+                        size_t count = length - at < 1200 ? length - at : 1200;
+                        extension_fragment(&f, datagram, at, count, at + count < length,
+                                           extensions, first_kind ? 60 : 0, 17);
+                    }
+                    dp_udp_datagram info;
+                    int valid = sizes[vector] + extensions * 8 <= 65527;
+                    dp_result status = dp_udp_receive(f.core, handle, received, sizeof(received), &info);
+                    if (status != (valid ? DP_OK : DP_WOULD_BLOCK))
+                        fprintf(stderr, "extensions=%u first=%u ordered=%u payload=%lu status=%d\n",
+                                extensions, first_kind ? 60u : 0u, ordered, (unsigned long)sizes[vector], status);
+                    CHECK(status == (valid ? DP_OK : DP_WOULD_BLOCK));
+                    if (valid) {
+                        CHECK(info.original_length == sizes[vector] && info.copied_length == sizes[vector]);
+                        CHECK(info.source_port == 50000 && !memcmp(info.source, peer_ip, 16));
+                        CHECK(!memcmp(received, datagram + 8, sizes[vector]));
+                    }
+                    /* Accepted or dropped, the context must stay usable and release all fragments. */
+                    w16(datagram + 4, 9); w16(datagram + 6, 0); datagram[8] = 42;
+                    w16(datagram + 6, checksum(pseudo, datagram, 9, 17));
+                    extension_fragment(&f, datagram, 0, 9, 0, extensions, first_kind ? 60 : 0, 17);
+                    CHECK(dp_udp_receive(f.core, handle, received, sizeof(received), &info) == DP_OK);
+                    CHECK(info.original_length == 1 && received[0] == 42);
+                    dp_stats stats;
+                    CHECK(dp_core_get_stats(f.core, &stats) == DP_OK);
+                    CHECK(stats.failure == DP_OK && stats.pbuf_used == 0);
+                    CHECK(dp_udp_close(f.core, handle) == DP_OK);
+                    close_core(&f);
+                }
+            }
+        }
+    }
+    for (unsigned atomic = 0; atomic < 2; ++atomic) {
+        for (unsigned ordered = 0; ordered < 2; ++ordered) {
+            struct fixture f;
+            ready_core(&f);
+            uint64_t handle; uint16_t port;
+            CHECK(dp_udp_bind(f.core, 0, &handle, &port) == DP_OK);
+            uint8_t datagram[17] = {17}, pseudo[40] = {0}, target[8];
+            w16(datagram + 8, 50000); w16(datagram + 10, port); w16(datagram + 12, 9);
+            datagram[16] = 42;
+            memcpy(pseudo + 8, peer_ip, 16); memcpy(pseudo + 24, local_ip, 16);
+            w16(datagram + 14, checksum(pseudo, datagram + 8, 9, 17));
+            if (atomic) extension_fragment(&f, datagram, 0, 17, 0, 0, 44, 0);
+            else {
+                for (unsigned n = 0; n < 2; ++n) {
+                    unsigned part = ordered ? n : 1 - n;
+                    extension_fragment(&f, datagram, part * 16, part ? 1 : 16, !part, 0, 44, 0);
+                }
+            }
+            dp_udp_datagram info;
+            CHECK(dp_udp_receive(f.core, handle, target, sizeof(target), &info) == DP_WOULD_BLOCK);
+            dp_stats stats;
+            CHECK(dp_core_get_stats(f.core, &stats) == DP_OK);
+            CHECK(stats.failure == DP_OK && stats.pbuf_used == 0);
+            CHECK(dp_udp_close(f.core, handle) == DP_OK);
+            close_core(&f);
+        }
+    }
+}
+#ifdef DP_WRAP_ALLOCATION
+static void check_complete_udp_output(struct fixture *f, uint16_t port,
+                                      const uint8_t *payload, size_t length) {
+    uint8_t reply[65535] = {0}, seen[65535] = {0}, pseudo[40] = {0};
+    size_t copied = 0;
+    int last = 0;
+    uint32_t id = 0;
+    for (size_t n = 0; n < f->count; ++n) {
+        const uint8_t *ip = f->frames[n].bytes + 14;
+        CHECK(!memcmp(ip + 8, local_ip, 16) && !memcmp(ip + 24, peer_ip, 16));
+        CHECK(u16(ip + 4) + 54u == f->frames[n].length);
+        if (ip[6] == 17) {
+            CHECK(f->count == 1 && u16(ip + 4) == length + 8);
+            memcpy(reply, ip + 40, length + 8); copied = length + 8; last = 1;
+            break;
+        }
+        CHECK(ip[6] == 44);
+        const uint8_t *fragment = ip + 40;
+        size_t at = u16(fragment + 2) & 0xfff8, count = u16(ip + 4) - 8;
+        CHECK(fragment[0] == 17 && at + count <= length + 8);
+        if (n == 0) id = u32(fragment + 4);
+        else CHECK(id == u32(fragment + 4));
+        if (u16(fragment + 2) & 1) CHECK(count % 8 == 0);
+        else { CHECK(!last && at + count == length + 8); last = 1; }
+        for (size_t byte = at; byte < at + count; ++byte) { CHECK(!seen[byte]); seen[byte] = 1; }
+        memcpy(reply + at, fragment + 8, count); copied += count;
+    }
+    CHECK(last && copied == length + 8);
+    CHECK(u16(reply) == port && u16(reply + 2) == 50000 && u16(reply + 4) == length + 8);
+    CHECK(!memcmp(reply + 8, payload, length));
+    memcpy(pseudo + 8, local_ip, 16); memcpy(pseudo + 24, peer_ip, 16);
+    CHECK(checksum(pseudo, reply, length + 8, 17) == 0);
+}
+static void test_udp_allocation_failures(void) {
+    const size_t lengths[] = {1200, 65487, 65488, 65527};
+    uint8_t payload[65527];
+    for (size_t byte = 0; byte < sizeof(payload); ++byte) payload[byte] = (uint8_t)(byte ^ (byte >> 8));
+    for (size_t vector = 0; vector < sizeof(lengths) / sizeof(lengths[0]); ++vector) {
+        size_t allocations = 0;
+        for (size_t fail_at = 0; fail_at <= allocations; ++fail_at) {
+            struct fixture f;
+            ready_core(&f);
+            uint64_t handle; uint16_t port;
+            CHECK(dp_udp_bind(f.core, 0, &handle, &port) == DP_OK);
+            dp_stats before, after;
+            CHECK(dp_core_get_stats(f.core, &before) == DP_OK);
+            uint32_t pool_usage[MEMP_MAX];
+            for (unsigned pool = 0; pool < MEMP_MAX; ++pool) pool_usage[pool] = lwip_stats.memp[pool]->used;
+            allocation_fault.calls = 0; allocation_fault.fail_at = fail_at; allocation_fault.armed = 1;
+            dp_result result = dp_udp_send(f.core, handle, peer_ip, 50000, payload, lengths[vector]);
+            allocation_fault.armed = 0;
+            if (!fail_at) {
+                CHECK(result == DP_OK);
+                allocations = allocation_fault.calls;
+                CHECK(allocations > 0 && allocations <= 256);
+                check_complete_udp_output(&f, port, payload, lengths[vector]);
+            } else {
+                if (result != DP_RESOURCE_LIMIT)
+                    fprintf(stderr, "UDP allocation failure index=%lu calls=%lu length=%lu status=%d\n",
+                            (unsigned long)fail_at, (unsigned long)allocation_fault.calls,
+                            (unsigned long)lengths[vector], result);
+                CHECK(result == DP_RESOURCE_LIMIT && allocation_fault.calls == fail_at);
+                /* No final fragment: a failed call must not publish a whole datagram. */
+                for (size_t n = 0; n < f.count; ++n) {
+                    const uint8_t *ip = f.frames[n].bytes + 14;
+                    CHECK(ip[6] == 44 && (u16(ip + 42) & 1));
+                }
+            }
+            CHECK(dp_core_get_stats(f.core, &after) == DP_OK);
+            CHECK(after.failure == DP_OK && after.heap_used == before.heap_used && after.pbuf_used == before.pbuf_used);
+            for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == pool_usage[pool]);
+            f.count = 0;
+            CHECK(dp_udp_send(f.core, handle, peer_ip, 50000, payload, lengths[vector]) == DP_OK);
+            check_complete_udp_output(&f, port, payload, lengths[vector]);
+            CHECK(dp_core_get_stats(f.core, &after) == DP_OK);
+            CHECK(after.heap_used == before.heap_used && after.pbuf_used == before.pbuf_used);
+            for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == pool_usage[pool]);
+            CHECK(dp_udp_close(f.core, handle) == DP_OK);
+            close_core(&f);
+        }
+        printf("UDP length=%lu traversed %lu allocation failure points\n",
+               (unsigned long)lengths[vector], (unsigned long)allocations);
+    }
+}
+static void test_udp_receive_input_allocation_failure(void) {
+    struct fixture f;
+    ready_core(&f);
+    uint64_t handle;
+    uint16_t port;
+    CHECK(dp_udp_bind(f.core, 0, &handle, &port) == DP_OK);
+
+    const uint8_t payload[] = {0x31, 0x72, 0xb4, 0xe5};
+    uint8_t frame[66];
+    ethernet(frame, local_mac);
+    uint8_t *udp = ipv6(frame, local_ip, 17, (uint16_t)(8 + sizeof(payload)));
+    w16(udp, 50000);
+    w16(udp + 2, port);
+    w16(udp + 4, (uint16_t)(8 + sizeof(payload)));
+    memcpy(udp + 8, payload, sizeof(payload));
+    w16(udp + 6, checksum(frame + 14, udp, 8 + sizeof(payload), 17));
+
+    dp_stats before, after;
+    CHECK(dp_core_get_stats(f.core, &before) == DP_OK);
+    uint32_t pool_usage[MEMP_MAX];
+    for (unsigned pool = 0; pool < MEMP_MAX; ++pool)
+        pool_usage[pool] = lwip_stats.memp[pool]->used;
+
+    for (unsigned attempt = 0; attempt < 2; ++attempt) {
+        allocation_fault.calls = 0;
+        allocation_fault.rejected = 0;
+        allocation_fault.fail_at = 1;
+        allocation_fault.persistent = 1;
+        allocation_fault.armed = 1;
+        CHECK(dp_core_input(f.core, frame, sizeof(frame)) == DP_RESOURCE_LIMIT);
+        allocation_fault.armed = 0;
+        CHECK(allocation_fault.calls == 1 && allocation_fault.rejected == 1);
+        uint8_t absent[sizeof(payload)];
+        memset(absent, 0xa5, sizeof(absent));
+        dp_udp_datagram missing;
+        memset(&missing, 0xa5, sizeof(missing));
+        CHECK(dp_udp_receive(f.core, handle, absent, sizeof(absent), &missing) == DP_WOULD_BLOCK);
+        CHECK(absent[0] == 0xa5 && missing.original_length == 0 && missing.source_port == 0);
+        CHECK(dp_core_get_stats(f.core, &after) == DP_OK);
+        CHECK(after.failure == DP_OK && after.heap_used == before.heap_used &&
+              after.pbuf_used == before.pbuf_used);
+        for (unsigned pool = 0; pool < MEMP_MAX; ++pool)
+            CHECK(lwip_stats.memp[pool]->used == pool_usage[pool]);
+    }
+    allocation_fault.fail_at = 0;
+    allocation_fault.persistent = 0;
+
+    CHECK(dp_core_input(f.core, frame, sizeof(frame)) == DP_OK);
+    uint8_t received[sizeof(payload)];
+    dp_udp_datagram info;
+    CHECK(dp_udp_receive(f.core, handle, received, sizeof(received), &info) == DP_OK);
+    CHECK(info.source_port == 50000 && info.original_length == sizeof(payload) &&
+          info.copied_length == sizeof(payload));
+    CHECK(!memcmp(info.source, peer_ip, sizeof(peer_ip)));
+    CHECK(!memcmp(received, payload, sizeof(payload)));
+    CHECK(dp_core_get_stats(f.core, &after) == DP_OK);
+    CHECK(after.failure == DP_OK && after.heap_used == before.heap_used &&
+          after.pbuf_used == before.pbuf_used);
+    for (unsigned pool = 0; pool < MEMP_MAX; ++pool)
+        CHECK(lwip_stats.memp[pool]->used == pool_usage[pool]);
+
+    CHECK(dp_udp_close(f.core, handle) == DP_OK);
+    close_core(&f);
+}
+static void test_udp_bind_allocation_failures(void) {
+    const uint8_t payload[] = {1, 2, 3};
+    for (unsigned shared_pool = 0; shared_pool < 2; ++shared_pool) {
+        size_t allocations = 0;
+        for (size_t fail_at = 0; fail_at <= allocations; ++fail_at) {
+            struct fixture f;
+            ready_core(&f);
+            uint64_t seed = 0; uint16_t seed_port = 0;
+            if (shared_pool) {
+                CHECK(dp_udp_bind(f.core, 47001, &seed, &seed_port) == DP_OK);
+                uint8_t frame[65];
+                ethernet(frame, local_mac);
+                uint8_t *udp = ipv6(frame, local_ip, 17, 11);
+                w16(udp, 50000); w16(udp + 2, seed_port); w16(udp + 4, 11);
+                memcpy(udp + 8, payload, sizeof(payload));
+                w16(udp + 6, checksum(frame + 14, udp, 11, 17));
+                CHECK(dp_core_input(f.core, frame, sizeof(frame)) == DP_OK);
+            }
+            dp_stats before, after;
+            CHECK(dp_core_get_stats(f.core, &before) == DP_OK);
+            uint32_t pool_usage[MEMP_MAX];
+            for (unsigned pool = 0; pool < MEMP_MAX; ++pool) pool_usage[pool] = lwip_stats.memp[pool]->used;
+            uint64_t handle = UINT64_MAX; uint16_t port = UINT16_MAX;
+            allocation_fault.calloc_calls = 0;
+            allocation_fault.calls = 0; allocation_fault.fail_at = fail_at; allocation_fault.armed = 1;
+            dp_result result = dp_udp_bind(f.core, 47000, &handle, &port);
+            allocation_fault.armed = 0;
+            if (!fail_at) {
+                CHECK(result == DP_OK && handle && port == 47000);
+                /* Detect a toolchain that bypasses the libc wrapper rather than silently losing coverage. */
+                CHECK(allocation_fault.calloc_calls == (shared_pool ? 1u : 2u));
+                allocations = allocation_fault.calls;
+                CHECK(allocations > 0 && allocations <= 16);
+                CHECK(dp_udp_close(f.core, handle) == DP_OK);
+            } else {
+                CHECK(result == DP_RESOURCE_LIMIT && allocation_fault.calls == fail_at);
+                CHECK(handle == 0 && port == 0);
+            }
+            CHECK(dp_core_get_stats(f.core, &after) == DP_OK);
+            CHECK(after.failure == DP_OK && after.heap_used == before.heap_used && after.udp_pcbs == before.udp_pcbs);
+            for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == pool_usage[pool]);
+            if (shared_pool) {
+                uint8_t received[3]; dp_udp_datagram info;
+                CHECK(dp_udp_receive(f.core, seed, received, sizeof(received), &info) == DP_OK);
+                CHECK(info.original_length == sizeof(payload) && info.copied_length == sizeof(payload));
+                CHECK(info.source_port == 50000 && !memcmp(info.source, peer_ip, 16));
+                CHECK(!memcmp(received, payload, sizeof(payload)));
+            }
+            /* Same fixed port remains available after every failed allocation. */
+            CHECK(dp_udp_bind(f.core, 47000, &handle, &port) == DP_OK && handle && port == 47000);
+            f.count = 0;
+            CHECK(dp_udp_send(f.core, handle, peer_ip, 50000, payload, sizeof(payload)) == DP_OK);
+            check_complete_udp_output(&f, port, payload, sizeof(payload));
+            CHECK(dp_udp_close(f.core, handle) == DP_OK);
+            if (shared_pool) {
+                f.count = 0;
+                CHECK(dp_udp_send(f.core, seed, peer_ip, 50000, payload, sizeof(payload)) == DP_OK);
+                check_complete_udp_output(&f, seed_port, payload, sizeof(payload));
+            }
+            CHECK(dp_core_get_stats(f.core, &after) == DP_OK);
+            CHECK(after.heap_used == before.heap_used && after.udp_pcbs == before.udp_pcbs);
+            for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == pool_usage[pool]);
+            if (shared_pool) CHECK(dp_udp_close(f.core, seed) == DP_OK);
+            close_core(&f);
+        }
+        printf("UDP bind shared_pool=%u traversed %lu allocation failure points\n",
+               shared_pool, (unsigned long)allocations);
+    }
+}
+static dp_config allocation_core_config(struct fixture *f) {
+    memset(f, 0, sizeof(*f)); f->random = 1234567; f->ready = 1;
+    dp_config config = {0};
+    memcpy(config.mac, local_mac, 6); memcpy(config.ipv6, local_ip, 16);
+    config.mtu = 1500; config.opaque = f;
+    config.clock_ms = clock_ms; config.random32 = random32; config.output = output;
+    return config;
+}
+static void test_core_allocation_failures(void) {
+    struct fixture f;
+    dp_config config = allocation_core_config(&f);
+    f.core = (dp_core *)(uintptr_t)UINTPTR_MAX;
+    /* Fail the first process's context calloc before global lwIP initialization. */
+    allocation_fault.calls = 0; allocation_fault.calloc_calls = 0;
+    allocation_fault.fail_at = 1; allocation_fault.armed = 1;
+    dp_result result = dp_core_create(&config, &f.core);
+    allocation_fault.armed = 0;
+    CHECK(result == DP_RESOURCE_LIMIT && f.core == NULL && allocation_fault.calloc_calls == 1);
+    ready_core(&f); close_core(&f); /* The global claim must have been released. */
+
+    const uint32_t heap_before = lwip_stats.mem.used;
+    uint32_t pools_before[MEMP_MAX];
+    for (unsigned pool = 0; pool < MEMP_MAX; ++pool) pools_before[pool] = lwip_stats.memp[pool]->used;
+    size_t allocations = 0;
+    for (size_t fail_at = 0; fail_at <= allocations; ++fail_at) {
+        config = allocation_core_config(&f);
+        f.core = (dp_core *)(uintptr_t)UINTPTR_MAX;
+        allocation_fault.calls = 0; allocation_fault.calloc_calls = 0;
+        allocation_fault.fail_at = fail_at; allocation_fault.armed = 1;
+        result = dp_core_create(&config, &f.core);
+        allocation_fault.armed = 0;
+        if (!fail_at) {
+            CHECK(result == DP_OK && f.core && allocation_fault.calloc_calls == 1);
+            allocations = allocation_fault.calls;
+            CHECK(allocations > 0 && allocations <= 32);
+            close_core(&f);
+        } else {
+            int published = f.core != NULL;
+            if (result == DP_OK) close_core(&f);
+            if (result != DP_RESOURCE_LIMIT || published)
+                fprintf(stderr, "Core create failure index=%lu calls=%lu status=%d published=%d\n",
+                        (unsigned long)fail_at, (unsigned long)allocation_fault.calls, result, published);
+            CHECK(result == DP_RESOURCE_LIMIT && !published);
+        }
+        CHECK(netif_list == NULL && netif_default == NULL && lwip_stats.mem.used == heap_before);
+        for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == pools_before[pool]);
+        ready_core(&f);
+        uint64_t handle; uint16_t port;
+        CHECK(dp_udp_bind(f.core, 47000, &handle, &port) == DP_OK);
+        const uint8_t payload[] = {1, 2, 3};
+        CHECK(dp_udp_send(f.core, handle, peer_ip, 50000, payload, sizeof(payload)) == DP_OK);
+        check_complete_udp_output(&f, port, payload, sizeof(payload));
+        CHECK(dp_udp_close(f.core, handle) == DP_OK);
+        close_core(&f);
+        CHECK(lwip_stats.mem.used == heap_before);
+        for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == pools_before[pool]);
+    }
+    printf("Core create traversed 1 cold calloc and %lu warm allocation failure points\n",
+           (unsigned long)allocations);
+}
+static void test_prototype_context_allocation_failure(void) {
+    const uint8_t mac[6] = {2, 0, 0, 0, 0, 1};
+    const uint8_t ip[16] = {0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+    uint8_t entropy[DP_PROTO_ENTROPY_BYTES];
+    for (size_t i = 0; i < sizeof(entropy); ++i)
+        entropy[i] = (uint8_t)(i * 7 + 1);
+
+    /* MinGW emulates C thread-local storage with a first-use allocation. Warm
+     * that runtime path before fault injection so the rejected calloc belongs
+     * to the prototype context, not TLS setup. */
+    uint64_t handle = 0;
+    CHECK(dp_proto_create(mac, ip, 1500, 100, entropy, sizeof(entropy), &handle) == DP_OK);
+    CHECK(handle != 0 && dp_proto_destroy(&handle) == DP_OK && handle == 0);
+    CHECK(netif_list == NULL && netif_default == NULL);
+    const uint32_t heap_before = lwip_stats.mem.used;
+    unsigned pools_before[MEMP_MAX];
+    for (unsigned pool = 0; pool < MEMP_MAX; ++pool)
+        pools_before[pool] = lwip_stats.memp[pool]->used;
+
+    handle = UINT64_MAX;
+    allocation_fault.calls = 0;
+    allocation_fault.rejected = 0;
+    allocation_fault.calloc_calls = 0;
+    allocation_fault.fail_at = 1;
+    allocation_fault.persistent = 0;
+    allocation_fault.armed = 1;
+    dp_result result = dp_proto_create(mac, ip, 1500, 100, entropy, sizeof(entropy), &handle);
+    allocation_fault.armed = 0;
+    CHECK(result == DP_RESOURCE_LIMIT && handle == 0);
+    CHECK(allocation_fault.calls == 1 && allocation_fault.rejected == 1);
+    CHECK(allocation_fault.calloc_calls == 1);
+    CHECK(netif_list == NULL && netif_default == NULL && lwip_stats.mem.used == heap_before);
+    for (unsigned pool = 0; pool < MEMP_MAX; ++pool)
+        CHECK(lwip_stats.memp[pool]->used == pools_before[pool]);
+
+    /* The failed allocation must not claim the owner or prevent a later retry. */
+    allocation_fault.fail_at = 0;
+    allocation_fault.calls = 0;
+    allocation_fault.calloc_calls = 0;
+    allocation_fault.armed = 1;
+    result = dp_proto_create(mac, ip, 1500, 100, entropy, sizeof(entropy), &handle);
+    allocation_fault.armed = 0;
+    CHECK(result == DP_OK);
+    CHECK(handle != 0 && allocation_fault.calloc_calls == 2);
+    CHECK(dp_proto_destroy(&handle) == DP_OK && handle == 0);
+    CHECK(netif_list == NULL && netif_default == NULL && lwip_stats.mem.used == heap_before);
+    for (unsigned pool = 0; pool < MEMP_MAX; ++pool)
+        CHECK(lwip_stats.memp[pool]->used == pools_before[pool]);
+}static void test_core_timer_allocation_failure(size_t fail_at) {
+    struct fixture f;
+    dp_config config = allocation_core_config(&f);
+    f.core = (dp_core *)(uintptr_t)UINTPTR_MAX;
+    allocation_fault.calls = 0;
+    allocation_fault.rejected = 0;
+    allocation_fault.sys_timeout_calls = 0;
+    allocation_fault.fail_at = 0;
+    allocation_fault.persistent = 0;
+    allocation_fault.fail_sys_timeout_at = fail_at;
+    allocation_fault.armed = 1;
+    dp_result result = dp_core_create(&config, &f.core);
+    allocation_fault.armed = 0;
+    CHECK(result == DP_RESOURCE_LIMIT && f.core == NULL);
+    CHECK(allocation_fault.rejected == 1 && allocation_fault.fail_sys_timeout_at == 0);
+    CHECK(netif_list == NULL && netif_default == NULL);
+    CHECK(lwip_stats.mem.used == 0);
+    for (unsigned pool = 0; pool < MEMP_MAX; ++pool)
+        CHECK(lwip_stats.memp[pool]->used == 0);
+
+    /* A later create retries the cold timer set without rerunning lwip_init. */
+    ready_core(&f);
+    CHECK(lwip_stats.memp[MEMP_SYS_TIMEOUT]->used ==
+          (u16_t)(lwip_num_cyclic_timers - (LWIP_TCP ? 1 : 0)));
+    CHECK(address_state(&f) == DP_ADDRESS_PREFERRED);
+    close_core(&f);
+}
+static void test_core_timer_persistent_allocation_failure(void) {
+    struct fixture f;
+    dp_config config = allocation_core_config(&f);
+    f.core = (dp_core *)(uintptr_t)UINTPTR_MAX;
+    allocation_fault.calls = 0;
+    allocation_fault.rejected = 0;
+    allocation_fault.sys_timeout_calls = 0;
+    allocation_fault.fail_sys_timeout_at = 1;
+    allocation_fault.fail_at = 0;
+    allocation_fault.persistent = 1;
+    allocation_fault.armed = 1;
+
+    for (unsigned attempt = 0; attempt < 2; ++attempt) {
+        CHECK(dp_core_create(&config, &f.core) == DP_RESOURCE_LIMIT);
+        CHECK(f.core == NULL);
+        CHECK(netif_list == NULL && netif_default == NULL);
+        CHECK(lwip_stats.mem.used == 0);
+        for (unsigned pool = 0; pool < MEMP_MAX; ++pool)
+            CHECK(lwip_stats.memp[pool]->used == 0);
+    }
+    CHECK(allocation_fault.rejected == 2 && allocation_fault.sys_timeout_calls == 2);
+
+    /* Once the persistent allocator failure is removed, a new owner can retry. */
+    allocation_fault.armed = 0;
+    allocation_fault.persistent = 0;
+    allocation_fault.fail_sys_timeout_at = 0;
+    ready_core(&f);
+    CHECK(lwip_stats.memp[MEMP_SYS_TIMEOUT]->used ==
+          (u16_t)(lwip_num_cyclic_timers - (LWIP_TCP ? 1 : 0)));
+    CHECK(address_state(&f) == DP_ADDRESS_PREFERRED);
+    close_core(&f);
+}
+static void test_cyclic_timer_reschedule_failure(int persistent) {
+    struct fixture f;
+    ready_core(&f);
+    const u16_t pool_before = lwip_stats.memp[MEMP_SYS_TIMEOUT]->used;
+    const mem_size_t heap_before = lwip_stats.mem.used;
+    CHECK(pool_before == (u16_t)(lwip_num_cyclic_timers - (LWIP_TCP ? 1 : 0)));
+
+    allocation_fault.calls = 0;
+    allocation_fault.rejected = 0;
+    allocation_fault.sys_timeout_calls = 0;
+    allocation_fault.fail_at = 0;
+    allocation_fault.fail_sys_timeout_at = 1;
+    allocation_fault.persistent = persistent;
+    allocation_fault.armed = 1;
+    f.now += 60000;
+    const dp_result result = dp_core_poll(f.core);
+    allocation_fault.armed = 0;
+    allocation_fault.persistent = 0;
+
+    CHECK(allocation_fault.rejected > 0);
+    if (persistent) {
+        CHECK(result == DP_RESOURCE_LIMIT);
+        CHECK(lwip_stats.memp[MEMP_SYS_TIMEOUT]->used == 0);
+        close_core(&f);
+        ready_core(&f);
+        CHECK(lwip_stats.memp[MEMP_SYS_TIMEOUT]->used ==
+              (u16_t)(lwip_num_cyclic_timers - (LWIP_TCP ? 1 : 0)));
+    } else {
+        CHECK(result == DP_OK);
+        CHECK(lwip_stats.memp[MEMP_SYS_TIMEOUT]->used == pool_before);
+        CHECK(dp_core_poll(f.core) == DP_OK);
+    }
+    close_core(&f);
+    CHECK(lwip_stats.mem.used == heap_before);
+    for (unsigned pool = 0; pool < MEMP_MAX; ++pool) {
+        const u16_t expected = pool == MEMP_SYS_TIMEOUT ? pool_before : 0;
+        if (lwip_stats.memp[pool]->used != expected)
+            fprintf(stderr, "pool %u retained %u entries (baseline %u)\n", pool,
+                    (unsigned)lwip_stats.memp[pool]->used, (unsigned)expected);
+        CHECK(lwip_stats.memp[pool]->used == expected);
+    }
+}
+static void timeout_noop(void *arg) { (void)arg; }
+static int schedule_one_shot_timeout(void *arg) {
+    sys_timeout(1000, timeout_noop, arg);
+    return 0;
+}
+static int cancel_one_shot_timeout(void *arg) {
+    sys_untimeout(timeout_noop, arg);
+    return 0;
+}
+static void test_one_shot_timeout_allocation_failure(void) {
+    struct fixture f;
+    ready_core(&f);
+    const u16_t pool_before = lwip_stats.memp[MEMP_SYS_TIMEOUT]->used;
+    const mem_size_t heap_before = lwip_stats.mem.used;
+
+    allocation_fault.calls = 0;
+    allocation_fault.rejected = 0;
+    allocation_fault.sys_timeout_calls = 0;
+    allocation_fault.fail_at = 0;
+    allocation_fault.fail_sys_timeout_at = 1;
+    allocation_fault.persistent = 0;
+    allocation_fault.armed = 1;
+    const dp_result result = dp_core_execute(f.core, schedule_one_shot_timeout, &f);
+    allocation_fault.armed = 0;
+    CHECK(allocation_fault.rejected == 1);
+    CHECK(result == DP_RESOURCE_LIMIT);
+
+    dp_stats stats;
+    CHECK(dp_core_get_stats(f.core, &stats) == DP_OK && stats.failure == DP_RESOURCE_LIMIT);
+    CHECK(lwip_stats.memp[MEMP_SYS_TIMEOUT]->used == pool_before);
+    close_core(&f);
+    CHECK(lwip_stats.mem.used == heap_before);
+    CHECK(lwip_stats.memp[MEMP_SYS_TIMEOUT]->used == pool_before);
+
+    /* The failed context is isolated; a new owner can schedule timers normally. */
+    ready_core(&f);
+    CHECK(dp_core_execute(f.core, schedule_one_shot_timeout, &f) == DP_OK);
+    CHECK(lwip_stats.memp[MEMP_SYS_TIMEOUT]->used == (u16_t)(pool_before + 1));
+    CHECK(dp_core_execute(f.core, cancel_one_shot_timeout, &f) == DP_OK);
+    close_core(&f);
+    CHECK(lwip_stats.memp[MEMP_SYS_TIMEOUT]->used == pool_before);
+}
+static void advertise_neighbor(struct fixture *f, const uint8_t address[16], const uint8_t mac[6]) {
+    uint8_t frame[86] = {0};
+    memcpy(frame, local_mac, 6);
+    memcpy(frame + 6, mac, 6);
+    w16(frame + 12, 0x86dd);
+    uint8_t *p = ipv6(frame, local_ip, 58, 32);
+    memcpy(frame + 22, address, 16);
+    p[0] = 136;
+    p[4] = 0x60; /* Solicited and Override. */
+    memcpy(p + 8, address, 16);
+    p[24] = 2;
+    p[25] = 1;
+    memcpy(p + 26, mac, 6);
+    w16(p + 2, checksum(frame + 14, p, 32, 58));
+    CHECK(dp_core_input(f->core, frame, sizeof(frame)) == DP_OK);
+}
+static void test_nd6_queue_allocation_failure(void) {
+    struct fixture f;
+    ready_core(&f);
+    uint64_t endpoint;
+    uint16_t port;
+    CHECK(dp_udp_bind(f.core, 0, &endpoint, &port) == DP_OK);
+    const uint8_t payload[] = {0x4e, 0x44, 0x36};
+    dp_stats before, after;
+    CHECK(dp_core_get_stats(f.core, &before) == DP_OK);
+    uint32_t pools[MEMP_MAX];
+    for (unsigned pool = 0; pool < MEMP_MAX; ++pool) pools[pool] = lwip_stats.memp[pool]->used;
+
+    for (unsigned attempt = 0; attempt < MEMP_NUM_ND6_QUEUE; ++attempt) {
+        allocation_fault.calls = 0;
+        allocation_fault.rejected = 0;
+        allocation_fault.fail_at = 0;
+        allocation_fault.persistent = 0;
+        allocation_fault.fail_nd6_queue = 1;
+        allocation_fault.armed = 1;
+        dp_result result = dp_udp_send(f.core, endpoint, other_router, 50000, payload, sizeof(payload));
+        allocation_fault.armed = 0;
+        allocation_fault.fail_nd6_queue = 0;
+        CHECK(result == DP_RESOURCE_LIMIT && allocation_fault.rejected == 1);
+        CHECK(dp_core_get_stats(f.core, &after) == DP_OK && after.failure == DP_OK &&
+              after.heap_used == before.heap_used && after.pbuf_used == before.pbuf_used);
+        for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == pools[pool]);
+        f.count = 0;
+    }
+
+    CHECK(dp_udp_send(f.core, endpoint, other_router, 50000, payload, sizeof(payload)) == DP_OK);
+    const uint8_t remote_mac[6] = {2, 0, 0, 0, 0, 3};
+    f.count = 0;
+    advertise_neighbor(&f, other_router, remote_mac);
+    struct frame *reply = find(&f, 17, -1, 0);
+    CHECK(reply && !memcmp(reply->bytes + 14 + 24, other_router, 16));
+    CHECK(u16(reply->bytes + 54) == port && u16(reply->bytes + 56) == 50000);
+    CHECK(u16(reply->bytes + 18) == 11 && !memcmp(reply->bytes + 62, payload, sizeof(payload)));
+    CHECK(dp_core_get_stats(f.core, &after) == DP_OK && after.failure == DP_OK &&
+          after.heap_used == before.heap_used && after.pbuf_used == before.pbuf_used);
+    for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == pools[pool]);
+    close_core(&f);
+}
+static void test_prototype_echo_malloc_failure(void) {
+    struct fixture f;
+    ready_core(&f);
+    CHECK(dp_core_execute(f.core, echo_services_start, NULL) == DP_OK);
+    uint32_t server = establish(&f, 50000);
+    const uint8_t payload[] = {0x4c, 0x57, 0x49, 0x50, 0x2d, 0x4f, 0x4f, 0x4d};
+    uint8_t seen[sizeof(payload)] = {0};
+
+    allocation_fault.calls = 0;
+    allocation_fault.malloc_calls = 0;
+    allocation_fault.rejected = 0;
+    allocation_fault.fail_at = 0;
+    allocation_fault.persistent = 0;
+    allocation_fault.fail_malloc = 1;
+    allocation_fault.armed = 1;
+    send_tcp_port(&f, 50000, 24, 1001, server + 1, payload, sizeof(payload));
+    allocation_fault.armed = 0;
+    allocation_fault.fail_malloc = 0;
+    CHECK(allocation_fault.malloc_calls == 1 && allocation_fault.rejected == 1);
+    collect_echo(&f, server, payload, seen, sizeof(payload));
+    for (size_t i = 0; i < sizeof(payload); ++i) CHECK(!seen[i]);
+
+    /* ERR_MEM must retain the refused segment so a retransmission can recover. */
+    send_tcp_port(&f, 50000, 24, 1001, server + 1, payload, sizeof(payload));
+    collect_echo(&f, server, payload, seen, sizeof(payload));
+    for (size_t i = 0; i < sizeof(payload); ++i) CHECK(seen[i]);
+    close_core(&f);
+}
+static void exercise_and_close_listener(struct fixture *f, uint64_t listener) {
+    uint32_t server = establish(f, 50000);
+    uint64_t stream = accept_stream(f, listener);
+    send_tcp(f, 24, 1001, server + 1, "abc");
+    uint8_t received[3]; size_t copied = 0;
+    CHECK(dp_tcp_read(f->core, stream, received, sizeof(received), &copied) == DP_OK);
+    CHECK(copied == 3 && !memcmp(received, "abc", 3));
+    CHECK(dp_tcp_close(f->core, stream) == DP_OK);
+    CHECK(dp_tcp_listener_close(f->core, listener) == DP_OK);
+    advance(f, 500); /* Let the on-demand TCP timer retire after abort. */
+}
+static void test_tcp_listen_allocation_failures(void) {
+    for (int profile = 0; profile < 4; ++profile) {
+        int reuse = profile % 2, persistent = profile / 2;
+        size_t allocations = 0;
+        unsigned recovered = 0, rejected = 0;
+        for (size_t fail_at = 0; fail_at <= allocations; ++fail_at) {
+            struct fixture f;
+            ready_core(&f);
+            dp_stats before, after;
+            CHECK(dp_core_get_stats(f.core, &before) == DP_OK);
+            uint32_t pools_before[MEMP_MAX];
+            for (unsigned pool = 0; pool < MEMP_MAX; ++pool) pools_before[pool] = lwip_stats.memp[pool]->used;
+            uint64_t listener = UINT64_MAX; uint16_t port = UINT16_MAX;
+            allocation_fault.calls = 0; allocation_fault.calloc_calls = 0;
+            allocation_fault.rejected = 0; allocation_fault.persistent = persistent;
+            allocation_fault.fail_at = fail_at; allocation_fault.armed = 1;
+            dp_result result = dp_tcp_listen_with_options(f.core, 7000, 2, reuse, &listener, &port);
+            allocation_fault.armed = 0;
+            if (!fail_at) {
+                CHECK(result == DP_OK && listener && port == 7000 && allocation_fault.calloc_calls == 1);
+                allocations = allocation_fault.calls;
+                CHECK(allocations > 0 && allocations <= 16);
+            } else {
+                CHECK(allocation_fault.rejected > 0 && allocation_fault.calls >= fail_at);
+                if (!persistent) CHECK(allocation_fault.rejected == 1);
+            }
+            if (result == DP_OK) {
+                CHECK(!fail_at || !persistent);
+                CHECK(listener && port == 7000);
+                if (fail_at) recovered++;
+                exercise_and_close_listener(&f, listener);
+            } else {
+                CHECK(fail_at && result == DP_RESOURCE_LIMIT);
+                CHECK(listener == 0 && port == 0);
+                rejected++;
+            }
+            CHECK(dp_core_get_stats(f.core, &after) == DP_OK);
+            CHECK(after.failure == DP_OK && after.heap_used == before.heap_used &&
+                  after.tcp_active == before.tcp_active && after.tcp_listeners == before.tcp_listeners);
+            for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == pools_before[pool]);
+            CHECK(dp_tcp_listen_with_options(f.core, 7000, 2, reuse, &listener, &port) == DP_OK && port == 7000);
+            exercise_and_close_listener(&f, listener);
+            CHECK(dp_core_get_stats(f.core, &after) == DP_OK);
+            CHECK(after.failure == DP_OK && after.heap_used == before.heap_used &&
+                  after.tcp_active == before.tcp_active && after.tcp_listeners == before.tcp_listeners);
+            for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == pools_before[pool]);
+            close_core(&f);
+        }
+        CHECK(recovered + rejected == allocations);
+        if (persistent) CHECK(recovered == 0 && rejected == allocations);
+        printf("TCP listen reuse=%d persistent=%d points=%lu recovered=%u resource_limit=%u\n",
+               reuse, persistent, (unsigned long)allocations, recovered, rejected);
+    }
+}
+static void finish_outgoing_connection(struct fixture *f, uint64_t stream) {
+    struct frame *syn = find(f, 6, -1, 0);
+    if (!syn) { advance(f, 3500); syn = find(f, 6, -1, 0); }
+    CHECK(syn && (syn->bytes[67] & 0x12) == 2);
+    uint16_t port = u16(syn->bytes + 54);
+    uint32_t sequence = u32(syn->bytes + 58);
+    send_tcp_pair(f, 9000, port, 18, 7000, sequence + 1, "", 0);
+    dp_tcp_info info;
+    CHECK(dp_tcp_connect_status(f->core, stream, &info) == DP_OK);
+    CHECK(info.local_port == port && info.remote_port == 9000);
+    send_tcp_pair(f, 9000, port, 24, 7001, sequence + 1, "reply", 5);
+    uint8_t bytes[5]; size_t copied = 0;
+    CHECK(dp_tcp_read(f->core, stream, bytes, sizeof(bytes), &copied) == DP_OK);
+    CHECK(copied == 5 && !memcmp(bytes, "reply", 5));
+    f->count = 0;
+    CHECK(dp_tcp_write(f->core, stream, (const uint8_t *)"hi", 2, &copied) == DP_OK && copied == 2);
+    uint8_t seen[2] = {0};
+    collect_echo(f, sequence, (const uint8_t *)"hi", seen, 2);
+    CHECK(seen[0] && seen[1]);
+    CHECK(dp_tcp_close(f->core, stream) == DP_OK);
+    advance(f, 500);
+}
+static void test_tcp_connect_allocation_failures(void) {
+    struct fixture prime; ready_core(&prime); close_core(&prime);
+    uint32_t heap = lwip_stats.mem.used, pools[MEMP_MAX];
+    for (unsigned pool = 0; pool < MEMP_MAX; ++pool) pools[pool] = lwip_stats.memp[pool]->used;
+    for (int persistent = 0; persistent < 2; ++persistent) {
+        size_t allocations = 0;
+        unsigned recovered = 0, rejected = 0, fatal = 0;
+        for (size_t fail_at = 0; fail_at <= allocations; ++fail_at) {
+            struct fixture f; ready_core(&f); f.count = 0;
+            dp_stats before;
+            CHECK(dp_core_get_stats(f.core, &before) == DP_OK);
+            uint32_t pools_before[MEMP_MAX];
+            for (unsigned pool = 0; pool < MEMP_MAX; ++pool) pools_before[pool] = lwip_stats.memp[pool]->used;
+            uint64_t stream = UINT64_MAX;
+            allocation_fault.calls = 0; allocation_fault.calloc_calls = 0;
+            allocation_fault.rejected = 0; allocation_fault.persistent = persistent;
+            allocation_fault.fail_at = fail_at; allocation_fault.armed = 1;
+            dp_result result = dp_tcp_connect(f.core, peer_ip, 9000, &stream);
+            allocation_fault.armed = 0;
+            fprintf(stderr, "CONNECT persistent=%d fail_at=%lu result=%d\n", persistent, (unsigned long)fail_at, result);
+            if (!fail_at) {
+                CHECK(result == DP_OK && allocation_fault.calloc_calls == 1);
+                allocations = allocation_fault.calls;
+                CHECK(allocations > 0 && allocations <= 32);
+            } else {
+                CHECK(allocation_fault.rejected && allocation_fault.calls >= fail_at);
+                if (!persistent) CHECK(allocation_fault.rejected == 1);
+            }
+            if (result == DP_OK) {
+                CHECK(stream && stream != UINT64_MAX);
+                finish_outgoing_connection(&f, stream);
+                if (fail_at) recovered++;
+            } else {
+                CHECK(fail_at && result == DP_RESOURCE_LIMIT && stream == 0);
+                rejected++;
+            }
+            dp_stats stats;
+            CHECK(dp_core_get_stats(f.core, &stats) == DP_OK);
+            if (stats.failure != DP_OK) {
+                CHECK(stats.failure == DP_RESOURCE_LIMIT && result == DP_RESOURCE_LIMIT);
+                fatal++;
+            } else {
+                advance(&f, 500);
+                CHECK(dp_core_get_stats(f.core, &stats) == DP_OK);
+                CHECK(stats.heap_used == before.heap_used && stats.tcp_active == before.tcp_active &&
+                      stats.tcp_listeners == before.tcp_listeners);
+                for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == pools_before[pool]);
+                uint16_t port;
+                connect_begin(&f, &stream, &port);
+                finish_outgoing_connection(&f, stream);
+            }
+            close_core(&f);
+            CHECK(netif_list == NULL && netif_default == NULL && lwip_stats.mem.used == heap);
+            for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == pools[pool]);
+            ready_core(&f);
+            uint16_t port;
+            connect_begin(&f, &stream, &port);
+            finish_outgoing_connection(&f, stream);
+            close_core(&f);
+            CHECK(lwip_stats.mem.used == heap);
+            for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == pools[pool]);
+        }
+        CHECK(recovered + rejected == allocations);
+        CHECK(persistent ? fatal > 0 : fatal == 0);
+        printf("TCP connect persistent=%d points=%lu recovered=%u rejected=%u fatal=%u\n",
+               persistent, (unsigned long)allocations, recovered, rejected, fatal);
+    }
+}
+static void test_tcp_write_allocation_failures(void) {
+    const size_t sizes[] = {1, 8192};
+    for (unsigned vector = 0; vector < sizeof(sizes) / sizeof(sizes[0]); ++vector) {
+        size_t length = sizes[vector];
+        for (int persistent = 0; persistent < 2; ++persistent) {
+            size_t allocations = 0;
+            unsigned blocked = 0, accepted = 0;
+            for (size_t fail_at = 0; fail_at <= allocations; ++fail_at) {
+                struct fixture f; ready_core(&f);
+                dp_stats before, after;
+                CHECK(dp_core_get_stats(f.core, &before) == DP_OK);
+                uint32_t pools[MEMP_MAX];
+                for (unsigned pool = 0; pool < MEMP_MAX; ++pool) pools[pool] = lwip_stats.memp[pool]->used;
+                uint64_t listener; uint16_t port;
+                CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK);
+                uint32_t server = establish(&f, 50000);
+                uint64_t stream = accept_stream(&f, listener);
+                dp_stats write_before;
+                CHECK(dp_core_get_stats(f.core, &write_before) == DP_OK);
+                uint32_t write_pools[MEMP_MAX];
+                for (unsigned pool = 0; pool < MEMP_MAX; ++pool) write_pools[pool] = lwip_stats.memp[pool]->used;
+                uint8_t source[8192], expected[8192], seen[8192] = {0};
+                for (size_t i = 0; i < length; ++i) source[i] = expected[i] = (uint8_t)(i ^ (i >> 8));
+                f.count = 0;
+                allocation_fault.calls = 0; allocation_fault.rejected = 0;
+                allocation_fault.persistent = persistent; allocation_fault.fail_at = fail_at;
+                allocation_fault.armed = 1;
+                size_t copied = SIZE_MAX;
+                dp_result result = dp_tcp_write(f.core, stream, source, length, &copied);
+                allocation_fault.armed = 0;
+                fprintf(stderr, "WRITE size=%lu persistent=%d fail_at=%lu result=%d copied=%lu\n",
+                        (unsigned long)length, persistent, (unsigned long)fail_at, result, (unsigned long)copied);
+                if (!fail_at) {
+                    CHECK(result == DP_OK && copied == length);
+                    allocations = allocation_fault.calls;
+                    CHECK(allocations > 0 && allocations <= 64);
+                } else {
+                    CHECK(allocation_fault.rejected && allocation_fault.calls >= fail_at);
+                    if (!persistent) CHECK(allocation_fault.rejected == 1);
+                }
+                if (result == DP_WOULD_BLOCK) {
+                    CHECK(fail_at && copied == 0);
+                    CHECK(dp_core_get_stats(f.core, &after) == DP_OK && after.failure == DP_OK);
+                    CHECK(after.heap_used == write_before.heap_used && after.tcp_active == write_before.tcp_active);
+                    for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == write_pools[pool]);
+                    for (size_t n = 0; n < f.count; ++n) {
+                        const uint8_t *p = f.frames[n].bytes;
+                        if (f.frames[n].length >= 74 && p[20] == 6)
+                            CHECK(u16(p + 18) == (p[66] >> 4) * 4);
+                    }
+                    CHECK(dp_tcp_write(f.core, stream, source, length, &copied) == DP_OK && copied == length);
+                    blocked++;
+                } else {
+                    CHECK(result == DP_OK && copied == length);
+                    if (fail_at) accepted++;
+                }
+                memset(source, 0xa5, length); /* Successful copy must own even an unsent prefix. */
+                size_t received = 0;
+                for (unsigned attempt = 0; attempt < 32 && received < length; ++attempt) {
+                    collect_echo(&f, server, expected, seen, length);
+                    while (received < length && seen[received]) received++;
+                    send_tcp(&f, 16, 1001, server + 1 + (uint32_t)received, "");
+                    advance(&f, 250);
+                }
+                CHECK(received == length);
+                /* A second write on the same stream must begin after exactly the accepted prefix. */
+                f.count = 0;
+                uint8_t next = 0x73, next_seen = 0;
+                CHECK(dp_tcp_write(f.core, stream, &next, 1, &copied) == DP_OK && copied == 1);
+                collect_echo(&f, server + (uint32_t)length, &next, &next_seen, 1);
+                CHECK(next_seen);
+                CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+                CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+                advance(&f, 500);
+                CHECK(dp_core_get_stats(f.core, &after) == DP_OK && after.failure == DP_OK);
+                CHECK(after.heap_used == before.heap_used && after.tcp_active == before.tcp_active &&
+                      after.tcp_listeners == before.tcp_listeners);
+                for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == pools[pool]);
+                CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK && port == 7000);
+                exercise_and_close_listener(&f, listener);
+                close_core(&f);
+            }
+            CHECK(blocked + accepted == allocations);
+            printf("TCP write size=%lu persistent=%d points=%lu blocked=%u accepted=%u\n",
+                   (unsigned long)length, persistent, (unsigned long)allocations, blocked, accepted);
+        }
+    }
+}
+static void test_tcp_write_unsent_append_allocation_failures(void) {
+    enum { prefix_length = 8192, suffix_length = 8192, total = prefix_length + suffix_length };
+    for (int persistent = 0; persistent < 2; ++persistent) {
+        size_t allocations = 0;
+        unsigned blocked = 0, accepted = 0;
+        for (size_t fail_at = 0; fail_at <= allocations; ++fail_at) {
+            struct fixture f; ready_core(&f);
+            dp_stats before, after, queued;
+            CHECK(dp_core_get_stats(f.core, &before) == DP_OK);
+            uint32_t pools[MEMP_MAX];
+            for (unsigned pool = 0; pool < MEMP_MAX; ++pool) pools[pool] = lwip_stats.memp[pool]->used;
+            uint64_t listener; uint16_t port;
+            CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK);
+            uint32_t server = establish(&f, 50000);
+            uint64_t stream = accept_stream(&f, listener);
+            uint8_t prefix[prefix_length], suffix[suffix_length], expected[total], seen[total] = {0};
+            for (size_t i = 0; i < prefix_length; ++i) prefix[i] = expected[i] = (uint8_t)(0x30U + i);
+            for (size_t i = 0; i < suffix_length; ++i) suffix[i] = expected[prefix_length + i] = (uint8_t)(i ^ (i >> 8));
+
+            /* Initial congestion leaves a suffix of the first write on lwIP's unsent queue. */
+            size_t copied = 0;
+            CHECK(dp_tcp_write(f.core, stream, prefix, prefix_length, &copied) == DP_OK && copied == prefix_length);
+            size_t initially_sent = 0;
+            for (size_t i = 0; i < f.count; ++i) {
+                const uint8_t *p = f.frames[i].bytes;
+                if (f.frames[i].length >= 74 && p[20] == 6) {
+                    size_t header = (p[66] >> 4) * 4;
+                    if (u16(p + 18) > header) initially_sent += u16(p + 18) - header;
+                }
+            }
+            CHECK(initially_sent > 0 && initially_sent < prefix_length);
+            CHECK(dp_core_get_stats(f.core, &queued) == DP_OK);
+            uint32_t queued_pools[MEMP_MAX];
+            for (unsigned pool = 0; pool < MEMP_MAX; ++pool) queued_pools[pool] = lwip_stats.memp[pool]->used;
+
+            allocation_fault.calls = 0; allocation_fault.rejected = 0;
+            allocation_fault.persistent = persistent; allocation_fault.fail_at = fail_at;
+            allocation_fault.armed = 1;
+            copied = SIZE_MAX;
+            dp_result result = dp_tcp_write(f.core, stream, suffix, suffix_length, &copied);
+            allocation_fault.armed = 0;
+            if (!fail_at) {
+                CHECK(result == DP_OK && copied == suffix_length);
+                allocations = allocation_fault.calls;
+                CHECK(allocations > 0 && allocations <= 64);
+            } else {
+                CHECK(allocation_fault.rejected && allocation_fault.calls >= fail_at);
+                if (!persistent) CHECK(allocation_fault.rejected == 1);
+            }
+            if (result == DP_WOULD_BLOCK) {
+                CHECK(fail_at && copied == 0);
+                CHECK(dp_core_get_stats(f.core, &after) == DP_OK && after.failure == DP_OK);
+                CHECK(after.heap_used == queued.heap_used && after.tcp_active == queued.tcp_active);
+                for (unsigned pool = 0; pool < MEMP_MAX; ++pool)
+                    CHECK(lwip_stats.memp[pool]->used == queued_pools[pool]);
+                collect_echo(&f, server, expected, seen, total);
+                for (size_t i = prefix_length; i < total; ++i) CHECK(!seen[i]);
+                blocked++;
+            } else {
+                CHECK(result == DP_OK && copied == suffix_length);
+                if (fail_at) accepted++;
+                collect_echo(&f, server, expected, seen, total);
+            }
+
+            if (result == DP_WOULD_BLOCK)
+                CHECK(dp_tcp_write(f.core, stream, suffix, suffix_length, &copied) == DP_OK && copied == suffix_length);
+            memset(prefix, 0xa5, sizeof(prefix));
+            memset(suffix, 0x5a, sizeof(suffix));
+            size_t received = 0;
+            for (unsigned attempt = 0; attempt < 32 && received < total; ++attempt) {
+                collect_echo(&f, server, expected, seen, total);
+                while (received < total && seen[received]) received++;
+                send_tcp(&f, 16, 1001, server + 1 + (uint32_t)received, "");
+                advance(&f, 250);
+            }
+            CHECK(received == total);
+            CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+            CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+            advance(&f, 500);
+            CHECK(dp_core_get_stats(f.core, &after) == DP_OK && after.failure == DP_OK);
+            CHECK(after.heap_used == before.heap_used && after.tcp_active == before.tcp_active &&
+                  after.tcp_listeners == before.tcp_listeners);
+            for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == pools[pool]);
+            CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK && port == 7000);
+            exercise_and_close_listener(&f, listener);
+            close_core(&f);
+        }
+        CHECK(blocked + accepted == allocations);
+        printf("TCP write unsent append persistent=%d points=%lu blocked=%u accepted=%u\n",
+               persistent, (unsigned long)allocations, blocked, accepted);
+    }
+}
+static void test_tcp_receive_allocation_failures(void) {
+    const size_t sizes[] = {1, 1440};
+    for (unsigned vector = 0; vector < sizeof(sizes) / sizeof(sizes[0]); ++vector) {
+        size_t length = sizes[vector];
+        for (int out_of_order = 0; out_of_order < 2; ++out_of_order) {
+            for (int persistent = 0; persistent < 2; ++persistent) {
+                size_t allocations = 0;
+                unsigned input_failed = 0;
+                for (size_t fail_at = 0; fail_at <= allocations; ++fail_at) {
+                    struct fixture f; ready_core(&f);
+                    dp_stats before, after;
+                    CHECK(dp_core_get_stats(f.core, &before) == DP_OK);
+                    uint32_t pools[MEMP_MAX];
+                    for (unsigned pool = 0; pool < MEMP_MAX; ++pool) pools[pool] = lwip_stats.memp[pool]->used;
+                    uint64_t listener; uint16_t port;
+                    CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK);
+                    uint32_t server = establish(&f, 50000);
+                    uint64_t stream = accept_stream(&f, listener);
+                    send_tcp(&f, 24, 1001, server + 1, "seed");
+                    uint8_t frame[1514], expected[1440], received[1443];
+                    for (size_t n = 0; n < length; ++n) expected[n] = (uint8_t)(n ^ (n >> 8));
+                    ethernet(frame, local_mac);
+                    uint8_t *p = ipv6(frame, local_ip, 6, (uint16_t)(20 + length));
+                    w16(p, 50000); w16(p + 2, 7000);
+                    uint32_t sequence = 1005 + (out_of_order ? 3 : 0);
+                    w32(p + 4, sequence); w32(p + 8, server + 1);
+                    p[12] = 0x50; p[13] = 24; w16(p + 14, 32768);
+                    memcpy(p + 20, expected, length);
+                    w16(p + 16, checksum(frame + 14, p, 20 + length, 6));
+                    allocation_fault.calls = 0; allocation_fault.rejected = 0;
+                    allocation_fault.fail_at = fail_at; allocation_fault.persistent = persistent;
+                    allocation_fault.armed = 1;
+                    dp_result result = dp_core_input(f.core, frame, 74 + length);
+                    allocation_fault.armed = 0;
+                    fprintf(stderr, "RECEIVE size=%lu ooo=%d persistent=%d fail_at=%lu result=%d\n",
+                            (unsigned long)length, out_of_order, persistent, (unsigned long)fail_at, result);
+                    if (!fail_at) {
+                        CHECK(result == DP_OK);
+                        allocations = allocation_fault.calls;
+                        CHECK(allocations > 0 && allocations <= 16);
+                    } else {
+                        CHECK(allocation_fault.rejected && allocation_fault.calls >= fail_at);
+                        if (!persistent) CHECK(allocation_fault.rejected == 1);
+                    }
+                    CHECK(result == DP_OK || (fail_at && result == DP_RESOURCE_LIMIT));
+                    if (result == DP_RESOURCE_LIMIT) input_failed++;
+                    CHECK(dp_core_get_stats(f.core, &after) == DP_OK && after.failure == DP_OK);
+                    size_t copied = SIZE_MAX;
+                    CHECK(dp_tcp_read(f.core, stream, received, 4, &copied) == DP_OK);
+                    CHECK(copied == 4 && !memcmp(received, "seed", 4));
+                    if (out_of_order) {
+                        memset(received, 0xa5, sizeof(received));
+                        CHECK(dp_tcp_read(f.core, stream, received, sizeof(received), &copied) == DP_WOULD_BLOCK && copied == 0);
+                        CHECK(received[0] == 0xa5);
+                    }
+                    /* Retransmission is legal whether input OOM or a later allocation dropped the segment. */
+                    CHECK(dp_core_input(f.core, frame, 74 + length) == DP_OK);
+                    if (out_of_order) send_tcp(&f, 24, 1005, server + 1, "gap");
+                    size_t total = length + (out_of_order ? 3 : 0), read = 0;
+                    while (read < total) {
+                        CHECK(dp_tcp_read(f.core, stream, received + read, total - read, &copied) == DP_OK && copied);
+                        read += copied;
+                    }
+                    if (out_of_order) CHECK(!memcmp(received, "gap", 3));
+                    CHECK(!memcmp(received + (out_of_order ? 3 : 0), expected, length));
+                    CHECK(dp_tcp_read(f.core, stream, received, 1, &copied) == DP_WOULD_BLOCK && copied == 0);
+                    send_tcp(&f, 24, 1005 + (uint32_t)total, server + 1, "next");
+                    CHECK(dp_tcp_read(f.core, stream, received, 4, &copied) == DP_OK && copied == 4 && !memcmp(received, "next", 4));
+                    CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+                    CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+                    advance(&f, 500);
+                    CHECK(dp_core_get_stats(f.core, &after) == DP_OK && after.failure == DP_OK);
+                    CHECK(after.heap_used == before.heap_used && after.tcp_active == before.tcp_active &&
+                          after.tcp_listeners == before.tcp_listeners);
+                    for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == pools[pool]);
+                    CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK && port == 7000);
+                    exercise_and_close_listener(&f, listener);
+                    close_core(&f);
+                }
+                printf("TCP receive size=%lu ooo=%d persistent=%d points=%lu input_failed=%u\n",
+                       (unsigned long)length, out_of_order, persistent, (unsigned long)allocations, input_failed);
+            }
+        }
+    }
+}
+static void test_tcp_accept_allocation_failures(void) {
+    for (int persistent = 0; persistent < 2; ++persistent) {
+        size_t allocations = 0;
+        unsigned delivered = 0, input_failed = 0, unpublished = 0;
+        for (size_t fail_at = 0; fail_at <= allocations; ++fail_at) {
+            struct fixture f;
+            ready_core(&f);
+            dp_stats before, after;
+            CHECK(dp_core_get_stats(f.core, &before) == DP_OK);
+            uint32_t pools_before[MEMP_MAX];
+            for (unsigned pool = 0; pool < MEMP_MAX; ++pool) pools_before[pool] = lwip_stats.memp[pool]->used;
+            uint64_t listener; uint16_t port;
+            CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK);
+            send_tcp(&f, 2, 1000, 0, "");
+            struct frame *syn = find(&f, 6, -1, 0);
+            CHECK(syn && (syn->bytes[67] & 18) == 18);
+            uint32_t server = u32(syn->bytes + 58);
+            uint8_t frame[74];
+            ethernet(frame, local_mac);
+            uint8_t *tcp = ipv6(frame, local_ip, 6, 20);
+            w16(tcp, 50000); w16(tcp + 2, 7000); w32(tcp + 4, 1001); w32(tcp + 8, server + 1);
+            tcp[12] = 0x50; tcp[13] = 16; w16(tcp + 14, 32768);
+            w16(tcp + 16, checksum(frame + 14, tcp, 20, 6));
+            allocation_fault.calls = 0; allocation_fault.calloc_calls = 0;
+            allocation_fault.rejected = 0; allocation_fault.persistent = persistent;
+            allocation_fault.fail_at = fail_at; allocation_fault.armed = 1;
+            dp_result input = dp_core_input(f.core, frame, sizeof(frame));
+            allocation_fault.armed = 0;
+            CHECK(input == DP_OK || input == DP_RESOURCE_LIMIT);
+            if (!fail_at) {
+                CHECK(input == DP_OK && allocation_fault.calloc_calls == 1);
+                allocations = allocation_fault.calls;
+                CHECK(allocations > 0 && allocations <= 16);
+            } else {
+                CHECK(allocation_fault.rejected > 0 && allocation_fault.calls >= fail_at);
+                if (!persistent) CHECK(allocation_fault.rejected == 1);
+            }
+            uint64_t stream = UINT64_MAX; dp_tcp_info info;
+            dp_result accepted = dp_tcp_accept(f.core, listener, &stream, &info);
+            if (accepted == DP_OK) {
+                CHECK(stream && info.local_port == 7000 && info.remote_port == 50000);
+                CHECK(!fail_at);
+                delivered++;
+                send_tcp(&f, 24, 1001, server + 1, "abc");
+                uint8_t bytes[3]; size_t copied;
+                CHECK(dp_tcp_read(f.core, stream, bytes, sizeof(bytes), &copied) == DP_OK);
+                CHECK(copied == 3 && !memcmp(bytes, "abc", 3));
+                CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+            } else {
+                CHECK(accepted == DP_WOULD_BLOCK && stream == 0 && fail_at);
+                if (input == DP_RESOURCE_LIMIT) input_failed++;
+                else unpublished++;
+            }
+            /* The original listener must still accept another client before it is closed. */
+            server = establish(&f, 50001);
+            CHECK(dp_tcp_accept(f.core, listener, &stream, &info) == DP_OK && stream);
+            CHECK(info.local_port == 7000 && info.remote_port == 50001);
+            send_tcp_port(&f, 50001, 24, 1001, server + 1, "xyz", 3);
+            uint8_t recovered_bytes[3]; size_t recovered_count;
+            CHECK(dp_tcp_read(f.core, stream, recovered_bytes, sizeof(recovered_bytes), &recovered_count) == DP_OK);
+            CHECK(recovered_count == 3 && !memcmp(recovered_bytes, "xyz", 3));
+            CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+            CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+            advance(&f, 500);
+            CHECK(dp_core_get_stats(f.core, &after) == DP_OK);
+            CHECK(after.failure == DP_OK && after.heap_used == before.heap_used &&
+                  after.tcp_active == before.tcp_active && after.tcp_listeners == before.tcp_listeners);
+            for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == pools_before[pool]);
+            CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK);
+            exercise_and_close_listener(&f, listener);
+            close_core(&f);
+        }
+        printf("TCP accept persistent=%d points=%lu delivered=%u input_failed=%u unpublished=%u\n",
+               persistent, (unsigned long)allocations, delivered, input_failed, unpublished);
+    }
+}
+static void test_tcp_syn_allocation_failures(void) {
+    struct fixture prime; ready_core(&prime); close_core(&prime);
+    uint32_t global_heap = lwip_stats.mem.used, global_pools[MEMP_MAX];
+    for (unsigned pool = 0; pool < MEMP_MAX; ++pool) global_pools[pool] = lwip_stats.memp[pool]->used;
+    for (int persistent = 0; persistent < 2; ++persistent) {
+        size_t allocations = 0;
+        unsigned fatal_contexts = 0;
+        for (size_t fail_at = 0; fail_at <= allocations; ++fail_at) {
+            struct fixture f; ready_core(&f);
+            dp_stats before, after;
+            CHECK(dp_core_get_stats(f.core, &before) == DP_OK);
+            uint32_t pools_before[MEMP_MAX];
+            for (unsigned pool = 0; pool < MEMP_MAX; ++pool) pools_before[pool] = lwip_stats.memp[pool]->used;
+            uint64_t listener; uint16_t port;
+            CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK);
+            uint8_t frame[74]; ethernet(frame, local_mac);
+            uint8_t *tcp = ipv6(frame, local_ip, 6, 20);
+            w16(tcp, 50000); w16(tcp + 2, 7000); w32(tcp + 4, 1000);
+            tcp[12] = 0x50; tcp[13] = 2; w16(tcp + 14, 32768);
+            w16(tcp + 16, checksum(frame + 14, tcp, 20, 6));
+            fprintf(stderr, "SYN persistent=%d fail_at=%lu\n", persistent, (unsigned long)fail_at);
+            allocation_fault.calls = 0; allocation_fault.calloc_calls = 0;
+            allocation_fault.rejected = 0; allocation_fault.persistent = persistent;
+            allocation_fault.fail_at = fail_at; allocation_fault.armed = 1;
+            dp_result input = dp_core_input(f.core, frame, sizeof(frame));
+            allocation_fault.armed = 0;
+            CHECK(input == DP_OK || input == DP_RESOURCE_LIMIT);
+            if (!fail_at) { allocations = allocation_fault.calls; CHECK(allocations > 0 && allocations <= 32); }
+            else CHECK(allocation_fault.rejected > 0 && allocation_fault.calls >= fail_at);
+            CHECK(dp_core_get_stats(f.core, &after) == DP_OK);
+            if (after.failure == DP_OK) {
+                uint64_t stream = UINT64_MAX; dp_tcp_info info;
+                CHECK(dp_tcp_accept(f.core, listener, &stream, &info) == DP_WOULD_BLOCK && stream == 0);
+                /* A different client must remain serviceable even if the first SYN was dropped. */
+                uint32_t server = establish(&f, 50001);
+                CHECK(dp_tcp_accept(f.core, listener, &stream, &info) == DP_OK && stream);
+                send_tcp_port(&f, 50001, 24, 1001, server + 1, "abc", 3);
+                uint8_t bytes[3]; size_t copied;
+                CHECK(dp_tcp_read(f.core, stream, bytes, sizeof(bytes), &copied) == DP_OK);
+                CHECK(copied == 3 && !memcmp(bytes, "abc", 3));
+                CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+                CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+                advance(&f, 500);
+                CHECK(dp_core_get_stats(f.core, &after) == DP_OK);
+                CHECK(after.heap_used == before.heap_used && after.tcp_active == before.tcp_active &&
+                      after.tcp_listeners == before.tcp_listeners);
+                for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == pools_before[pool]);
+            } else {
+                CHECK(fail_at && input == DP_RESOURCE_LIMIT && after.failure == DP_RESOURCE_LIMIT);
+                fatal_contexts++;
+            }
+            close_core(&f);
+            if (after.failure == DP_RESOURCE_LIMIT) {
+                ready_core(&f);
+                CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK);
+                exercise_and_close_listener(&f, listener);
+                close_core(&f);
+            }
+            CHECK(netif_list == NULL && netif_default == NULL && lwip_stats.mem.used == global_heap);
+            for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == global_pools[pool]);
+        }
+        if (!persistent) CHECK(fatal_contexts == 0);
+        printf("TCP SYN persistent=%d traversed %lu allocation points, fatal_contexts=%u\n",
+               persistent, (unsigned long)allocations, fatal_contexts);
+    }
+}
+static int replay_tcp_timer(void *unused) {
+    (void)unused;
+    struct sys_timeo *timer = allocation_fault.last_timeout;
+    CHECK(timer && timer->h && timer->arg == NULL);
+    sys_timeout_handler handler = timer->h;
+    void *arg = timer->arg;
+    sys_untimeout(handler, arg);
+    allocation_fault.last_timeout = NULL;
+    handler(arg);
+    return 0;
+}
+static void test_tcp_timer_allocation_failures(void) {
+    struct fixture f; ready_core(&f); close_core(&f);
+    uint32_t heap = lwip_stats.mem.used, pools[MEMP_MAX];
+    for (unsigned pool = 0; pool < MEMP_MAX; ++pool) pools[pool] = lwip_stats.memp[pool]->used;
+    for (int persistent = 0; persistent < 2; ++persistent) {
+        ready_core(&f);
+        uint64_t listener; uint16_t port;
+        CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK);
+        allocation_fault.last_timeout = NULL;
+        establish(&f, 50000);
+        uint64_t stream = accept_stream(&f, listener);
+        CHECK(allocation_fault.last_timeout && allocation_fault.last_timeout->arg == NULL);
+        allocation_fault.calls = 0; allocation_fault.rejected = 0;
+        allocation_fault.fail_at = 1; allocation_fault.persistent = persistent; allocation_fault.armed = 1;
+        dp_result result = dp_core_execute(f.core, replay_tcp_timer, NULL);
+        allocation_fault.armed = 0;
+        CHECK(allocation_fault.rejected > 0);
+        dp_stats stats;
+        CHECK(dp_core_get_stats(f.core, &stats) == DP_OK);
+        if (persistent) {
+            CHECK(result == DP_RESOURCE_LIMIT && stats.failure == DP_RESOURCE_LIMIT);
+            uint8_t bytes[3] = {9, 9, 9}; size_t copied = 99;
+            CHECK(dp_tcp_read(f.core, stream, bytes, sizeof(bytes), &copied) == DP_RESOURCE_LIMIT);
+            CHECK(copied == 0 && bytes[0] == 9 && bytes[1] == 9 && bytes[2] == 9);
+        } else {
+            CHECK(result == DP_OK && stats.failure == DP_OK);
+            CHECK(allocation_fault.rejected == 1 && allocation_fault.last_timeout);
+            CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+            CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+            advance(&f, 500);
+        }
+        close_core(&f);
+        ready_core(&f);
+        CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK);
+        exercise_and_close_listener(&f, listener);
+        close_core(&f);
+        CHECK(netif_list == NULL && netif_default == NULL && lwip_stats.mem.used == heap);
+        for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == pools[pool]);
+        printf("TCP timer reschedule persistent=%d recovered and released\n", persistent);
+    }
+}
+static void test_tcp_shutdown_fin_allocation_failure(void) {
+    struct fixture f; ready_core(&f);
+    dp_stats baseline, before, after;
+    uint32_t baseline_pools[MEMP_MAX], operation_pools[MEMP_MAX];
+    CHECK(dp_core_get_stats(f.core, &baseline) == DP_OK);
+    for (unsigned pool = 0; pool < MEMP_MAX; ++pool) baseline_pools[pool] = lwip_stats.memp[pool]->used;
+    uint64_t listener; uint16_t port;
+    CHECK(dp_tcp_listen(f.core, 7000, 2, &listener, &port) == DP_OK);
+    establish(&f, 50000);
+    uint64_t stream = accept_stream(&f, listener);
+    CHECK(dp_core_get_stats(f.core, &before) == DP_OK);
+    for (unsigned pool = 0; pool < MEMP_MAX; ++pool) operation_pools[pool] = lwip_stats.memp[pool]->used;
+
+    f.count = 0;
+    allocation_fault.calls = 0; allocation_fault.rejected = 0;
+    allocation_fault.fail_at = 1; allocation_fault.persistent = 0;
+    allocation_fault.armed = 1;
+    CHECK(dp_tcp_shutdown_output(f.core, stream) == DP_OK);
+    allocation_fault.armed = 0;
+    CHECK(allocation_fault.rejected == 1 && allocation_fault.calls == 1);
+    CHECK(f.count == 0); /* FIN enqueue failed; the timer owns the deferred close. */
+    size_t copied = SIZE_MAX;
+    CHECK(dp_tcp_write(f.core, stream, (const uint8_t *)"x", 1, &copied) == DP_PEER_CLOSED);
+    CHECK(copied == 0);
+    CHECK(dp_core_get_stats(f.core, &after) == DP_OK && after.failure == DP_OK);
+    CHECK(after.heap_used == before.heap_used && after.tcp_active == before.tcp_active &&
+          after.tcp_listeners == before.tcp_listeners);
+    for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == operation_pools[pool]);
+
+    advance(&f, 500); /* tcp_slowtmr retries the FIN after the one-shot failure is removed. */
+    struct frame *fin = find(&f, 6, -1, 0);
+    CHECK(fin && (fin->bytes[67] & 1));
+    CHECK(dp_tcp_close(f.core, stream) == DP_OK);
+    CHECK(dp_tcp_listener_close(f.core, listener) == DP_OK);
+    advance(&f, 500);
+    CHECK(dp_core_get_stats(f.core, &after) == DP_OK && after.failure == DP_OK);
+    CHECK(after.heap_used == baseline.heap_used && after.tcp_active == baseline.tcp_active &&
+          after.tcp_listeners == baseline.tcp_listeners);
+    for (unsigned pool = 0; pool < MEMP_MAX; ++pool) CHECK(lwip_stats.memp[pool]->used == baseline_pools[pool]);
+    close_core(&f);
+    printf("TCP shutdown FIN allocation failure deferred and recovered\n");
+}
+#endif
+static void test_tx_failed(void) {
+    struct fixture f;
+    open_core(&f, 1);
+    f.ready = -1;
+    f.now = 1000;
+    CHECK(dp_core_poll(f.core) == DP_LINK_IO);
+    dp_stats stats;
+    CHECK(dp_core_get_stats(f.core, &stats) == DP_OK);
+    CHECK(stats.tx_failed > 0 && stats.tx_accepted == 0 && stats.failure == DP_LINK_IO);
+    close_core(&f);
+}
+static int reenter(void *arg) {
+    struct fixture *f = arg;
+    CHECK(dp_core_poll(f->core) == DP_REENTRANT);
+    return 0;
+}
+static void test_api(void) {
+    struct fixture f;
+    open_core(&f, 0);
+    CHECK(dp_core_abi_version() == 1);
+    CHECK(dp_core_execute(f.core, reenter, &f) == DP_OK);
+    CHECK(dp_core_next_timeout(f.core, NULL) == DP_INVALID_ARGUMENT);
+    CHECK(dp_core_address_state(f.core, NULL) == DP_INVALID_ARGUMENT);
+    f.now = 100;
+    CHECK(dp_core_poll(f.core) == DP_OK);
+    f.now = 50;
+    CHECK(dp_core_poll(f.core) == DP_CLOCK_REVERSED);
+    dp_stats stats;
+    CHECK(dp_core_get_stats(f.core, &stats) == DP_OK);
+    CHECK(stats.failure == DP_CLOCK_REVERSED);
+    close_core(&f);
+}
+#ifdef _WIN32
+static DWORD WINAPI wrong_thread(void *arg) {
+#else
+static void *wrong_thread(void *arg) {
+#endif
+    dp_core *core = arg;
+    CHECK(dp_core_poll(core) == DP_WRONG_THREAD);
+    CHECK(dp_core_destroy(&core) == DP_WRONG_THREAD && core == arg);
+    return 0;
+}
+static void test_thread(void) {
+    struct fixture f;
+    open_core(&f, 0);
+#ifdef _WIN32
+    HANDLE thread = CreateThread(NULL, 0, wrong_thread, f.core, 0, NULL);
+    CHECK(thread && WaitForSingleObject(thread, 3000) == WAIT_OBJECT_0);
+    CloseHandle(thread);
+#else
+    pthread_t thread;
+    CHECK(pthread_create(&thread, NULL, wrong_thread, f.core) == 0);
+    CHECK(pthread_join(thread, NULL) == 0);
+#endif
+    close_core(&f);
+}
+int main(int argc, char **argv) {
+    CHECK(argc == 2 || (argc == 3 && !strcmp(argv[1], "core_timer_allocation_failure")));
+    if (!strcmp(argv[1], "ndp"))
+        test_ndp();
+    else if (!strcmp(argv[1], "dad"))
+        test_dad();
+    else if (!strcmp(argv[1], "tcp"))
+        test_tcp();
+    else if (!strcmp(argv[1], "tcp_large_refused"))
+        test_tcp_large_refused();
+    else if (!strcmp(argv[1], "tcp_endpoint"))
+        test_tcp_endpoint();
+    else if (!strcmp(argv[1], "tcp_backpressure"))
+        test_tcp_backpressure();
+    else if (!strcmp(argv[1], "tcp_endpoint_limits"))
+        test_tcp_endpoint_limits();
+    else if (!strcmp(argv[1], "tcp_half_open_capacity"))
+        test_tcp_half_open_capacity();
+    else if (!strcmp(argv[1], "tcp_half_open_pool_exhaustion"))
+        test_tcp_half_open_pool_exhaustion();
+    else if (!strcmp(argv[1], "tcp_endpoint_lifecycle"))
+        test_tcp_endpoint_lifecycle();
+    else if (!strcmp(argv[1], "tcp_write"))
+        test_tcp_write();
+    else if (!strcmp(argv[1], "tcp_half_close"))
+        test_tcp_half_close();
+    else if (!strcmp(argv[1], "tcp_write_io"))
+        test_tcp_write_io();
+    else if (!strcmp(argv[1], "tcp_shutdown_pressure"))
+        test_tcp_shutdown_pressure();
+    else if (!strcmp(argv[1], "tcp_connect"))
+        test_tcp_connect();
+    else if (!strcmp(argv[1], "tcp_graceful_close"))
+        test_tcp_graceful_close();
+    else if (!strcmp(argv[1], "tcp_graceful_pressure"))
+        test_tcp_graceful_pressure();
+    else if (!strcmp(argv[1], "tcp_graceful_failure"))
+        test_tcp_graceful_failure();
+    else if (!strcmp(argv[1], "tcp_liveness"))
+        test_tcp_liveness();
+    else if (!strcmp(argv[1], "tcp_reuse"))
+        test_tcp_reuse();
+    else if (!strcmp(argv[1], "tcp_connect_cancel"))
+        test_tcp_connect_cancel();
+    else if (!strcmp(argv[1], "tcp_connect_limits"))
+        test_tcp_connect_limits();
+    else if (!strcmp(argv[1], "tcp_connect_retry"))
+        test_tcp_connect_retry();
+    else if (!strcmp(argv[1], "udp"))
+        test_udp();
+    else if (!strcmp(argv[1], "ipv6_unjoined_multicast_flood"))
+        test_ipv6_unjoined_multicast_flood();
+    else if (!strcmp(argv[1], "udp_queue_age"))
+        test_udp_queue_age();
+    else if (!strcmp(argv[1], "lifecycle_soak"))
+        test_lifecycle_soak();
+    else if (!strcmp(argv[1], "lifecycle"))
+        test_lifecycle();
+    else if (!strcmp(argv[1], "not_ready"))
+        test_not_ready();
+    else if (!strcmp(argv[1], "tx_not_ready"))
+        test_tx_not_ready();
+    else if (!strcmp(argv[1], "tx_failed"))
+        test_tx_failed();
+    else if (!strcmp(argv[1], "fragments"))
+        test_fragments();
+    else if (!strcmp(argv[1], "ndp_options"))
+        test_ndp_options();
+    else if (!strcmp(argv[1], "ndp_na_solicited_multicast"))
+        test_ndp_na_rejects_solicited_multicast();
+    else if (!strcmp(argv[1], "ndp_na_zero_length_option"))
+        test_ndp_na_rejects_zero_length_trailing_option();
+    else if (!strcmp(argv[1], "ndp_na_unspecified_source"))
+        test_ndp_na_rejects_unspecified_source();
+    else if (!strcmp(argv[1], "ndp_ns_zero_length_option"))
+        test_ndp_ns_rejects_zero_length_trailing_option();
+    else if (!strcmp(argv[1], "ndp_ns_unspecified_destination"))
+        test_ndp_ns_unspecified_source_requires_solicited_destination();
+    else if (!strcmp(argv[1], "ndp_ns_unspecified_slla"))
+        test_ndp_ns_unspecified_source_rejects_source_ll_option();
+    else if (!strcmp(argv[1], "ndp_ra_zero_length_option"))
+        test_ndp_ra_rejects_zero_length_option_before_route_change();
+    else if (!strcmp(argv[1], "ndp_redirect_target"))
+        test_ndp_redirect_rejects_invalid_target();
+    else if (!strcmp(argv[1], "ndp_redirect_source"))
+        test_ndp_redirect_rejects_non_router_source();
+    else if (!strcmp(argv[1], "ndp_redirect_zero_length_option"))
+        test_ndp_redirect_rejects_zero_length_option();
+    else if (!strcmp(argv[1], "pmtu"))
+        test_pmtu();
+    else if (!strcmp(argv[1], "udp_endpoint"))
+        test_udp_endpoint();
+    else if (!strcmp(argv[1], "udp_endpoint_fragments"))
+        test_udp_endpoint_fragments();
+    else if (!strcmp(argv[1], "udp_extension_fragments"))
+        test_udp_extension_fragments();
+#ifdef DP_WRAP_ALLOCATION
+    else if (!strcmp(argv[1], "udp_allocation_failures"))
+        test_udp_allocation_failures();
+    else if (!strcmp(argv[1], "udp_receive_input_allocation_failure"))
+        test_udp_receive_input_allocation_failure();
+    else if (!strcmp(argv[1], "udp_bind_allocation_failures"))
+        test_udp_bind_allocation_failures();
+    else if (!strcmp(argv[1], "core_allocation_failures"))
+        test_core_allocation_failures();
+    else if (!strcmp(argv[1], "prototype_context_allocation_failure"))
+        test_prototype_context_allocation_failure();
+    else if (!strcmp(argv[1], "core_timer_allocation_failure")) {
+        CHECK(argc == 3);
+        test_core_timer_allocation_failure((size_t)strtoul(argv[2], NULL, 10));
+    }
+    else if (!strcmp(argv[1], "core_timer_persistent_allocation_failure"))
+        test_core_timer_persistent_allocation_failure();
+    else if (!strcmp(argv[1], "cyclic_timer_reschedule_recovery"))
+        test_cyclic_timer_reschedule_failure(0);
+    else if (!strcmp(argv[1], "cyclic_timer_reschedule_persistent_failure"))
+        test_cyclic_timer_reschedule_failure(1);
+    else if (!strcmp(argv[1], "one_shot_timeout_allocation_failure"))
+        test_one_shot_timeout_allocation_failure();
+    else if (!strcmp(argv[1], "prototype_echo_malloc_failure"))
+        test_prototype_echo_malloc_failure();
+    else if (!strcmp(argv[1], "nd6_queue_allocation_failure"))
+        test_nd6_queue_allocation_failure();
+    else if (!strcmp(argv[1], "reassembly_quota_evicts_oldest"))
+        test_reassembly_quota_evicts_oldest_context();
+    else if (!strcmp(argv[1], "reassembly_context_quota_evicts_oldest"))
+        test_reassembly_context_quota_evicts_oldest();
+    else if (!strcmp(argv[1], "reassembly_context_allocation_failure_recovers"))
+        test_reassembly_context_allocation_failure_recovers();
+    else if (!strcmp(argv[1], "reassembly_context_allocation_failure_without_victim"))
+        test_reassembly_context_allocation_failure_without_victim();
+    else if (!strcmp(argv[1], "tcp_listen_allocation_failures"))
+        test_tcp_listen_allocation_failures();
+    else if (!strcmp(argv[1], "tcp_receive_allocation_failures"))
+        test_tcp_receive_allocation_failures();
+    else if (!strcmp(argv[1], "tcp_write_allocation_failures"))
+        test_tcp_write_allocation_failures();
+    else if (!strcmp(argv[1], "tcp_write_unsent_append_allocation_failures"))
+        test_tcp_write_unsent_append_allocation_failures();
+    else if (!strcmp(argv[1], "tcp_connect_allocation_failures"))
+        test_tcp_connect_allocation_failures();
+    else if (!strcmp(argv[1], "tcp_accept_allocation_failures"))
+        test_tcp_accept_allocation_failures();
+    else if (!strcmp(argv[1], "tcp_syn_allocation_failures"))
+        test_tcp_syn_allocation_failures();
+    else if (!strcmp(argv[1], "tcp_timer_allocation_failures"))
+        test_tcp_timer_allocation_failures();
+    else if (!strcmp(argv[1], "tcp_shutdown_fin_allocation_failure"))
+        test_tcp_shutdown_fin_allocation_failure();
+    else if (!strcmp(argv[1], "tcp_graceful_close_error_reclaims_endpoint"))
+        test_tcp_graceful_close_error_reclaims_endpoint();
+#endif
+    else if (!strcmp(argv[1], "api"))
+        test_api();
+    else if (!strcmp(argv[1], "thread"))
+        test_thread();
+    else if (!strcmp(argv[1], "malformed"))
+        test_malformed();
+    else
+        return 2;
+    printf("PASS %s\n", argv[1]);
+    return 0;
+}

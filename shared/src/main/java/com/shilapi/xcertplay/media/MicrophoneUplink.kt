@@ -13,10 +13,8 @@ import com.shilapi.xcertplay.airplay.MicrophoneConfig
 import com.shilapi.xcertplay.airplay.MicrophoneCounters
 import com.shilapi.xcertplay.airplay.MicrophonePacketizer
 import java.io.Closeable
-import java.net.DatagramPacket
-import java.net.DatagramSocket
-import java.net.InetAddress
-import java.net.InetSocketAddress
+import com.shilapi.xcertplay.network.backend.*
+import com.shilapi.xcertplay.network.backend.system.EndpointOwner
 import java.util.concurrent.atomic.AtomicBoolean
 import com.shilapi.xcertplay.telecom.PhoneAudioRoute
 
@@ -53,11 +51,12 @@ internal class MicrophoneUplink(
         onDiagnostic(message)
     })
     @Volatile private var recorder: AudioRecord? = null
-    @Volatile private var socket: DatagramSocket? = null
+    @Volatile private var socket: UdpEndpoint? = null
     @Volatile private var opusEncoder: MicrophoneOpusEncoder? = null
     @Volatile private var effects: List<AudioEffect> = emptyList()
     @Volatile private var echoCanceller: CallEchoCanceller? = null
     private var thread: Thread? = null
+    @Volatile private var networkOwner: EndpointOwner? = null
 
     fun start(): Boolean {
         if (!running.compareAndSet(false, true)) return true
@@ -128,12 +127,11 @@ internal class MicrophoneUplink(
             return false
         }
 
+        val nextNetwork = EndpointOwner(config.network, "airplay-microphone", config.host)
         val nextSocket = try {
-            DatagramSocket(null).apply {
-                reuseAddress = true
-                bind(InetSocketAddress(InetAddress.getByName("::"), 0))
-            }
+            nextNetwork.bindUdp(nextNetwork.network.wildcard())
         } catch (error: Exception) {
+            nextNetwork.close()
             Log.e(TAG, "microphone socket creation failed", error)
             stats.failure(MicrophoneFailureStage.SOCKET_CREATION, error)
             nextRecorder.release()
@@ -143,6 +141,7 @@ internal class MicrophoneUplink(
         }
 
         recorder = nextRecorder
+        networkOwner = nextNetwork
         socket = nextSocket
         opusEncoder = nextEncoder
         return try {
@@ -277,7 +276,7 @@ internal class MicrophoneUplink(
         }
     }
 
-    private fun capture(recorder: AudioRecord, socket: DatagramSocket) {
+    private fun capture(recorder: AudioRecord, socket: UdpEndpoint) {
         runCatching { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO) }
         val frame = ByteArray(config.frameBytes)
         val readBuffer = ByteArray(maxOf(frame.size, MIN_READ_BYTES))
@@ -389,7 +388,7 @@ internal class MicrophoneUplink(
         false
     }
 
-    private fun sendFrame(socket: DatagramSocket, counters: MicrophoneCounters, frame: ByteArray) {
+    private fun sendFrame(socket: UdpEndpoint, counters: MicrophoneCounters, frame: ByteArray) {
         val bodies = if (config.codec == AudioCodecKind.OPUS) {
             opusEncoder?.encode(frame).orEmpty()
         } else {
@@ -407,7 +406,7 @@ internal class MicrophoneUplink(
     }
 
     private fun sendPacket(
-        socket: DatagramSocket,
+        socket: UdpEndpoint,
         counters: MicrophoneCounters,
         body: ByteArray,
         samples: Int,
@@ -420,7 +419,7 @@ internal class MicrophoneUplink(
             samples = samples,
         )
         try {
-            socket.send(DatagramPacket(packet, packet.size, config.host, config.port))
+            socket.send(packet, NetworkEndpoint(config.host.address, config.port, socket.localEndpoint.linkId))
             stats.sent()
         } catch (error: Exception) {
             stats.sendFailed()
@@ -518,6 +517,8 @@ internal class MicrophoneUplink(
         } catch (_: Exception) {
             // Best effort.
         }
+        networkOwner?.close()
+        networkOwner = null
         val currentEncoder = opusEncoder
         opusEncoder = null
         currentEncoder?.close()

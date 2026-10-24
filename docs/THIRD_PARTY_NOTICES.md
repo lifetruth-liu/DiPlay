@@ -1,5 +1,16 @@
 # Credits and license notices
 
+## lwIP prototype
+
+DiPlay vendors [lwIP 2.2.1](https://savannah.nongnu.org/projects/lwip/) at commit
+`77dcd25a72509eb83f72b033d219b1d40cd8eb95` for the experimental userspace networking work.
+The IPv6 core and Ethernet adapter are compiled into `libdiplay_lwip.so`; this prototype is
+available only when the driver explicitly selects **User-space** in the experimental wired-backend
+setting; **Auto** continues to use the established VPN path. The unmodified [COPYING](../shared/src/main/jni/lwip_backend/third_party/lwip/COPYING)
+and per-file notices are retained. APKs also carry `assets/diplay-lwip-NOTICE.txt`, generated
+from the original copyright/license blocks. [UPSTREAM.md](../shared/src/main/jni/lwip_backend/UPSTREAM.md)
+records provenance and the source-integrity manifest.
+
 ## Receiver
 
 DiPlay is a modified version of [xcertplay by shilapi](https://github.com/shilapi/xcertplay). The upstream receiver is licensed under GNU GPL version 3; the full text is in `LICENSE` and the original README is retained in `docs/UPSTREAM-README.md`.

@@ -2,11 +2,10 @@ package com.shilapi.xcertplay.airplay
 
 import android.util.Log
 import java.io.Closeable
+import com.shilapi.xcertplay.network.backend.*
+import com.shilapi.xcertplay.network.backend.system.EndpointOwner
 import java.io.InputStream
 import java.net.InetAddress
-import java.net.InetSocketAddress
-import java.net.ServerSocket
-import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
@@ -19,7 +18,7 @@ enum class VideoCodec { H264, H265 }
  * (avcC/hvcC) or a ChaCha20-Poly1305 sealed VideoFrame. The key is the DataStream output key
  * and the per-frame nonce is an 8-byte little-endian counter.
  */
-class ScreenStream(private val key: ByteArray, private val onDiagnostic: (String) -> Unit = {}) : Closeable {
+class ScreenStream(private val key: ByteArray, private val onDiagnostic: (String) -> Unit = {}, network: SessionNetwork? = null) : Closeable {
     interface Listener {
         fun onCodec(codec: VideoCodec) {}
         fun onConfig(codecData: ByteArray) {}
@@ -32,22 +31,22 @@ class ScreenStream(private val key: ByteArray, private val onDiagnostic: (String
         fun onClosed(cause: Throwable?) {}
     }
 
+    private val transport = EndpointOwner(network, "airplay-screen")
+    private val sessionNetwork get() = transport.network
     private val closed = AtomicBoolean(false)
     private val frameCounter = AtomicLong(0)
     private val firstFrameLogged = AtomicBoolean(false)
-    private var server: ServerSocket? = null
-    private var socket: Socket? = null
+    private var server: TcpListener? = null
+    private var socket: TcpStream? = null
     private var thread: Thread? = null
     @Volatile private var listener: Listener = object : Listener {}
 
     fun listen(listener: Listener): Int {
         this.listener = listener
-        val bound = ServerSocket()
-        bound.reuseAddress = true
-        bound.bind(InetSocketAddress(InetAddress.getByName("::"), 0))
+        val bound = transport.listen(sessionNetwork.wildcard(), reuseAddress = true)
         server = bound
         thread = Thread({ accept(bound) }, "airplay-screen").apply { isDaemon = true; start() }
-        return bound.localPort
+        return bound.localEndpoint.port
     }
 
     override fun close() {
@@ -55,23 +54,26 @@ class ScreenStream(private val key: ByteArray, private val onDiagnostic: (String
         safeClose(socket)
         safeClose(server)
         thread?.interrupt()
+        transport.close()
     }
 
-    private fun accept(bound: ServerSocket) {
+    private fun accept(bound: TcpListener) {
         try {
-            val accepted = bound.accept()
+            val accepted = transport.accept(bound)
+            if (closed.get()) { accepted.close(); return }
             socket = accepted
+            if (closed.get()) { accepted.close(); return }
             run(accepted)
         } catch (error: Exception) {
             if (!closed.get()) listener.onClosed(error)
         }
     }
 
-    private fun run(sock: Socket) {
+    private fun run(sock: TcpStream) {
         var failure: Throwable? = null
         val stats = StreamReceiveStats("video", onDiagnostic)
         try {
-            val input = sock.getInputStream()
+            val input = sock.inputStream()
             while (!closed.get()) {
                 stats.reading()
                 val header = readFully(input, HEADER_LEN) ?: break

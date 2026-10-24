@@ -76,7 +76,7 @@ class ClusterContentTest {
     }
 
     private fun eventReady(session: AirPlaySession, event: EventSocket = EventSocket()): EventSocket {
-        for ((name, value) in listOf("eventSocket" to event, "eventCipher" to ControlCipher(ByteArray(32), ByteArray(32)))) {
+        for ((name, value) in listOf("eventSocket" to (session.network as com.shilapi.xcertplay.network.backend.system.SystemSessionNetwork).adopt(event), "eventCipher" to ControlCipher(ByteArray(32), ByteArray(32)))) {
             session.javaClass.getDeclaredField(name).apply { isAccessible = true }.set(session, value)
         }
         return event

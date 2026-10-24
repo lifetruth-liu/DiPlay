@@ -25,6 +25,7 @@ import com.shilapi.xcertplay.adb.LocalAdb
 import com.shilapi.xcertplay.host.R
 import com.shilapi.xcertplay.orchestration.WirelessHotspotMode
 import com.shilapi.xcertplay.orchestration.CarPlayController
+import com.shilapi.xcertplay.network.backend.WiredBackendPreference
 import com.shilapi.xcertplay.media.AndroidMediaSink
 import java.time.Duration
 import java.nio.file.Files
@@ -780,6 +781,8 @@ class AdaptiveSettingsUiTest {
         assertFalse(text(R.string.settings_ambient_title) in vehicle)
         assertFalse(text(R.string.settings_ambient_title) in display)
         assertTrue(text(R.string.side_panel) in advanced)
+        assertTrue(text(R.string.settings_wired_backend_title) in advanced)
+        assertFalse(text(R.string.settings_wired_backend_title) in connection)
         assertTrue(display.any { it.startsWith(text(R.string.settings_app_appearance)) })
         assertFalse(audio.any { it.startsWith(text(R.string.settings_app_appearance)) })
         assertFalse(vehicle.any { it.startsWith(text(R.string.settings_app_appearance)) })
@@ -877,6 +880,38 @@ class AdaptiveSettingsUiTest {
             shadowOf(Looper.getMainLooper()).idle()
 
             assertEquals(UsbChargingCurrent.LOW, AirPlayPersistence.loadUsbChargingCurrent(context))
+            assertTrue(PendingReconnect.isPending(session))
+            assertEquals(0, stops)
+            assertSame(session, CarPlayBackgroundSession.snapshot()?.controller)
+        } finally {
+            CarPlayBackgroundSession.clear()
+            PendingReconnect.clear()
+        }
+    }
+
+    @Test fun wiredBackendChoiceIsSavedForNextConnectionAndKeepsTheActiveSession() {
+        val screen = openSettings()
+        val session = mock(CarPlayController::class.java)
+        var stops = 0
+        CarPlayBackgroundSession.store(session, mock(AndroidMediaSink::class.java), 800, 480, Any(),
+            CarPlaySessionDisplay(800, 480, Surface.ROTATION_0, false, false, 800, 480)) { stops++ }
+        CarPlayBackgroundSession.active = true
+        try {
+            PendingReconnect.clear()
+            ReflectionHelpers.setField(screen, "settingsCategory", SettingsCategory.ADVANCED)
+            ReflectionHelpers.callInstanceMethod<Unit>(screen, "render")
+            val row = texts(screen).single {
+                it.text.startsWith("${screen.getString(R.string.settings_wired_backend_mode)} · ")
+            }
+            assertTrue(row.text.toString().endsWith(screen.getString(R.string.settings_wired_backend_auto)))
+            row.performClick()
+            val dialog = ShadowAlertDialog.getLatestAlertDialog()
+            assertEquals(screen.getString(R.string.save), dialog.getButton(AlertDialog.BUTTON_POSITIVE).text.toString())
+            shadowOf(dialog).clickOnItem(WiredBackendPreference.USERSPACE.ordinal)
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick()
+            shadowOf(Looper.getMainLooper()).idle()
+
+            assertEquals(WiredBackendPreference.USERSPACE, AirPlayPersistence.loadWiredBackendPreference(context))
             assertTrue(PendingReconnect.isPending(session))
             assertEquals(0, stops)
             assertSame(session, CarPlayBackgroundSession.snapshot()?.controller)

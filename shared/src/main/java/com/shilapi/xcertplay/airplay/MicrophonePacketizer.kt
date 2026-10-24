@@ -1,6 +1,7 @@
 package com.shilapi.xcertplay.airplay
 
 import java.net.InetAddress
+import com.shilapi.xcertplay.network.backend.SessionNetwork
 
 /** Everything one captured microphone stream needs to send samples to the phone. */
 data class MicrophoneConfig(
@@ -21,6 +22,7 @@ data class MicrophoneConfig(
      * rule. The report's "Audio: rtp clock" line measures the iPhone's own clock for each stream.
      */
     val opusClockRate: Int = OPUS_CAPTURE_RATE,
+    val network: SessionNetwork? = null,
 ) {
     val samplesPerPacket: Int
         get() = if (codec == AudioCodecKind.OPUS) {

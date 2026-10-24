@@ -1,0 +1,96 @@
+# 有线通道审计
+
+审计基线：`143f4674`，2026-10-21。下表来自源码调用链，**不是设备抓包结论**。
+路径相对于 `shared/src/main/java/com/shilapi/xcertplay/`。
+
+2026-10-22 宿主迁移：下表主控制监听和会话集合已从 `CarPlayVpnService` 移入
+`network/AirPlaySessionHost.kt`。普通 `CarPlaySessionService` 持有宿主；无线绑定此服务，
+有线 VPN 绑定普通服务和 VPN 服务，后者只保留 TUN/NCM 资源并取得宿主租约。
+本次协议迁移后，宿主显式注入 `SessionNetwork`，主控制、事件、保活、全部媒体、
+NTP 和麦克风均使用端点接口。默认仍是系统后端；没有用户态启用入口。
+VPN Owner 与宿主 Lease 独立，旧控制器销毁不会关闭新监听。
+
+| 通道 / 位置 | 方向、地址和端口 | 通告、所有者及内核依赖 | 验证 |
+| --- | --- | --- | --- |
+| 主控制 `network/AirPlaySessionHost.kt` | iPhone → TCP listener；有线 scoped link-local IPv6；首选 config.port，冲突重选 | `CarPlayController.runStack` 用 `boundPort()` 写入 `Iap2WiredCarPlayEndpoint`；host 关闭网络，session 借用；系统适配器管理 scope | T01、C01 |
+| 事件 `airplay/AirPlaySession.kt` | iPhone → TCP；`::`、临时端口 | SETUP `eventPort`；session 关闭；系统 Socket 与加密流 | C02、T04 |
+| 低功耗保活 `airplay/AirPlaySession.kt` | iPhone → UDP；`::`、临时端口 | SETUP `keepAlivePort`，仅协商需要时开启；session 关闭 | C02、T06 |
+| 视频 `airplay/ScreenStream.kt` | iPhone → TCP；`::`、临时端口 | stream SETUP `dataPort`；ScreenStream 关闭 listener/accepted socket | C03、T04 |
+| 音频 `airplay/AudioStream.kt` | iPhone → UDP data/control；`::`、两个临时端口 | stream SETUP `dataPort` / `controlPort`；AudioStream 关闭 | C04、T06 |
+| 缓冲音频 `airplay/BufferedAudioStream.kt` | iPhone → TCP；与控制 peer 同地址族 wildcard、构造时分配临时端口 | stream SETUP `dataPort`；BufferedAudioStream 关闭；保留提前分配及 peer 字节/链路校验 | C04、T05 |
+| 时间 `airplay/NtpClock.kt` | 双向 UDP；`::`、临时端口；远端 timingPort | SETUP `timingPort`；NtpClock 关闭；InetSocketAddress 来源和单调时间 | C05、T06 |
+| 麦克风 `media/MicrophoneUplink.kt` | Android → UDP；向 config.host/config.port 发送 | 对端协商的媒体配置；MicrophoneUplink 关闭；录音线程不得运行栈核心 | C05、T06 |
+| iAP 数据流 `airplay/IapTunnel.kt` | iPhone → TCP；IPv4 wildcard 或传入 IPv6，另尝试同端口另一地址族 | stream SETUP `dataPort`；IapTunnel 关闭；双栈兼容不能凭假设删去 | C06、T01 |
+| 视频设置 `airplay/VideoSettingsChannel.kt` | iPhone → TCP；临时端口 | stream SETUP `dataPort`；channel 关闭；发送需串行化 | C07、T07 |
+| 发现 `network/CarPlayBonjour.kt` | 无线 mDNS、TCP probe；系统网络地址 | 控制器无线启动分支创建 JmDNS；不在当前 `runStack` 有线启动调用链；CarPlayBonjour 关闭 | C08、无线回归 |
+
+主连接 `AirPlaySession.peerAddress` 从端点的真实 peer 字节传播到 timing、媒体和控制通道；
+`AirPlayTcpAccepted.isInternalAirPlayPeer` 根据 peer/local 判断内部无线探测。
+这些身份必须保留为协议端点，不能以 loopback 代理地址替代。
+`TcpLiveness` 对主连接用 ParcelFileDescriptor / android.system.Os 配置保活；
+只有系统后端可以调用它，虚拟端点必须自行实现相同能力。
+
+## 当前源码验证
+
+`ProtocolNetworkInjectionTest` 使用系统接口不存在的虚拟 IPv6 地址，验证主控制 GET /info、
+SETUP 的 event/timing/keepalive 端口，以及视频、UDP 音频、缓冲音频、iAP 双族监听和
+视频设置的通告端口均来自同一注入网络；麦克风协商携带该网络，录音发送也由虚拟端点接收。
+没有使用 loopback 代理或 Socket 继承来伪装虚拟端点。旧 Socket 构造只保留为显式系统兼容入口。
+
+`EndpointOwner` 对借用网络的通道单独跟踪 listener/UDP/accepted TCP，关闭只释放其端点；
+`EndpointOwnerTest` 检查关闭后迟到发布的 bind/accept 结果被关闭而非泄漏。
+iAP EOF 后释放已结束连接的引用，避免重连积累。控制会话初始化失败也必须进入统一关闭路径。
+
+系统适配器保留 TCP noDelay/keepalive/abortive close，监听地址复用选项显式传递，
+UDP 音乐缓冲请求及实际容量继续记录。默认宿主从完整地址集合选取唯一非零 IPv6 scope，
+拒绝同一次绑定混用接口；IPv4 首选不能丢失次要 IPv6 接口。该选择有源码测试，
+尚无真机 link-local 验证。
+
+## 启动与关闭
+
+`CarPlayController.runStack` 打开 iAP2 CSM 后调用 `attachVpn`，后者建立 TUN、启动
+IPv6 bridge 并绑定 AirPlay listener，然后通告真实端口和 link-local 地址。
+`NcmUsbBridge.send` 注释和分支说明 StartCarPlaySession 前 bulk OUT 可 NAK/超时；
+因此 LISTENING 必须可以在 USB 可写前完成。现有 send 对未 ready 返回 Unit，
+后续适配必须区分未发送与已发送，短写保留失败语义。
+目前 bridge 接管 NCM，controller 在 attach 成功后放弃本地关闭所有权；抽取宿主时
+必须显式交接，避免用户态与 VPN 两个 reader 消费同一 NCM。
+
+## 未覆盖证据
+
+源码表明有线启动不依赖 JmDNS，但不能证明所有 iOS 协商都不使用 mDNS 或 IPv4。
+尚无脱敏 pcap、VPN 禁用设备、参考设备性能基线；G0 未通过。
+首期不能据此删除 IPv4/双栈兼容或对外声明用户态可用。
+后续需将 pcap 摘要、设备/iOS 与测试编号关联，原始媒体和密钥不入库。
+
+### 2026-10-23 mDNS / IPv4 有线调用链复核
+
+静态调用链进一步确认：`CarPlayController.runStack` 在有线 attach 完成后构造
+`Iap2WiredCarPlayEndpoint`，将 `config.linkLocal` 和实际绑定的 AirPlay 端口传入
+`CarPlayStartSession`；此函数没有创建 `CarPlayBonjour`。Bonjour 服务和 TCP probe
+只在无线启动分支、无线 AirPlay listener attach 后创建。因此当前应用的发现实现是无线专用，
+这只说明有线代码路径不调用 JmDNS，不能推断 iOS 有线协商绝不发送或需要 mDNS。
+
+有线主控制通告的是 link-local IPv6；但 `airplay/IapTunnel.kt` 默认绑定 IPv4 wildcard，
+绑定 IPv6 时还会尝试同端口 IPv4 listener。代码仍主动保留 iAP 数据流的双地址族兼容，
+因此不能据主控制地址推断整个有线 CarPlay 可移除 IPv4。P0.1 的 IPv4/mDNS 项继续保持未完成，
+直到拿到参考 iPhone 的脱敏 NCM/网络抓包，检查 StartCarPlaySession 前后及会话媒体阶段的实际报文。
+
+## 2026-10-23 静态网络调用复核
+
+复核命令覆盖 `shared/src/main/java` 中 `Socket`、`ServerSocket`、`DatagramSocket`、
+channel、`HttpURLConnection`、`VpnService.prepare/establish`、`ParcelFileDescriptor.fromSocket`
+等直接网络入口，并逐项查看调用者。当前 AirPlay 有线数据面由 `AirPlaySessionHost`
+持有注入的 `SessionNetwork`；控制、事件、视频、音频、缓冲音频、iAP、视频设置、NTP
+及麦克风走端点 API。iPhone 会话数据面的直接 TCP/UDP 创建、绑定和 I/O 集中在系统适配器中；
+`TcpLiveness` 也只由系统适配器调用。lwIP 的生产选择仍未启用。
+
+明确的例外路径：`CarPlayBonjour` 的 TCP probe 由无线启动分支创建；`LocalAdb` 连接 ADB
+服务；`BydStarterBridge` 只为显式 ADB 启动的导航测试桥服务；旧 `AirPlaySession(Socket)`
+及 `AirPlayPortSelector` 原始 `ServerSocket` overload 目前只被测试调用。另有可选的
+`RemoteMfiAuthenticationClient` 通过 `HttpURLConnection` 访问配置的远程 MFi 认证服务，
+它不是 iPhone 会话端点，也没有注入 `SessionNetwork`，由 Android 系统网络栈路由；如后续
+要求整个有线启动不产生系统网络流量，须单独决定是否迁移它及其可用性合同。
+
+这只是源码搜索和调用链检查，未验证设备上的实际路由或所有协商分支，不替代 G0/G1、
+全通道测试或最终发布审计。

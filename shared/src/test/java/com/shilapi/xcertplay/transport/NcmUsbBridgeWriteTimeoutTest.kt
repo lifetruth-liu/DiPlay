@@ -3,10 +3,15 @@ package com.shilapi.xcertplay.transport
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbEndpoint
+import com.shilapi.xcertplay.network.backend.NcmFramePort
 import java.util.ArrayDeque
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -52,7 +57,103 @@ class NcmUsbBridgeWriteTimeoutTest {
         assertEquals(listOf(5), NcmWriteReplay.timeouts)
     }
 
-    private fun withBridge(block: (NcmUsbBridge) -> Unit): List<String> {
+    @Test fun explicitResultsNeverCountNotReadyFramesAsSent() {
+        NcmWriteReplay.results.addAll(listOf(-1, 0, NcmWriteReplay.ALL, -1))
+        withBridge { ncm ->
+            assertEquals(NcmSendResult.NotReady, ncm.sendFrame(frame, 100))
+            assertEquals(NcmSendResult.NotReady, ncm.sendFrame(frame, 100))
+            assertEquals(NcmSendResult.Sent, ncm.sendFrame(frame, 100))
+            assertEquals(NcmSendResult.NotReady, ncm.sendFrame(frame, 100))
+            assertTrue(ncm.trafficSummary(null).endsWith("toIphone=1"))
+        }
+    }
+
+    @Test fun aShortWriteFailsWithoutOpeningTheLinkOrCountingDelivery() {
+        NcmWriteReplay.results.add(1)
+        withBridge { ncm ->
+            val result = ncm.sendFrame(frame, 100)
+            assertTrue(result is NcmSendResult.Failed)
+            assertNull(ncm.linkOpenedAtNanos)
+            assertTrue(ncm.trafficSummary(null).endsWith("toIphone=0"))
+        }
+    }
+
+    @Test fun closedBridgeReturnsFailureWithoutTouchingUsb() {
+        withBridge { ncm ->
+            ncm.close()
+            assertTrue(ncm.sendFrame(frame, 100) is NcmSendResult.Failed)
+            assertTrue(NcmWriteReplay.timeouts.isEmpty())
+        }
+    }
+
+    @Test fun detachExceptionReturnsTerminalFailureWithItsCause() {
+        val detached = IllegalStateException("detached")
+        NcmWriteReplay.beforeTransfer = { throw detached }
+        withBridge { ncm ->
+            val result = ncm.sendFrame(frame, 100) as NcmSendResult.Failed
+            assertEquals(detached, result.cause.cause)
+            NcmWriteReplay.beforeTransfer = null
+            assertTrue(ncm.sendFrame(frame, 100) is NcmSendResult.Failed)
+            assertEquals(1, NcmWriteReplay.timeouts.size)
+        }
+    }
+
+    @Test fun closeDuringTheTransferCannotPublishSuccessfulDelivery() {
+        withBridge { ncm ->
+            NcmWriteReplay.beforeTransfer = { ncm.close() }
+            assertTrue(ncm.sendFrame(frame, 100) is NcmSendResult.Failed)
+            assertNull(ncm.linkOpenedAtNanos)
+            assertTrue(ncm.trafficSummary(null).endsWith("toIphone=0"))
+        }
+    }
+
+    @Test fun framePortOwnsTheBridgeAndRejectsOversizedOutputBeforeUsb() {
+        withBridge { ncm ->
+            val port = NcmFramePort(ncm)
+            assertTrue(port.send(ByteArray(1515), 100) is NcmSendResult.Failed)
+            assertTrue(NcmWriteReplay.timeouts.isEmpty())
+            assertEquals(NcmSendResult.Sent, port.send(ByteArray(1514), 100))
+            port.close()
+            assertTrue(ncm.sendFrame(frame, 100) is NcmSendResult.Failed)
+        }
+    }
+
+    @Test fun framePortDoesNotExposeMutableDescriptorMacStorage() {
+        val mac = byteArrayOf(2, 0, 0, 0, 0, 1)
+        withBridge(mac) { ncm ->
+            val port = NcmFramePort(ncm)
+            mac[0] = 9
+            port.hostMac!![0] = 7
+            assertEquals(2.toByte(), port.hostMac!![0])
+        }
+    }
+
+    @Test fun readinessDiagnosticDoesNotHoldTheBridgeStateLock() {
+        val reference = AtomicReference<NcmUsbBridge>()
+        var closedDuringCallback = false
+        var closer: Thread? = null
+        withBridge(onDiagnostic = {
+            val closed = CountDownLatch(1)
+            closer = Thread { reference.get().close(); closed.countDown() }.apply { start() }
+            closedDuringCallback = closed.await(1, TimeUnit.SECONDS)
+        }) { ncm ->
+            reference.set(ncm)
+            ncm.sendFrame(frame, 100)
+        }
+        closer?.join(2_000)
+        assertTrue("diagnostic must allow another thread to close", closedDuringCallback)
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun legacySendKeepsInvalidFrameValidation() {
+        withBridge { it.send(byteArrayOf(), 100) }
+    }
+
+    private fun withBridge(
+        hostMac: ByteArray? = null,
+        onDiagnostic: (String) -> Unit = {},
+        block: (NcmUsbBridge) -> Unit,
+    ): List<String> {
         val connection = ReflectionHelpers.callConstructor(UsbDeviceConnection::class.java,
             ClassParameter.from(UsbDevice::class.java, null))
         fun endpoint(address: Int): UsbEndpoint = ReflectionHelpers.callConstructor(UsbEndpoint::class.java,
@@ -61,7 +162,10 @@ class NcmUsbBridgeWriteTimeoutTest {
             ClassParameter.from(Int::class.javaPrimitiveType, 512),
             ClassParameter.from(Int::class.javaPrimitiveType, 0))
         val diagnostics = mutableListOf<String>()
-        val ncm = NcmUsbBridge(connection, endpoint(0x06), endpoint(0x88), null, emptyList(), null, diagnostics::add)
+        val ncm = NcmUsbBridge(connection, endpoint(0x06), endpoint(0x88), null, emptyList(), hostMac) {
+            diagnostics += it
+            onDiagnostic(it)
+        }
         try { block(ncm) } finally { ncm.close() }
         return diagnostics
     }
@@ -76,13 +180,15 @@ object NcmWriteReplay {
     /** One result per bulkTransfer: a byte count, or [ALL] for the whole frame. */
     val results = ArrayDeque<Int>()
     val timeouts = mutableListOf<Int>()
-    fun reset() { results.clear(); timeouts.clear() }
+    var beforeTransfer: (() -> Unit)? = null
+    fun reset() { results.clear(); timeouts.clear(); beforeTransfer = null }
 }
 
 @Implements(UsbDeviceConnection::class)
 class NcmWriteConnectionShadow {
     @Implementation fun bulkTransfer(endpoint: UsbEndpoint, buffer: ByteArray, length: Int, timeout: Int): Int {
         NcmWriteReplay.timeouts += timeout
+        NcmWriteReplay.beforeTransfer?.invoke()
         return NcmWriteReplay.results.pollFirst()?.takeIf { it != NcmWriteReplay.ALL } ?: length
     }
     @Implementation fun close() = Unit

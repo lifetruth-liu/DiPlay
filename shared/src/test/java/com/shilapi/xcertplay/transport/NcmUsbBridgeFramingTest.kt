@@ -7,6 +7,7 @@ import android.hardware.usb.UsbRequest
 import java.nio.ByteBuffer
 import java.util.ArrayDeque
 import java.util.concurrent.TimeoutException
+import com.shilapi.xcertplay.network.backend.NcmFramePort
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -27,6 +28,38 @@ import org.robolectric.util.ReflectionHelpers.ClassParameter
     shadows = [NcmFramingConnectionShadow::class, NcmFramingRequestShadow::class])
 class NcmUsbBridgeFramingTest {
     @Before fun reset() { NcmFramingReplay.reset() }
+
+    @Test fun aConfiguredReceiveBudgetRejectsExcessDatagramsInsideOneBlock() {
+        val block = Ntb16Codec.build(ByteArray(14), 1)
+        block[16] = 20; block[24] = 28; block[26] = 14 // Alias the first payload in another entry.
+        NcmFramingReplay.chunks.add(block)
+        withBridge { ncm ->
+            ncm.limitReceiveQueue(1, 1514)
+            try { ncm.recv(50); throw AssertionError("queue budget must reject") }
+            catch (_: IphoneUsbException.ResourceLimit) { }
+        }
+    }
+
+    @Test fun aSmallReceiveQueueCanStreamCoalescedBlocksWithoutFailing() {
+        val first = ByteArray(14) { 1 }; val second = ByteArray(14) { 2 }
+        NcmFramingReplay.chunks.add(Ntb16Codec.build(first, 1) + Ntb16Codec.build(second, 2))
+        withBridge { ncm ->
+            ncm.limitReceiveQueue(1, 1514)
+            assertArrayEquals(first, ncm.recv(50))
+            assertArrayEquals(second, ncm.recv(50))
+        }
+        assertEquals(1, NcmFramingReplay.completions)
+    }
+
+    @Test fun thePrototypePortRejectsOversizedFramesBeforeDelivery() {
+        val valid = ByteArray(14) { 9 }
+        NcmFramingReplay.chunks.add(Ntb16Codec.build(ByteArray(1515), 1) + Ntb16Codec.build(valid, 2))
+        withBridge { ncm ->
+            val port = NcmFramePort(ncm)
+            assertArrayEquals(valid, port.recv(50))
+            assertEquals(1L, ncm.rejectedReceiveFrames)
+        }
+    }
 
     @Test fun completeAlignedBlockDoesNotWaitForAnExtraByte() {
         NcmFramingReplay.chunks.add(unpadded(alignedFrame, 1))

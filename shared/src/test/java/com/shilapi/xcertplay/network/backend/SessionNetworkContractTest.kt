@@ -1,0 +1,527 @@
+package com.shilapi.xcertplay.network.backend
+
+import com.shilapi.xcertplay.network.backend.system.SystemSessionNetwork
+import com.shilapi.xcertplay.network.backend.system.EndpointOperation
+import java.util.concurrent.Callable
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import java.net.ServerSocket
+import java.net.InetAddress
+import java.net.Inet6Address
+import java.net.NetworkInterface
+import java.net.Socket
+import java.io.IOException
+import java.io.DataInputStream
+import java.util.Collections
+import org.junit.Assert.*
+import org.junit.Assume.assumeNotNull
+import org.junit.Test
+
+/** Real loopback traffic; no Android or native library substitutes. */
+class SessionNetworkContractTest {
+    @Test fun systemChannelsAndAdoptedSocketsReportRealRemoteReset() {
+        for (adopted in listOf(false, true)) {
+            ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).use { server ->
+                SystemSessionNetwork("reset").use { network ->
+                    val stream = if (adopted) network.adopt(Socket(InetAddress.getByName("127.0.0.1"), server.localPort))
+                        else network.connect(address(network, server.localPort))
+                    stream.use {
+                        server.accept().use { it.setSoLinger(true, 0) }
+                        val target = ByteArray(7) { 9 }
+                        assertEquals(BackendFailure.Kind.PEER_RESET,
+                            assertThrows(BackendFailure::class.java) {
+                                stream.read(target, deadlineMillis = network.clock.nowMillis() + 3000)
+                            }.kind)
+                        assertArrayEquals(ByteArray(7) { 9 }, target)
+                    }
+                }
+            }
+        }
+    }
+
+    @Test fun adoptedSystemSocketUsesEndpointFramingAndPreservesOwnership() {
+        ServerSocket(0, 50, InetAddress.getByName("127.0.0.1")).use { server ->
+            Socket(InetAddress.getByName("127.0.0.1"), server.localPort).use { phone ->
+                phone.soTimeout = 2000
+                val accepted = server.accept()
+                SystemSessionNetwork("adopted").use { network ->
+                    val stream = network.adopt(accepted)
+                    stream.configure(TcpOptions(resetOnClose = true))
+                    assertTrue(accepted.tcpNoDelay)
+                    assertTrue(accepted.keepAlive)
+                    assertEquals(0, accepted.soLinger)
+                    assertEquals(server.localPort, stream.localEndpoint.port)
+                    assertEquals(phone.localPort, stream.remoteEndpoint.port)
+                    phone.getOutputStream().write(255)
+                    assertEquals(255, stream.inputStream().read())
+                    assertEquals(0, stream.read(ByteArray(0)))
+                    stream.outputStream().write(byteArrayOf(9, 1, 2, 3, 9), 1, 3)
+                    val reply = ByteArray(3)
+                    DataInputStream(phone.getInputStream()).readFully(reply)
+                    assertArrayEquals(byteArrayOf(1, 2, 3), reply)
+                    phone.shutdownOutput()
+                    assertEquals(-1, stream.inputStream().read())
+                    assertEquals(BackendFailure.Kind.TIMEOUT, assertThrows(BackendFailure::class.java) {
+                        stream.read(ByteArray(1), deadlineMillis = network.clock.nowMillis())
+                    }.kind)
+                }
+                assertTrue(accepted.isClosed)
+            }
+        }
+    }
+
+    @Test fun closeFailureCannotSkipOtherOwnedEndpoints() {
+        val network = SystemSessionNetwork("close-failure")
+        val failure = IOException("close failed")
+        network.adopt(object : Socket() { override fun close() { throw failure } })
+        val other = Socket()
+        network.adopt(other)
+        assertSame(failure, assertThrows(IOException::class.java) { network.close() })
+        assertTrue(other.isClosed)
+        network.close()
+    }
+
+    @Test fun closeReleasesARegisteredListenerBeforeItsAcceptWorkerCanUnwind() {
+        val registered = CountDownLatch(1)
+        val resume = CountDownLatch(1)
+        val reads = AtomicInteger()
+        val executor = Executors.newSingleThreadExecutor()
+        val clock = MonotonicClock {
+            // The second deadline check occurs after the channel has registered its waiter.
+            if (reads.incrementAndGet() == 2) {
+                registered.countDown()
+                check(resume.await(3, TimeUnit.SECONDS))
+            }
+            1L
+        }
+        SystemSessionNetwork("release", clock = clock).use { network ->
+            try {
+                val listener = network.listen(address(network))
+                val port = listener.localEndpoint.port
+                val waiting = executor.submit<BackendFailure.Kind> {
+                    try { listener.accept(1000); error("accept must cancel") }
+                    catch (failure: BackendFailure) { failure.kind }
+                }
+                assertTrue(registered.await(3, TimeUnit.SECONDS))
+                listener.close()
+                // Cancellation must release the OS port before the blocked worker gets CPU again.
+                ServerSocket(port, 50, InetAddress.getByName("127.0.0.1")).use { assertTrue(it.isBound) }
+                resume.countDown()
+                assertEquals(BackendFailure.Kind.CANCELLED, waiting.get(3, TimeUnit.SECONDS))
+            } finally { resume.countDown(); executor.shutdownNow() }
+        }
+    }
+
+    private fun address(network: SessionNetwork, port: Int = 0) =
+        NetworkEndpoint(byteArrayOf(127, 0, 0, 1), port, network.linkId)
+
+    @Test fun ephemeralPortConflictAndSessionIsolation() {
+        SystemSessionNetwork("first").use { first ->
+            SystemSessionNetwork("first").use { second ->
+                assertNotEquals("A reused label must not reuse a session identity", first.linkId, second.linkId)
+                first.listen(address(first)).use { listener ->
+                    assertTrue(listener.localEndpoint.port in 1..65535)
+                    assertThrows(BackendFailure::class.java) { first.listen(listener.localEndpoint) }
+                    assertThrows(IllegalArgumentException::class.java) {
+                        second.connect(listener.localEndpoint)
+                    }
+                }
+            }
+        }
+    }
+
+    @Test fun duplexBytesEofAndHalfClose() {
+        SystemSessionNetwork("duplex").use { network ->
+            network.listen(address(network)).use { listener ->
+                network.connect(listener.localEndpoint).use { client ->
+                    listener.accept().use { peer ->
+                        val bytes = ByteArray(8193) { (it * 31).toByte() }
+                        client.write(bytes)
+                        client.shutdownOutput()
+                        val received = ArrayList<Byte>()
+                        val chunk = ByteArray(97)
+                        while (true) {
+                            val count = peer.read(chunk, deadlineMillis = network.clock.nowMillis() + 3000)
+                            if (count == -1) break
+                            assertTrue(count > 0)
+                            received.addAll(chunk.take(count))
+                        }
+                        assertArrayEquals(bytes, received.toByteArray())
+                        peer.write(byteArrayOf(42))
+                        assertEquals(1, client.read(chunk))
+                        assertEquals(42, chunk[0].toInt())
+                        assertEquals(network.linkId, peer.remoteEndpoint.linkId)
+                    }
+                }
+            }
+        }
+    }
+
+    @Test fun datagramBoundariesSourceAndOriginalLength() {
+        SystemSessionNetwork("udp").use { network ->
+            network.bindUdp(address(network)).use { receiver ->
+                network.bindUdp(address(network)).use { sender ->
+                    for (size in listOf(0, 1, 1400)) {
+                        sender.send(ByteArray(size) { 7 }, receiver.localEndpoint)
+                        val result = receiver.receive(ByteArray(10), deadlineMillis = network.clock.nowMillis() + 3000)
+                        assertEquals(size, result.originalLength)
+                        assertEquals(minOf(size, 10), result.copiedLength)
+                        assertEquals(size > 10, result.truncated)
+                        assertEquals(sender.localEndpoint, result.source)
+                    }
+                    assertThrows(IllegalArgumentException::class.java) {
+                        sender.send(ByteArray(65528), receiver.localEndpoint)
+                    }
+                }
+            }
+        }
+    }
+
+    @Test fun ipv4UdpUsesTheIpv4PayloadBoundary() {
+        SystemSessionNetwork("udp-ipv4-limit").use { network ->
+            network.bindUdp(address(network)).use { receiver ->
+                network.bindUdp(address(network)).use { sender ->
+                    val payload = ByteArray(65_507) { (it * 37).toByte() }
+                    sender.send(payload, receiver.localEndpoint, network.clock.nowMillis() + 3_000)
+                    val actual = ByteArray(payload.size)
+                    val received = receiver.receive(actual, network.clock.nowMillis() + 3_000)
+                    assertEquals(payload.size, received.originalLength)
+                    assertEquals(payload.size, received.copiedLength)
+                    assertArrayEquals(payload, actual)
+
+                    assertThrows(IllegalArgumentException::class.java) {
+                        sender.send(ByteArray(65_508), receiver.localEndpoint,
+                            network.clock.nowMillis() + 3_000)
+                    }
+                }
+            }
+        }
+    }
+
+    @Test fun closeCancelsAcceptReadAndReceiveAndIsIdempotent() {
+        val executor = Executors.newFixedThreadPool(3)
+        try {
+            val network = SystemSessionNetwork("cancel")
+            val listener = network.listen(address(network))
+            val client = network.connect(listener.localEndpoint)
+            val peer = listener.accept()
+            val udp = network.bindUdp(address(network))
+            val tasks = listOf<() -> Unit>(
+                { listener.accept().close() },
+                { peer.read(ByteArray(1)) },
+                { udp.receive(ByteArray(1)) },
+            ).map { operation -> executor.submit(Callable {
+                try { operation(); null } catch (error: BackendFailure) { error.kind }
+            }) }
+            network.close()
+            network.close()
+            tasks.forEach { assertEquals(BackendFailure.Kind.CANCELLED, it.get(3, TimeUnit.SECONDS)) }
+            assertThrows(BackendFailure::class.java) { client.write(byteArrayOf(1)) }
+            assertThrows(BackendFailure::class.java) { network.listen(address(network)) }
+        } finally {
+            executor.shutdownNow()
+        }
+    }
+
+    @Test fun sessionCloseWinsBeforeConnectRegistersItsSocket() {
+        val deadlineEntered = CountDownLatch(1)
+        val resumeDeadline = CountDownLatch(1)
+        val network = SystemSessionNetwork("close-before-register", clock = MonotonicClock {
+            deadlineEntered.countDown()
+            check(resumeDeadline.await(3, TimeUnit.SECONDS))
+            100L
+        })
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            val connecting = executor.submit(Callable {
+                try {
+                    network.connect(address(network, 9), deadlineMillis = 1_000).close()
+                    null
+                } catch (failure: BackendFailure) { failure.kind }
+            })
+            assertTrue(deadlineEntered.await(3, TimeUnit.SECONDS))
+            network.close()
+            resumeDeadline.countDown()
+            assertEquals(BackendFailure.Kind.CANCELLED, connecting.get(3, TimeUnit.SECONDS))
+        } finally {
+            resumeDeadline.countDown()
+            network.close()
+            executor.shutdownNow()
+        }
+    }
+
+    @Test fun sessionCloseWinsAfterListenerBindBeforeEndpointPublication() {
+        assertCloseDuringEndpointPublication("close-after-listen-bind") { network ->
+            network.listen(address(network)).close()
+        }
+    }
+
+    @Test fun sessionCloseWinsAfterUdpBindBeforeEndpointPublication() {
+        assertCloseDuringEndpointPublication("close-after-udp-bind") { network ->
+            network.bindUdp(address(network)).close()
+        }
+    }
+
+    @Test fun sessionCloseWinsAfterTcpConnectBeforeEndpointPublication() {
+        val readyToPublish = CountDownLatch(1)
+        val resumePublication = CountDownLatch(1)
+        val network = SystemSessionNetwork.forTest("close-after-connect", beforePublish = {
+            readyToPublish.countDown()
+            check(resumePublication.await(3, TimeUnit.SECONDS))
+        })
+        val executor = Executors.newFixedThreadPool(2)
+        ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).use { server ->
+            try {
+                val accepted = executor.submit { server.accept().close() }
+                val connecting = executor.submit<BackendFailure.Kind?> {
+                    try { network.connect(address(network, server.localPort)).close(); null }
+                    catch (failure: BackendFailure) { failure.kind }
+                }
+                assertTrue(readyToPublish.await(3, TimeUnit.SECONDS))
+                network.close()
+                resumePublication.countDown()
+                assertEquals(BackendFailure.Kind.CANCELLED, connecting.get(3, TimeUnit.SECONDS))
+                accepted.get(3, TimeUnit.SECONDS)
+            } finally {
+                resumePublication.countDown()
+                network.close()
+                executor.shutdownNow()
+            }
+        }
+    }
+
+    @Test fun sessionCloseWinsAfterAcceptBeforeStreamPublication() {
+        val readyToPublish = CountDownLatch(1)
+        val resumePublication = CountDownLatch(1)
+        val pausePublication = java.util.concurrent.atomic.AtomicBoolean(false)
+        val network = SystemSessionNetwork.forTest("close-after-accept", beforePublish = {
+            if (pausePublication.get()) {
+                readyToPublish.countDown()
+                check(resumePublication.await(3, TimeUnit.SECONDS))
+            }
+        })
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            val listener = network.listen(address(network))
+            Socket(InetAddress.getByName("127.0.0.1"), listener.localEndpoint.port).use {
+                pausePublication.set(true)
+                val accepting = executor.submit<BackendFailure.Kind?> {
+                    try { listener.accept().close(); null }
+                    catch (failure: BackendFailure) { failure.kind }
+                }
+                assertTrue(readyToPublish.await(3, TimeUnit.SECONDS))
+                network.close()
+                resumePublication.countDown()
+                assertEquals(BackendFailure.Kind.CANCELLED, accepting.get(3, TimeUnit.SECONDS))
+            }
+        } finally {
+            resumePublication.countDown()
+            network.close()
+            executor.shutdownNow()
+        }
+    }
+
+    @Test fun systemSessionNetworkUsesARealIpv6LinkLocalScopeWhenAvailable() {
+        val scopedAddress = Collections.list(NetworkInterface.getNetworkInterfaces())
+            .filter { it.isUp && !it.isLoopback }
+            .flatMap { Collections.list(it.inetAddresses) }
+            .filterIsInstance<Inet6Address>()
+            .firstOrNull { it.isLinkLocalAddress && it.scopeId > 0 }
+        assumeNotNull(scopedAddress)
+        val network = SystemSessionNetwork("real-ipv6-scope", scopedAddress!!.scopeId)
+        network.use {
+            val local = NetworkEndpoint(scopedAddress.address, 0, network.linkId)
+            network.listen(local).use { listener ->
+                network.connect(listener.localEndpoint).use { client ->
+                    listener.accept().use { peer ->
+                        val payload = byteArrayOf(0x12, 0x34, 0x56)
+                        client.write(payload)
+                        val received = ByteArray(payload.size)
+                        assertEquals(payload.size,
+                            peer.read(received, deadlineMillis = network.clock.nowMillis() + 3_000))
+                        assertArrayEquals(payload, received)
+                        assertEquals(scopedAddress.address.toList(), peer.localEndpoint.address.toList())
+                        assertEquals(network.linkId, peer.localEndpoint.linkId)
+                    }
+                }
+            }
+            network.bindUdp(local).use { receiver ->
+                network.bindUdp(local).use { sender ->
+                    val payload = byteArrayOf(0x65, 0x66)
+                    sender.send(payload, receiver.localEndpoint)
+                    val received = ByteArray(payload.size)
+                    val datagram = receiver.receive(received,
+                        deadlineMillis = network.clock.nowMillis() + 3_000)
+                    assertArrayEquals(payload, received)
+                    assertEquals(sender.localEndpoint, datagram.source)
+                }
+            }
+        }
+    }
+
+    private fun assertCloseDuringEndpointPublication(
+        label: String,
+        operation: (SystemSessionNetwork) -> Unit,
+    ) {
+        val readyToPublish = CountDownLatch(1)
+        val resumePublication = CountDownLatch(1)
+        val network = SystemSessionNetwork.forTest(label, beforePublish = {
+            readyToPublish.countDown()
+            check(resumePublication.await(3, TimeUnit.SECONDS))
+        })
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            val result = executor.submit(Callable {
+                try {
+                    operation(network)
+                    null
+                } catch (failure: BackendFailure) { failure.kind }
+            })
+            assertTrue(readyToPublish.await(3, TimeUnit.SECONDS))
+            network.close()
+            resumePublication.countDown()
+            assertEquals(BackendFailure.Kind.CANCELLED, result.get(3, TimeUnit.SECONDS))
+        } finally {
+            resumePublication.countDown()
+            network.close()
+            executor.shutdownNow()
+        }
+    }
+
+    @Test fun deadlinesAndInputValidation() {
+        var now = 100L
+        val clock = MonotonicClock { now }
+        assertEquals(50L, Deadline.remainingMillis(150, clock))
+        now = 151
+        assertThrows(BackendFailure::class.java) { Deadline.remainingMillis(150, clock) }
+        assertEquals(0L, Deadline.remainingMillis(0, clock))
+        assertThrows(IllegalArgumentException::class.java) { Deadline.remainingMillis(-1, clock) }
+        assertThrows(IllegalArgumentException::class.java) { NetworkEndpoint(ByteArray(5), 0, "x") }
+        assertThrows(IllegalArgumentException::class.java) { NetworkEndpoint(ByteArray(16), 65536, "x") }
+        SystemSessionNetwork("timeout").use { network ->
+            network.listen(address(network)).use { listener ->
+                val failure = assertThrows(BackendFailure::class.java) {
+                    listener.accept(network.clock.nowMillis())
+                }
+                assertEquals(BackendFailure.Kind.TIMEOUT, failure.kind)
+            }
+        }
+    }
+
+    @Test fun endpointOwnsAddressBytesAndRedactsLogs() {
+        val bytes = ByteArray(16) { it.toByte() }
+        val endpoint = NetworkEndpoint(bytes, 1234, "private-session")
+        bytes[0] = 99
+        endpoint.address[1] = 99
+        assertEquals(0, endpoint.address[0].toInt())
+        assertEquals(1, endpoint.address[1].toInt())
+        assertEquals("IPv6:1234", endpoint.toString())
+    }
+
+    @Test fun blockedWriteIsCancelledAndFullDuplexDoesNotShareALock() {
+        val executor = Executors.newFixedThreadPool(2)
+        try {
+            SystemSessionNetwork("backpressure").use { network ->
+                network.listen(address(network)).use { listener ->
+                    network.connect(listener.localEndpoint).use { client ->
+                        listener.accept().use { peer ->
+                            val entered = CountDownLatch(1)
+                            val writing = executor.submit(Callable {
+                                entered.countDown()
+                                try {
+                                    // Larger than the socket send/receive windows; peer never drains.
+                                    client.write(ByteArray(32 * 1024 * 1024))
+                                    null
+                                } catch (failure: BackendFailure) { failure.kind }
+                            })
+                            assertTrue(entered.await(3, TimeUnit.SECONDS))
+                            peer.write(byteArrayOf(13))
+                            val reading = executor.submit(Callable {
+                                val buffer = ByteArray(1)
+                                assertEquals(1, client.read(buffer, deadlineMillis = network.clock.nowMillis() + 3000))
+                                buffer[0]
+                            })
+                            assertEquals(13.toByte(), reading.get(4, TimeUnit.SECONDS))
+                            client.close()
+                            assertEquals(BackendFailure.Kind.CANCELLED, writing.get(3, TimeUnit.SECONDS))
+                        }
+                    }
+                }
+            }
+        } finally { executor.shutdownNow() }
+    }
+
+    @Test fun resumedConsumerGetsEveryByteUnderBackpressure() {
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            SystemSessionNetwork("resume").use { network ->
+                network.listen(address(network)).use { listener ->
+                    network.connect(listener.localEndpoint).use { client ->
+                        listener.accept().use { peer ->
+                            val expected = ByteArray(4 * 1024 * 1024) { (it * 71).toByte() }
+                            val sending = executor.submit(Callable {
+                                client.write(expected, deadlineMillis = network.clock.nowMillis() + 10000)
+                                client.shutdownOutput()
+                            })
+                            val actual = ByteArray(expected.size)
+                            var offset = 0
+                            while (offset < actual.size) {
+                                val count = peer.read(actual, offset, minOf(16381, actual.size - offset),
+                                    deadlineMillis = network.clock.nowMillis() + 10000)
+                                assertTrue(count > 0)
+                                offset += count
+                            }
+                            assertArrayEquals(expected, actual)
+                            assertEquals(-1, peer.read(ByteArray(1), deadlineMillis = network.clock.nowMillis() + 3000))
+                            sending.get(3, TimeUnit.SECONDS)
+                        }
+                    }
+                }
+            }
+        } finally { executor.shutdownNow() }
+    }
+
+    @Test fun overlappingOperationIsRejectedWithoutWaitingForTheFirst() {
+        val executor = Executors.newSingleThreadExecutor()
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val operation = EndpointOperation(MonotonicClock { 100 })
+        try {
+            val first = executor.submit(Callable {
+                operation.run(0) {
+                    entered.countDown()
+                    assertTrue(release.await(3, TimeUnit.SECONDS))
+                }
+            })
+            assertTrue(entered.await(3, TimeUnit.SECONDS))
+            assertEquals(BackendFailure.Kind.RESOURCE_LIMIT,
+                assertThrows(BackendFailure::class.java) { operation.run(101) {} }.kind)
+            release.countDown()
+            first.get(3, TimeUnit.SECONDS)
+            operation.run(101) {} // lock released after success
+            assertThrows(IllegalStateException::class.java) { operation.run(101) { error("injected") } }
+            operation.run(101) {} // and after failure
+        } finally { release.countDown(); executor.shutdownNow() }
+    }
+
+    @Test fun udpReceivesAndSendsConcurrentlyIncludingEmptyDatagrams() {
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            SystemSessionNetwork("udp-duplex").use { network ->
+                network.bindUdp(address(network)).use { first ->
+                    network.bindUdp(address(network)).use { second ->
+                        val receiving = executor.submit(Callable {
+                            first.receive(ByteArray(1), deadlineMillis = network.clock.nowMillis() + 3000)
+                        })
+                        first.send(ByteArray(0), second.localEndpoint, network.clock.nowMillis() + 3000)
+                        assertEquals(0, second.receive(ByteArray(1), network.clock.nowMillis() + 3000).originalLength)
+                        second.send(byteArrayOf(1), first.localEndpoint)
+                        assertEquals(1, receiving.get(4, TimeUnit.SECONDS).originalLength)
+                    }
+                }
+            }
+        } finally { executor.shutdownNow() }
+    }
+}

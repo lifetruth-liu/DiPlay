@@ -46,6 +46,20 @@ import com.shilapi.xcertplay.mfi.LocalMfiAuthenticationClient
 import com.shilapi.xcertplay.network.CarPlayBonjour
 import com.shilapi.xcertplay.network.diagnosticSummary
 import com.shilapi.xcertplay.network.CarPlayVpnService
+import com.shilapi.xcertplay.network.CarPlaySessionService
+import com.shilapi.xcertplay.network.backend.NcmFramePort
+import com.shilapi.xcertplay.network.backend.BackendDiagnosticFailure
+import com.shilapi.xcertplay.network.backend.BackendDiagnosticSnapshot
+import com.shilapi.xcertplay.network.backend.BackendDiagnosticStage
+import com.shilapi.xcertplay.network.backend.BackendDiagnostics
+import com.shilapi.xcertplay.network.backend.BackendFailure
+import com.shilapi.xcertplay.network.backend.BackendNativeLoadResult
+import com.shilapi.xcertplay.network.backend.BackendRuntimeCounters
+import com.shilapi.xcertplay.network.backend.BackendRuntimeCountersProvider
+import com.shilapi.xcertplay.network.backend.WiredBackend
+import com.shilapi.xcertplay.network.backend.WiredBackendFailure
+import com.shilapi.xcertplay.network.backend.WiredBackendSelector
+import com.shilapi.xcertplay.network.backend.lwip.LwipSessionNetwork
 import com.shilapi.xcertplay.network.LocalOnlyHotspotManager
 import com.shilapi.xcertplay.network.ManualHotspotManager
 import com.shilapi.xcertplay.network.ExistingWifiManager
@@ -142,7 +156,8 @@ sealed class CarPlayStatus {
     data object RunningControl : CarPlayStatus()
     data object ControlEnded : CarPlayStatus()
     data class Failed(val message: String, val wifiResetRequired: Boolean = false,
-        val startupFailure: WirelessStartupFailure? = null) : CarPlayStatus()
+                      val startupFailure: WirelessStartupFailure? = null,
+                      val backendFailure: BackendDiagnosticFailure? = null) : CarPlayStatus()
 }
 
 internal fun isWirelessHandoffInProgress(
@@ -172,6 +187,7 @@ class CarPlayController(
     private val clearPairRecord: () -> Unit = {},
     private val locationProvider: Iap2LocationProvider? = null,
     private val vehicleStatusProvider: com.shilapi.xcertplay.transport.VehicleStatusProvider? = null,
+    private val onWiredBackendSuccess: () -> Unit = {},
 ) : Closeable {
     init {
         require(!config.locationReportingEnabled || locationProvider != null) {
@@ -303,6 +319,15 @@ class CarPlayController(
     @Volatile private var wirelessAirPlayEndpoint: Iap2WirelessCarPlayEndpoint? = null
     @Volatile private var vpnService: CarPlayVpnService? = null
     @Volatile private var vpnBound = false
+    private val vpnOwner = CarPlayVpnService.Owner()
+    private val wiredOwner = CarPlaySessionService.WiredOwner()
+    private val wiredBackendSuccessReported = AtomicBoolean(false)
+    @Volatile private var effectiveWiredBackend: WiredBackend? = null
+    @Volatile private var wiredDiagnosticCountersProvider: BackendRuntimeCountersProvider? = null
+    private val bindingLock = Any()
+    @Volatile private var sessionService: CarPlaySessionService? = null
+    @Volatile private var sessionBound = false
+    private val sessionLatch = CountDownLatch(1)
     private val wirelessHandoffRequested = AtomicBoolean(false)
     private val wirelessTunnelReady = AtomicBoolean(false)
     private val wirelessActiveReported = AtomicBoolean(false)
@@ -321,14 +346,37 @@ class CarPlayController(
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
-            vpnService = (binder as CarPlayVpnService.LocalBinder).service
-            vpnLatch.countDown()
+            synchronized(bindingLock) {
+                if (closed || !vpnBound) { vpnLatch.countDown(); return }
+                vpnService = (binder as CarPlayVpnService.LocalBinder).service
+                vpnLatch.countDown()
+            }
         }
-
         override fun onServiceDisconnected(name: ComponentName) {
-            vpnService = null
-            fail(IphoneUsbException.DeviceUnavailable("CarPlay VPN service disconnected"))
+            synchronized(bindingLock) { vpnService = null; vpnLatch.countDown() }
+            networkServiceDisconnected("CarPlay VPN service disconnected")
         }
+    }
+
+    private val sessionServiceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName, binder: IBinder) {
+            synchronized(bindingLock) {
+                if (closed || !sessionBound) { sessionLatch.countDown(); return }
+                sessionService = (binder as CarPlaySessionService.LocalBinder).service
+                sessionLatch.countDown()
+            }
+        }
+        override fun onServiceDisconnected(name: ComponentName) {
+            synchronized(bindingLock) { sessionService = null; sessionLatch.countDown() }
+            networkServiceDisconnected("CarPlay session service disconnected")
+        }
+    }
+
+    private fun networkServiceDisconnected(message: String) {
+        if (closed) return
+        fail(IphoneUsbException.DeviceUnavailable(message))
+        // Deliver the queued failure before closing, which invalidates ordinary status callbacks.
+        mainHandler.post { close() }
     }
 
     private data class SessionCornerMask(val session: AirPlaySession, val png: ByteArray, val width: Int)
@@ -353,6 +401,10 @@ class CarPlayController(
         }
         override fun onSessionActive(session: AirPlaySession) {
             wiredSessionActive = true
+            if (config.transport == CarPlayTransport.WIRED && effectiveWiredBackend != null) {
+                updateBackendDiagnostics { it.copy(stage = BackendDiagnosticStage.SESSION_ACTIVE) }
+                captureWiredBackendCounters()
+            }
             wiredStartWatchdog?.sessionActive()
             if (currentCornerMask?.session !== session) currentCornerMask = null
             val replacement = activeSession !== session
@@ -381,6 +433,10 @@ class CarPlayController(
                 "AirPlay session active controller=${session.controllerId ?: "unknown"} " +
                     "peer=${session.host}",
             )
+            if (config.transport == CarPlayTransport.WIRED && effectiveWiredBackend == WiredBackend.USERSPACE &&
+                wiredBackendSuccessReported.compareAndSet(false, true)) {
+                runCatching(onWiredBackendSuccess).onFailure { debugLog("wired backend success cache failed", it) }
+            }
             uiListener?.onSessionActive(session)
         }
 
@@ -488,7 +544,7 @@ class CarPlayController(
     }
 
     fun hasActiveAirPlayAttachment(): Boolean = synchronized(lifecycleLock) {
-        !closed && vpnService?.isAttached() == true
+        !closed && sessionService?.isAttached() == true
     }
 
     fun start() {
@@ -669,9 +725,18 @@ class CarPlayController(
         synchronized(wirelessResourceLock) {
             if (closed) return
             closed = true
+            vpnOwner.cancel()
+            wiredOwner.cancel()
             // Order cancellation with address-preference commits and generation replacement.
             wirelessGeneration.incrementAndGet()
             dashboardMapOutputVisible = false
+        }
+        if (config.transport == CarPlayTransport.WIRED && effectiveWiredBackend != null) {
+            captureWiredBackendCounters()
+            updateBackendDiagnostics {
+                if (it.stage == BackendDiagnosticStage.FAILED) it else it.copy(stage = BackendDiagnosticStage.STOPPED)
+            }
+            wiredDiagnosticCountersProvider = null
         }
         firstTcpWatchdog?.terminate()
         wiredStartWatchdog?.terminate()
@@ -690,12 +755,14 @@ class CarPlayController(
         touchExecutor.shutdownNow()
         tunnelExecutor.shutdownNow()
         val service = vpnService
+        val ordinaryService = sessionService
         unbindVpn()
+        unbindSessionService()
         Thread(
             {
                 try {
                     if (config.transport == CarPlayTransport.WIRELESS) {
-                        closeBestEffort("wireless stack") { closeWirelessStack(service) }
+                        closeBestEffort("wireless stack") { closeWirelessStack(ordinaryService) }
                         closeBestEffort("Wi-Fi scan pause") { wifiScanPause?.close() }
                         wifiScanPause = null
                     } else {
@@ -705,7 +772,8 @@ class CarPlayController(
                     closeBestEffort("USBMUX") { mux?.close() }
                     mux = null
                     if (config.transport == CarPlayTransport.WIRED) {
-                        closeBestEffort("VPN/NCM") { service?.detach() }
+                        closeBestEffort("VPN/NCM") { service?.detach(vpnOwner) }
+                        closeBestEffort("userspace NCM") { ordinaryService?.detachWired(wiredOwner) }
                     }
                     closeBestEffort("MFi") { mfiSession?.close() }
                     mfiSession = null
@@ -1397,7 +1465,7 @@ class CarPlayController(
             )
 
             onStatus(CarPlayStatus.AttachingNetwork)
-            val service = awaitVpnService()
+            val service = awaitSessionService()
                 ?: throw IOException("Could not bind the CarPlay AirPlay service")
             synchronized(wirelessResourceLock) {
                 if (isStaleWirelessRun(generation)) return
@@ -1415,10 +1483,8 @@ class CarPlayController(
                         additionalBindAddresses = hotspotInfo.hostAddresses.filter { it != hostAddress },
                     )
                 ) {
-                    CarPlayVpnService.AttachResult.Started -> Unit
-                    CarPlayVpnService.AttachResult.AlreadyStarted ->
-                        throw IOException("Wireless AirPlay transport is already attached")
-                    is CarPlayVpnService.AttachResult.Failed -> {
+                    CarPlaySessionService.AttachResult.Started -> Unit
+                    is CarPlaySessionService.AttachResult.Failed -> {
                         debugLog("wireless AirPlay listener attach failed detail=${service.lastAttachFailure}")
                         throw IOException(result.message)
                     }
@@ -2308,13 +2374,95 @@ class CarPlayController(
 
             val ncmHostMac = ncm.hostMac ?: config.hostMac
             debugLog("ncm using hostMac=${ncmHostMac.macString()}")
-            if (!attachVpn(ncm, ncmHostMac)) {
-                throw IphoneUsbException.DeviceUnavailable("Could not attach the NCM/VPN AirPlay transport")
+            val selector = WiredBackendSelector(
+                config.wiredBackendPreference,
+                // AUTO remains on the established VPN path until a release has passed G0–G6.
+                userspaceValidatedForRelease = false,
+                successCache = config.wiredBackendSuccessCache,
+                stackVersion = WiredBackendSelector.STACK_VERSION,
+                abi = Build.SUPPORTED_ABIS.firstOrNull().orEmpty(),
+            )
+            val backend = selector.begin() ?: throw IllegalStateException("Wired backend attempt was already selected")
+            effectiveWiredBackend = backend
+            BackendDiagnostics.record(
+                BackendDiagnosticSnapshot(
+                    requested = config.wiredBackendPreference,
+                    effective = backend,
+                    attempt = 1,
+                    generation = diagnosticAttempt,
+                    stage = BackendDiagnosticStage.SELECTED,
+                    stackVersion = WiredBackendSelector.STACK_VERSION,
+                    abi = Build.SUPPORTED_ABIS.firstOrNull(),
+                    nativeLoadResult = if (backend == WiredBackend.USERSPACE) BackendNativeLoadResult.PENDING
+                        else BackendNativeLoadResult.NOT_USED,
+                    mtu = 1500,
+                ),
+            )
+            debugLog("wired backend requested=${config.wiredBackendPreference} effective=$backend attempt=1")
+            val attached = when (backend) {
+                WiredBackend.VPN -> {
+                    updateBackendDiagnostics { it.copy(stage = BackendDiagnosticStage.VPN_ATTACH) }
+                    val vpn = attachVpn(ncm, ncmHostMac)
+                    if (vpn.started) {
+                        ncmOwnedLocally = false
+                        true
+                    } else {
+                        if (!vpn.ncmReusable) ncmOwnedLocally = false
+                        val fallback = selector.afterFailure(
+                            backend = WiredBackend.VPN,
+                            failure = vpn.failure ?: WiredBackendFailure.INITIALIZATION,
+                            cancelled = closed,
+                        )
+                        if (fallback == WiredBackend.USERSPACE && vpn.ncmReusable && !closed) {
+                            effectiveWiredBackend = fallback
+                            updateBackendDiagnostics {
+                                it.copy(
+                                    effective = fallback,
+                                    attempt = 2,
+                                    stage = BackendDiagnosticStage.USERSPACE_ATTACH,
+                                    failureCode = null,
+                                    fallbackReason = vpn.failure,
+                                    nativeLoadResult = BackendNativeLoadResult.PENDING,
+                                )
+                            }
+                            debugLog("wired backend fallback requested=AUTO effective=$fallback attempt=2")
+                            ncmOwnedLocally = false
+                            attachWiredUserspace(ncm, ncmHostMac)
+                        } else {
+                            updateBackendDiagnostics {
+                                it.copy(
+                                    stage = BackendDiagnosticStage.FAILED,
+                                    failureCode = diagnosticFailureCode(vpn.failure),
+                                )
+                            }
+                            false
+                        }
+                    }
+                }
+                WiredBackend.USERSPACE -> {
+                    updateBackendDiagnostics { it.copy(stage = BackendDiagnosticStage.USERSPACE_ATTACH) }
+                    // The helper takes responsibility for closing NCM even when construction or attach fails.
+                    ncmOwnedLocally = false
+                    attachWiredUserspace(ncm, ncmHostMac)
+                }
             }
-            ncmOwnedLocally = false
-            debugLog("wired NCM/VPN AirPlay transport attached")
+            if (!attached) {
+                updateBackendDiagnostics {
+                    it.copy(
+                        stage = BackendDiagnosticStage.FAILED,
+                        failureCode = it.failureCode ?: BackendDiagnosticFailure.INITIALIZATION,
+                    )
+                }
+                throw IphoneUsbException.DeviceUnavailable("Could not attach the NCM/${(effectiveWiredBackend ?: backend).name} AirPlay transport")
+            }
+            val activeBackend = checkNotNull(selector.currentBackend())
+            updateBackendDiagnostics { it.copy(stage = BackendDiagnosticStage.NETWORK_ATTACHED) }
+            debugLog("wired NCM/${activeBackend.name} AirPlay transport attached")
             if (closed) {
-                vpnService?.detach()
+                when (activeBackend) {
+                    WiredBackend.VPN -> vpnService?.detach(vpnOwner)
+                    WiredBackend.USERSPACE -> sessionService?.detachWired(wiredOwner)
+                }
                 return
             }
 
@@ -2322,7 +2470,7 @@ class CarPlayController(
                 ?: throw IphoneUsbException.DeviceUnavailable("MFi coprocessor client is unavailable")
             val endpoint = Iap2WiredCarPlayEndpoint(
                 ipv6Addresses = listOf(config.linkLocal),
-                airPlayPort = vpnService?.boundPort() ?: airPlayConfig.port,
+                airPlayPort = wiredAirPlayPort(selector),
                 publicKey = identity.publicKeyHex,
                 sourceVersion = airPlayConfig.sourceVersion,
                 deviceIdentifier = ncmHostMac.macString(),
@@ -2394,9 +2542,23 @@ class CarPlayController(
             )
         } catch (error: Throwable) {
             debugLog("wired bring-up failed", error)
-            if (!ncmOwnedLocally) vpnService?.detach()
+            updateBackendDiagnostics {
+                it.copy(
+                    stage = BackendDiagnosticStage.FAILED,
+                    failureCode = diagnosticFailureCode(error = error),
+                    nativeLoadResult = if (diagnosticFailureCode(error = error) == BackendDiagnosticFailure.NATIVE_UNAVAILABLE)
+                        BackendNativeLoadResult.FAILED else it.nativeLoadResult,
+                )
+            }
+            if (!ncmOwnedLocally) when (effectiveWiredBackend) {
+                WiredBackend.VPN -> vpnService?.detach(vpnOwner)
+                WiredBackend.USERSPACE -> sessionService?.detachWired(wiredOwner)
+                null -> Unit
+            }
             fail(error)
         } finally {
+            captureWiredBackendCounters()
+            wiredDiagnosticCountersProvider = null
             wiredStartWatchdog?.terminate()
             if (ncmOwnedLocally) ncm.close()
         }
@@ -2711,7 +2873,7 @@ class CarPlayController(
         }
     }
 
-    private fun closeWirelessStack(service: CarPlayVpnService? = vpnService, generation: Int? = null) =
+    private fun closeWirelessStack(service: CarPlaySessionService? = sessionService, generation: Int? = null) =
         synchronized(wirelessResourceLock) {
             if (generation != null && generation != wirelessGeneration.get()) return@synchronized
             val owner = firstTcpWatchdog?.listener
@@ -2889,17 +3051,30 @@ class CarPlayController(
         else -> CONTROL_LOOP_TIMEOUT_MILLIS
     }
 
-    private fun attachVpn(ncm: NcmUsbBridge, hostMac: ByteArray): Boolean {
+    private data class VpnAttachOutcome(
+        val started: Boolean,
+        val failure: WiredBackendFailure? = null,
+        val ncmReusable: Boolean = false,
+    )
+
+    private fun attachVpn(ncm: NcmUsbBridge, hostMac: ByteArray): VpnAttachOutcome {
         onStatus(CarPlayStatus.AttachingNetwork)
+        val ordinaryService = awaitSessionService() ?: run {
+            debugLog("wired session service bind failed")
+            return VpnAttachOutcome(false, if (closed) WiredBackendFailure.CANCELLED else WiredBackendFailure.INITIALIZATION,
+                ncmReusable = true)
+        }
         val service = awaitVpnService() ?: run {
             debugLog("wired VPN service bind failed")
-            ncm.close()
-            return false
+            return VpnAttachOutcome(false, if (closed) WiredBackendFailure.CANCELLED else WiredBackendFailure.VPN_UNAVAILABLE,
+                ncmReusable = true)
         }
         debugLog("wired VPN service bound; attaching NCM transport")
         val result = try {
             service.attach(
                 ncm = ncm,
+                host = ordinaryService.host,
+                owner = vpnOwner,
                 linkLocal = config.linkLocal,
                 hostMac = hostMac,
                 config = airPlayConfig,
@@ -2910,25 +3085,104 @@ class CarPlayController(
                 media = media,
             )
         } catch (error: Throwable) {
-            ncm.close()
-            onStatus(CarPlayStatus.Failed(error.message ?: error.javaClass.simpleName))
-            return false
+            return VpnAttachOutcome(false, WiredBackendFailure.INITIALIZATION, ncmReusable = true)
         }
         return when (result) {
             CarPlayVpnService.AttachResult.Started -> {
                 debugLog("wired VPN/NCM transport attach result=started")
-                true
+                VpnAttachOutcome(started = true)
             }
             CarPlayVpnService.AttachResult.AlreadyStarted -> {
                 debugLog("wired VPN/NCM transport attach result=already-started")
                 ncm.close()
-                false
+                VpnAttachOutcome(false, WiredBackendFailure.CANCELLED)
             }
             is CarPlayVpnService.AttachResult.Failed -> {
                 debugLog("wired VPN/NCM transport attach result=failed ${result.message} detail=${service.lastAttachFailure}")
-                ncm.close()
-                onStatus(CarPlayStatus.Failed(result.message))
-                false
+                VpnAttachOutcome(
+                    started = false,
+                    failure = if (result.reason == CarPlayVpnService.AttachFailure.VPN_UNAVAILABLE) {
+                        WiredBackendFailure.VPN_UNAVAILABLE
+                    } else {
+                        WiredBackendFailure.INITIALIZATION
+                    },
+                    ncmReusable = result.ncmReusable,
+                )
+            }
+        }
+    }
+
+    private fun wiredAirPlayPort(selector: WiredBackendSelector): Int =
+        when (checkNotNull(selector.currentBackend())) {
+            WiredBackend.VPN -> vpnService?.boundPort(vpnOwner)
+            WiredBackend.USERSPACE -> sessionService?.boundPort(wiredOwner)
+        } ?: airPlayConfig.port
+
+    /** Takes ownership of NCM at entry and never binds or invokes the VPN service. */
+    private fun attachWiredUserspace(ncm: NcmUsbBridge, hostMac: ByteArray): Boolean {
+        onStatus(CarPlayStatus.AttachingNetwork)
+        val service = awaitSessionService() ?: run {
+            debugLog("wired session service bind failed for user-space backend")
+            ncm.close()
+            return false
+        }
+        var framePort: NcmFramePort? = null
+        var network: LwipSessionNetwork? = null
+        var transferred = false
+        try {
+            val ownedFramePort = NcmFramePort(ncm)
+            framePort = ownedFramePort
+            val linkLocal = InetAddress.getByName(config.linkLocal)
+            require(linkLocal is Inet6Address && linkLocal.isLinkLocalAddress) {
+                "linkLocal must be a link-local IPv6 literal"
+            }
+            val ownedNetwork = LwipSessionNetwork.native(
+                port = ownedFramePort,
+                mac = hostMac,
+                ipv6 = linkLocal.address,
+                linkId = "wired-$diagnosticAttempt",
+            )
+            network = ownedNetwork
+            wiredDiagnosticCountersProvider = ownedNetwork
+            updateBackendDiagnostics {
+                it.copy(nativeLoadResult = BackendNativeLoadResult.LOADED, mtu = 1500)
+            }
+            // attachWiredUserspace consumes and closes the network on every result.
+            transferred = true
+            return when (val result = service.attachWiredUserspace(
+                owner = wiredOwner,
+                network = ownedNetwork,
+                bindAddress = linkLocal,
+                config = airPlayConfig,
+                identity = identity,
+                pairings = pairings,
+                mfi = mfiSession?.client,
+                listener = sessionListener,
+                media = media,
+            )) {
+                CarPlaySessionService.AttachResult.Started -> {
+                    debugLog("wired user-space NCM/lwIP transport attach result=started")
+                    true
+                }
+                is CarPlaySessionService.AttachResult.Failed -> {
+                    debugLog("wired user-space NCM/lwIP attach result=failed ${result.message} detail=${service.lastAttachFailure}")
+                    false
+                }
+            }
+        } catch (error: Exception) {
+            debugLog("wired user-space NCM/lwIP construction failed", error)
+            val failureCode = diagnosticFailureCode(error = error)
+            updateBackendDiagnostics {
+                it.copy(
+                    failureCode = failureCode,
+                    nativeLoadResult = if (failureCode == BackendDiagnosticFailure.NATIVE_UNAVAILABLE)
+                        BackendNativeLoadResult.FAILED else it.nativeLoadResult,
+                )
+            }
+            return false
+        } finally {
+            if (!transferred) {
+                runCatching { network?.close() ?: framePort?.close() ?: ncm.close() }
             }
         }
     }
@@ -2937,18 +3191,20 @@ class CarPlayController(
         joinToString(":") { byte -> "%02x".format(byte.toInt() and 0xff) }
 
     private fun awaitVpnService(): CarPlayVpnService? {
+        if (closed) return null
         vpnService?.let { return it }
         bindVpn()
         return try {
-            if (vpnLatch.await(VPN_CONNECT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) vpnService else null
+            if (vpnLatch.await(NETWORK_SERVICE_CONNECT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) vpnService else null
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
             null
         }
     }
 
-    private fun bindVpn() {
-        if (vpnBound) return
+    private fun bindVpn() = synchronized(bindingLock) {
+        if (closed) { vpnLatch.countDown(); return@synchronized }
+        if (vpnBound) return@synchronized
         vpnBound = true
         try {
             val intent = Intent(appContext, CarPlayVpnService::class.java)
@@ -2962,8 +3218,9 @@ class CarPlayController(
         }
     }
 
-    private fun unbindVpn() {
-        if (!vpnBound) return
+    private fun unbindVpn() = synchronized(bindingLock) {
+        vpnLatch.countDown()
+        if (!vpnBound) return@synchronized
         vpnBound = false
         try {
             appContext.unbindService(serviceConnection)
@@ -2971,6 +3228,46 @@ class CarPlayController(
             // The service may have already been unbound.
         }
         vpnService = null
+    }
+
+    private fun awaitSessionService(): CarPlaySessionService? {
+        if (closed) return null
+        sessionService?.let { return it }
+        bindSessionService()
+        return try {
+            if (sessionLatch.await(NETWORK_SERVICE_CONNECT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) sessionService else null
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            null
+        }
+    }
+
+    private fun bindSessionService() = synchronized(bindingLock) {
+        if (closed) { sessionLatch.countDown(); return@synchronized }
+        if (sessionBound) return@synchronized
+        sessionBound = true
+        try {
+            val intent = Intent(appContext, CarPlaySessionService::class.java)
+            if (!appContext.bindService(intent, sessionServiceConnection, Context.BIND_AUTO_CREATE)) {
+                sessionBound = false
+                sessionLatch.countDown()
+            }
+        } catch (_: Throwable) {
+            sessionBound = false
+            sessionLatch.countDown()
+        }
+    }
+
+    private fun unbindSessionService() = synchronized(bindingLock) {
+        sessionLatch.countDown()
+        if (!sessionBound) return@synchronized
+        sessionBound = false
+        try {
+            appContext.unbindService(sessionServiceConnection)
+        } catch (_: Exception) {
+            // The service may have already been unbound.
+        }
+        sessionService = null
     }
 
     private fun closeReceivers() {
@@ -3019,9 +3316,19 @@ class CarPlayController(
                 firstTcpWatchdog?.terminate()
             }
             val causes = generateSequence(error) { it.cause }.toList()
+            val wiredFailure = if (config.transport == CarPlayTransport.WIRED && effectiveWiredBackend != null) {
+                val current = BackendDiagnostics.snapshot().takeIf { it.generation == diagnosticAttempt }
+                current?.failureCode ?: diagnosticFailureCode(error = error)
+            } else null
+            if (wiredFailure != null) {
+                updateBackendDiagnostics {
+                    it.copy(stage = BackendDiagnosticStage.FAILED, failureCode = it.failureCode ?: wiredFailure)
+                }
+            }
             onStatus(CarPlayStatus.Failed(error.message ?: error.javaClass.simpleName,
                 causes.any { it is com.shilapi.xcertplay.network.P2pResetRequiredException },
-                causes.filterIsInstance<WirelessStartupException>().firstOrNull()?.reason),
+                causes.filterIsInstance<WirelessStartupException>().firstOrNull()?.reason,
+                wiredFailure),
                 if (wireless) wirelessGeneration.get() else null)
         }
     }
@@ -3043,6 +3350,50 @@ class CarPlayController(
         } catch (_: Exception) {
             // Optional diagnostics must not change transport or shutdown behavior.
         }
+    }
+
+    private fun updateBackendDiagnostics(transform: (BackendDiagnosticSnapshot) -> BackendDiagnosticSnapshot) {
+        BackendDiagnostics.update(diagnosticAttempt, transform)
+    }
+
+    private fun captureWiredBackendCounters() {
+        val provider = wiredDiagnosticCountersProvider ?: return
+        val counters = runCatching { provider.backendRuntimeCounters() }.getOrElse { BackendRuntimeCounters() }
+        updateBackendDiagnostics { it.copy(runtime = counters) }
+    }
+
+    private fun diagnosticFailureCode(
+        failure: WiredBackendFailure? = null,
+        error: Throwable? = null,
+    ): BackendDiagnosticFailure {
+        when (failure) {
+            WiredBackendFailure.VPN_UNAVAILABLE -> return BackendDiagnosticFailure.VPN_UNAVAILABLE
+            WiredBackendFailure.USER_CANCELLED -> return BackendDiagnosticFailure.USER_CANCELLED
+            WiredBackendFailure.CANCELLED -> return BackendDiagnosticFailure.CANCELLED
+            WiredBackendFailure.USB -> return BackendDiagnosticFailure.USB
+            WiredBackendFailure.MFI -> return BackendDiagnosticFailure.MFI
+            WiredBackendFailure.PROTOCOL -> return BackendDiagnosticFailure.PROTOCOL
+            WiredBackendFailure.NATIVE_UNAVAILABLE -> return BackendDiagnosticFailure.NATIVE_UNAVAILABLE
+            WiredBackendFailure.INITIALIZATION -> return BackendDiagnosticFailure.INITIALIZATION
+            null -> Unit
+        }
+        val causes = generateSequence(error) { it.cause }.toList()
+        causes.filterIsInstance<BackendFailure>().firstOrNull()?.let { backend ->
+            return when (backend.kind) {
+                BackendFailure.Kind.VPN_UNAVAILABLE -> BackendDiagnosticFailure.VPN_UNAVAILABLE
+                BackendFailure.Kind.VPN_DENIED -> BackendDiagnosticFailure.USER_CANCELLED
+                BackendFailure.Kind.NATIVE_UNAVAILABLE -> BackendDiagnosticFailure.NATIVE_UNAVAILABLE
+                BackendFailure.Kind.USB_DETACHED, BackendFailure.Kind.USB_IO -> BackendDiagnosticFailure.USB
+                BackendFailure.Kind.PROTOCOL -> BackendDiagnosticFailure.PROTOCOL
+                BackendFailure.Kind.CANCELLED -> BackendDiagnosticFailure.CANCELLED
+                else -> BackendDiagnosticFailure.INITIALIZATION
+            }
+        }
+        if (causes.any { it is IphoneUsbException.Protocol }) return BackendDiagnosticFailure.PROTOCOL
+        if (causes.any { it is IphoneUsbException }) return BackendDiagnosticFailure.USB
+        if (causes.any { it is LinkageError }) return BackendDiagnosticFailure.NATIVE_UNAVAILABLE
+        if (causes.any { it.javaClass.simpleName.contains("Mfi", ignoreCase = true) }) return BackendDiagnosticFailure.MFI
+        return if (error == null) BackendDiagnosticFailure.UNKNOWN else BackendDiagnosticFailure.INITIALIZATION
     }
 
     private fun diagnosticFailureClass(error: Throwable): String =
@@ -3159,7 +3510,7 @@ class CarPlayController(
         private const val HOTSPOT_START_TIMEOUT_MILLIS = 60_000L
         private const val WIFI_P2P_START_TIMEOUT_MILLIS = 20_000L
         private const val PAIR_TIMEOUT_MILLIS = 5 * 60_000L
-        private const val VPN_CONNECT_TIMEOUT_MILLIS = 10_000L
+        private const val NETWORK_SERVICE_CONNECT_TIMEOUT_MILLIS = 10_000L
         private const val WIRELESS_PREFS = "diplay_wireless"
         private const val HOTSPOT_FAMILY_PREFERENCE_KEY = "hotspot_address_family"
         private const val CONTROL_LOOP_TIMEOUT_MILLIS = 5 * 60_000L

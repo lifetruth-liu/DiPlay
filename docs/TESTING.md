@@ -20,6 +20,14 @@ installation tests use the same FileProvider path shadow as diagnostic export te
 the real journal and provider logic; regression tests check stage persistence, sync failure and
 rejection of sibling directories outside the provider root.
 
+## Experimental wired network backend
+
+- On a fresh installation, find **Wired network backend (experimental)** once under **Settings → Advanced**. Confirm **Auto** is selected and keeps the existing VPN path.
+- Select **User-space** while disconnected, close and reopen Settings, and confirm it persists. During a session, change the selection and confirm the reconnect-needed UI appears without stopping the active session; the new backend applies only after the next connection.
+- On an Android test device, start an explicit User-space connection and inspect the diagnostic report: requested/effective backend and startup stage must identify the attempt. Confirm DiPlay does not display VPN authorization or request ADB for this path; USB access and iPhone Trust/CarPlay are still required.
+- Re-select **Auto** and **VPN** and verify their existing selection and cancellation behavior. An emulator or host fake does not count as VPN-disabled head-unit, NCM, iPhone, media-channel, throughput or compatibility acceptance. Record those as untested until a reference device report exists.
+- When sharing a compatibility result, use the [wired-backend issue form](https://github.com/shihabal3amri/DiPlay/issues/new?template=lwip_compatibility.yml) and review the optional report. Keep raw captures, media, credentials and full device addresses out of public issues.
+
 ## Custom stream resolution
 
 In the home settings and the in-session menu, confirm the accepted range is **30–160%**. Try 160%, cancel an edit, save an unrelated setting, and reconnect; the exact saved percentage must survive. Enter 161% in the numeric dialog and confirm it stays open with an error. Reset must only change the draft to 100% until Save/Apply is selected.

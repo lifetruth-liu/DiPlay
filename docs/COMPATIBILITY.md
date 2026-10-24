@@ -11,6 +11,9 @@ This public preview is an independent receiver, not an Apple-certified CarPlay a
 | 0.2.14 evidence | Automated source/build validation and attributed contributor tests; no new complete-release vehicle test or universal model support is claimed. Earlier DiLink5.1 HUD/hotspot results remain historical evidence. |
 | Wi-Fi | Auto uses eligible saved/aligned channels; beside a 5 GHz station, explicit 2.4 GHz precedes other 5 GHz/unpinned default fallbacks. Manual channels stay explicit; no band/performance guarantee. |
 | Video | Default H.264 / 30 fps; 60 fps and HEVC increase device-specific demands |
+| Experimental USB backend | **Settings → Advanced → Wired network backend (experimental)** exposes Auto, VPN and explicit User-space testing. Auto keeps the established VPN path. User-space avoids VPN authorization, ADB and system-route changes, but real iPhone/NCM, VPN-disabled head units and firmware compatibility are not yet verified; it is not a supported replacement claim. |
+
+For a reproducible USERSPACE result, use the [experimental wired-backend report form](https://github.com/shihabal3amri/DiPlay/issues/new?template=lwip_compatibility.yml). Include the requested and effective backend from the diagnostic report. The form accepts an optional reviewed report; do not post credentials, media or raw packet captures publicly.
 
 ## BYD HUD and car hotspot
 
@@ -75,6 +78,7 @@ The specifically observed 1280×480 DiLink 3 projection surface is now recognize
 - Wireless CarPlay also cannot start on a head unit whose Bluetooth service gives apps no socket manager: every RFCOMM connect fails inside Android within a few milliseconds, while the car's own calls and music keep working. Seen on a Changan CS35 Plus with an Allwinner T7 on Android 9 ([#709](https://github.com/shihabal3amri/DiPlay/issues/709)). DiPlay stops with that cause instead of retrying. Use USB on such a unit.
 - A head unit whose Android has no Bluetooth adapter at all is told so, when the driver chooses an iPhone and when a connection is tried, instead of being asked to turn Bluetooth on. Where the adapter exists but its switch will not stay on, as on the GAC unit in [#581](https://github.com/shihabal3amri/DiPlay/issues/581), the request to turn Bluetooth on adds that this means wireless CarPlay cannot work there once the driver has been to Bluetooth settings and come back with it still off.
 - USB requires a data port and correct host/device-role behavior.
+- The experimental User-space backend has no completed real iPhone/NCM or VPN-disabled head-unit acceptance. Automated native, simulator and host results do not establish vehicle compatibility or performance. Keep Auto/VPN for the established path; VPN is unavailable on systems that prohibit it.
 - Calls, Siri, background reconnection, long journeys and future iOS releases need broader testing.
 
 For a current report, reproduce the problem on **0.2.14**, then open **Settings → Diagnostics → Save diagnostic report**. Android 10+ normally saves to **Downloads/DiPlay**; Android 9 uses a document picker. The confirmation identifies fallback storage and offers **View report** and **Share**. Attach the reviewed `.txt` to a matching [existing issue](https://github.com/shihabal3amri/DiPlay/issues), or [create an issue](https://github.com/shihabal3amri/DiPlay/issues/new/choose). Include car/head-unit, Android/DiLink/firmware, iPhone/iOS, connection mode, steps and failure time. Nothing uploads automatically.
