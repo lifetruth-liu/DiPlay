@@ -100,7 +100,7 @@ import com.shilapi.xcertplay.media.CarPlayTouchMapper
 import com.shilapi.xcertplay.media.CarPlayVideoLayout
 import com.shilapi.xcertplay.network.CarPlayVpnService
 import com.shilapi.xcertplay.network.backend.WiredBackendPreference
-import com.shilapi.xcertplay.network.backend.WiredBackendSelector
+import com.shilapi.xcertplay.network.backend.WiredBackendFailure
 import com.shilapi.xcertplay.orchestration.CarPlayController
 import com.shilapi.xcertplay.orchestration.CarPlayRuntimeConfig
 import com.shilapi.xcertplay.network.WirelessStartupFailure
@@ -229,7 +229,12 @@ class CarPlayHostActivity : ComponentActivity() {
         locationReportingEnabled = locationReportingEnabled,
         availableCurrentMilliAmps = AirPlayPersistence.loadUsbChargingCurrent(this).milliAmps,
         wiredBackendPreference = AirPlayPersistence.loadWiredBackendPreference(this),
-        wiredBackendSuccessCache = AirPlayPersistence.loadWiredBackendSuccessCache(this),
+        vpnPreflightFailure = vpnPreflightFailure.takeIf { vpnPreflightRestartGeneration == restartGeneration },
+        wiredRecoveryExperiment = if (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0)
+            intent?.getStringExtra("wiredRecoveryExperiment")?.let { value ->
+                com.shilapi.xcertplay.orchestration.WiredRecoveryExperiment.entries.firstOrNull { it.name == value }
+            } ?: com.shilapi.xcertplay.orchestration.WiredRecoveryExperiment.COMPATIBILITY
+        else com.shilapi.xcertplay.orchestration.WiredRecoveryExperiment.COMPATIBILITY,
     )
 
     private val vpnConsent =
@@ -571,6 +576,9 @@ class CarPlayHostActivity : ComponentActivity() {
     private var wiredPermissionsResolved = false
     private var awaitingLocationPermission = false
     private var vpnReady = false
+    private var vpnPreflightFailure: WiredBackendFailure? = null
+    private var vpnConsentGeneration = 0
+    private var vpnPreflightRestartGeneration = 0
     private var hotspotStatus = HotspotStatus(state = "off")
     private var menuOpen = false
     private var latestStage = "Preparing CarPlay"
@@ -1024,7 +1032,9 @@ class CarPlayHostActivity : ComponentActivity() {
             PackageManager.PERMISSION_GRANTED
 
     private fun requestVpnConsent() {
-        if (awaitingVpnConsent) return
+        if (awaitingVpnConsent || shuttingDown.get()) return
+        vpnConsentGeneration++
+        vpnPreflightFailure = null
         val consent = try {
             CarPlayVpnService.prepare(this)
         } catch (error: ActivityNotFoundException) {
@@ -1054,6 +1064,9 @@ class CarPlayHostActivity : ComponentActivity() {
         // A failed launch clears the pending state; a late result must not authorize that attempt.
         if (!awaitingVpnConsent) return
         awaitingVpnConsent = false
+        // The same authorization request may span a wireless-to-wired controller rebuild.
+        if (shuttingDown.get() || wirelessEnabled || wiredBackendPreference == WiredBackendPreference.USERSPACE) return
+        vpnPreflightFailure = null
         vpnReady = resultCode == RESULT_OK
         if (vpnReady) {
             maybeStartCarPlay()
@@ -1071,25 +1084,38 @@ class CarPlayHostActivity : ComponentActivity() {
         Log.w(TAG, diagnostic, error)
         appendLog(diagnostic)
         setStatus(R.string.vpn_authorization_unavailable)
-        if (!vpnAdbConsentTried) preConsentVpnOverAdb()
+        if (!wirelessEnabled && wiredBackendPreference == WiredBackendPreference.AUTO) {
+            vpnPreflightFailure = WiredBackendFailure.VPN_UNAVAILABLE
+            vpnPreflightRestartGeneration = restartGeneration
+            maybeStartCarPlay()
+        } else if (!vpnAdbConsentTried) {
+            preConsentVpnOverAdb()
+        }
     }
 
     /** Without a consent dialog, the car's approved adb can allow the VPN instead (#604). */
     private fun preConsentVpnOverAdb() {
         vpnAdbConsentTried = true
+        val generation = vpnConsentGeneration
         val app = applicationContext
         Thread({
             val access = runCatching { VpnPreConsent.grant(app) }.getOrDefault(LocalAdb.Access.UNREACHABLE)
             runOnUiThread {
-                if (isFinishing || isDestroyed) return@runOnUiThread
-                val granted = runCatching { CarPlayVpnService.prepare(this) == null }.getOrDefault(false)
-                appendLog("VPN consent over adb access=$access granted=$granted")
-                if (granted && !awaitingVpnConsent && !vpnReady) {
-                    vpnReady = true
-                    maybeStartCarPlay()
-                }
+                onVpnAdbConsentResult(generation, access)
             }
         }, "diplay-vpn-adb-consent").start()
+    }
+
+    private fun onVpnAdbConsentResult(generation: Int, access: LocalAdb.Access) {
+        if (isFinishing || isDestroyed || shuttingDown.get() ||
+            generation != vpnConsentGeneration || wirelessEnabled ||
+            wiredBackendPreference == WiredBackendPreference.USERSPACE || vpnPreflightFailure != null) return
+        val granted = runCatching { CarPlayVpnService.prepare(this) == null }.getOrDefault(false)
+        appendLog("VPN consent over adb access=$access granted=$granted")
+        if (granted && !awaitingVpnConsent && !vpnReady) {
+            vpnReady = true
+            maybeStartCarPlay()
+        }
     }
 
     private fun requestWirelessPermissions() {
@@ -5437,7 +5463,10 @@ class CarPlayHostActivity : ComponentActivity() {
         // Only a working AirPlay session, or a new failure, replaces it.
         if (status is CarPlayStatus.Failed) showConnectionHelp(status)
         when (status) {
-            is CarPlayStatus.Failed -> if (status.wifiResetRequired) {
+            is CarPlayStatus.Failed -> if (!status.retryAllowed) {
+                startupRetryStopped = true
+                startupRetryButton?.visibility = View.VISIBLE
+            } else if (status.wifiResetRequired) {
                 wifiRecoveryButton?.visibility = View.VISIBLE
             } else {
                 wifiRecoveryButton?.visibility = View.GONE
@@ -5628,13 +5657,6 @@ class CarPlayHostActivity : ComponentActivity() {
                 com.shilapi.xcertplay.hud.BydNavigationOutputs.batteryStatus(applicationContext)
             } else {
                 null
-            },
-            onWiredBackendSuccess = {
-                Build.SUPPORTED_ABIS.firstOrNull()?.let { abi ->
-                    AirPlayPersistence.saveWiredBackendSuccessCache(
-                        this, WiredBackendSelector.STACK_VERSION, abi,
-                    )
-                }
             },
         )
         controller = next
@@ -5954,7 +5976,9 @@ class CarPlayHostActivity : ComponentActivity() {
         }
         val size = activeDisplaySize ?: return
         val transportReady = if (wirelessEnabled) wirelessPermissionsReady
-            else wiredBackendPreference == WiredBackendPreference.USERSPACE || vpnReady
+            else wiredBackendPreference == WiredBackendPreference.USERSPACE || vpnReady ||
+                (wiredBackendPreference == WiredBackendPreference.AUTO &&
+                    vpnPreflightFailure == WiredBackendFailure.VPN_UNAVAILABLE)
         val locationReady = !locationReportingEnabled || locationPermissionAvailable
         if (
             !transportReady ||
@@ -5966,6 +5990,12 @@ class CarPlayHostActivity : ComponentActivity() {
             pendingDisplaySize != null ||
             controller != null
         ) {
+            return
+        }
+        if (!wirelessEnabled && wiredBackendPreference == WiredBackendPreference.AUTO &&
+            vpnPreflightFailure != null && vpnPreflightRestartGeneration != restartGeneration) {
+            // A transient platform failure belongs to one startup, not every later reconnect.
+            requestVpnConsent()
             return
         }
         // The first session must already carry the cluster stream; a later route reconnects CarPlay.

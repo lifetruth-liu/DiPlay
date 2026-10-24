@@ -1,10 +1,12 @@
 package com.shilapi.xcertplay
 
+import android.content.Context
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.view.View
 import android.view.ViewGroup
+import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.shilapi.xcertplay.host.R
@@ -28,14 +30,21 @@ class WiredBackendSettingsScreenshotsTest {
     @Test fun settingCardFitsCompactAndExpandedLayoutsAtLargeFont() {
         val activity = Robolectric.buildActivity(DiPlayActivity::class.java).get()
         try {
+            activity.getSharedPreferences("xcertplay_airplay", Context.MODE_PRIVATE).edit()
+                .putString("wired_backend_success_version", "obsolete")
+                .putString("wired_backend_success_abi", "arm64-v8a").commit()
             for ((name, widthDp, language) in listOf(
                 Triple("compact-ja", 320, "ja-JP"),
+                Triple("compact-zh", 320, "zh-CN"),
+                Triple("full-ru", 960, "ru-RU"),
+                Triple("compact-zh-hdpi", 320, "zh-CN"),
                 Triple("full-en", 960, "en-US"),
                 Triple("compact-ar-rtl", 320, "ar-SA"),
             )) {
                 val locale = Locale.forLanguageTag(language)
                 val config = Configuration(activity.resources.configuration).apply {
                     fontScale = 1.5f
+                    densityDpi = if (name.endsWith("hdpi")) 320 else 160
                     setLocale(locale)
                     setLayoutDirection(locale)
                 }
@@ -49,6 +58,8 @@ class WiredBackendSettingsScreenshotsTest {
                     it.text == activity.getString(R.string.settings_wired_backend_title)
                 })
 
+                assertTrue("Obsolete validation record must not add a clear button",
+                    descendants(content).filterIsInstance<Button>().count() == 1)
                 val width = (widthDp * activity.resources.displayMetrics.density).toInt()
                 content.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
                     View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
@@ -69,6 +80,7 @@ class WiredBackendSettingsScreenshotsTest {
                 }
             }
         } finally {
+            activity.getSharedPreferences("xcertplay_airplay", Context.MODE_PRIVATE).edit().clear().commit()
             activity.finish()
         }
     }

@@ -57,7 +57,9 @@ class CarPlayHostSettingsTest {
 
     @Before fun setUp() {
         activity = Robolectric.buildActivity(CarPlayHostActivity::class.java).get()
-        controllers = mockConstruction(CarPlayController::class.java)
+        controllers = mockConstruction(CarPlayController::class.java) { controller, _ ->
+            `when`(controller.nowPlayingSnapshot()).thenReturn(com.shilapi.xcertplay.media.CarPlayNowPlaying())
+        }
         (field("teardownExecutor") as ExecutorService).shutdownNow()
         setField("teardownExecutor", PausedExecutorService())
         setField("airPlayIdentity", AirPlayIdentity.generate())
@@ -913,6 +915,53 @@ class CarPlayHostSettingsTest {
         assertFalse((field("shuttingDown") as AtomicBoolean).get())
         assertFalse(activity.isFinishing)
         assertNull(shadowOf(activity).nextStartedActivity)
+    }
+
+    @Test fun autoUnavailablePrerequisiteUnlocksControllerWithoutPretendingVpnIsReady() {
+        AirPlayPersistence.saveWiredBackendPreference(activity,
+            com.shilapi.xcertplay.network.backend.WiredBackendPreference.AUTO)
+        setField("vpnPreflightFailure", com.shilapi.xcertplay.network.backend.WiredBackendFailure.VPN_UNAVAILABLE)
+        setField("vpnReady", false)
+        setField("wirelessEnabled", false)
+        setField("microphonePermissionResolved", true)
+        setField("locationReportingEnabled", false)
+        invoke("maybeStartCarPlay")
+        assertNotNull(field("controller"))
+        assertFalse(field("vpnReady") as Boolean)
+        val config = invoke("createRuntimeConfig") as CarPlayRuntimeConfig
+        assertEquals(com.shilapi.xcertplay.network.backend.WiredBackendPreference.AUTO, config.wiredBackendPreference)
+        assertEquals(com.shilapi.xcertplay.network.backend.WiredBackendFailure.VPN_UNAVAILABLE, config.vpnPreflightFailure)
+    }
+
+    @Test fun replacementAttemptRechecksTransientVpnUnavailability() {
+        org.robolectric.shadows.ShadowVpnService.setPrepareResult(null)
+        setField("wiredBackendPreference", com.shilapi.xcertplay.network.backend.WiredBackendPreference.AUTO)
+        setField("vpnPreflightFailure", com.shilapi.xcertplay.network.backend.WiredBackendFailure.VPN_UNAVAILABLE)
+        setField("restartGeneration", 1)
+        setField("vpnReady", false)
+        setField("wirelessEnabled", false)
+        setField("microphonePermissionResolved", true)
+        setField("locationReportingEnabled", false)
+        invoke("maybeStartCarPlay")
+        assertTrue(field("vpnReady") as Boolean)
+        assertNull((invoke("createRuntimeConfig") as CarPlayRuntimeConfig).vpnPreflightFailure)
+        assertNotNull(field("controller"))
+    }
+
+    @Test fun exhaustedWiredRecoveryStopsAutomaticReconnects() {
+        report(CarPlayStatus.Failed("USB recovery exhausted; unplug and reconnect the iPhone", retryAllowed = false))
+        assertTrue(field("startupRetryStopped") as Boolean)
+        assertFalse(field("reconnectScheduled") as Boolean)
+    }
+
+    @Test fun explicitVpnDoesNotUnlockControllerForUnavailablePrerequisite() {
+        setField("wiredBackendPreference", com.shilapi.xcertplay.network.backend.WiredBackendPreference.VPN)
+        setField("vpnPreflightFailure", com.shilapi.xcertplay.network.backend.WiredBackendFailure.VPN_UNAVAILABLE)
+        setField("vpnReady", false)
+        setField("microphonePermissionResolved", true)
+        setField("locationReportingEnabled", false)
+        invoke("maybeStartCarPlay")
+        assertNull(field("controller"))
     }
 
     @Test fun iphoneAttachmentSwitchesToWiredTransportWithoutFinishing() {

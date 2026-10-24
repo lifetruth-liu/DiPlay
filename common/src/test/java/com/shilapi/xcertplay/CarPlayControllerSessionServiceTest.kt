@@ -9,10 +9,11 @@ import com.shilapi.xcertplay.network.backend.WiredBackend
 import com.shilapi.xcertplay.network.backend.WiredBackendFailure
 import com.shilapi.xcertplay.network.backend.WiredBackendPreference
 import com.shilapi.xcertplay.network.backend.WiredBackendSelector
-import com.shilapi.xcertplay.network.backend.WiredBackendSuccessCache
 import com.shilapi.xcertplay.network.backend.system.SystemSessionNetwork
 import com.shilapi.xcertplay.orchestration.*
 import com.shilapi.xcertplay.transport.Iap2IdentificationConfig
+import com.shilapi.xcertplay.transport.NcmUsbBridge
+import org.mockito.Mockito.*
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.util.concurrent.Callable
@@ -46,7 +47,7 @@ class CarPlayControllerSessionServiceTest {
         override fun getApplicationContext(): Context = this
         override fun bindService(intent: Intent, connection: ServiceConnection, flags: Int): Boolean {
             requested.add(checkNotNull(intent.component).className)
-            assertNotEquals(CarPlayVpnService::class.java.name, intent.component!!.className)
+            if (intent.component!!.className == CarPlayVpnService::class.java.name) return false
             pending = connection
             bound.countDown()
             if (!delayed) connection.onServiceConnected(intent.component, service.onBind(intent))
@@ -56,16 +57,69 @@ class CarPlayControllerSessionServiceTest {
     }
 
     private fun controller(context: Context, statuses: MutableList<CarPlayStatus> = mutableListOf(),
-        airPlayConfig: AirPlayConfig = config) =
+        airPlayConfig: AirPlayConfig = config,
+        preference: WiredBackendPreference = WiredBackendPreference.AUTO,
+        preflightFailure: WiredBackendFailure? = null) =
         CarPlayController(context, CarPlayRuntimeConfig(mfiTarget = MfiTarget.LOCAL,
             transport = CarPlayTransport.WIRELESS,
+            wiredBackendPreference = preference, vpnPreflightFailure = preflightFailure,
             identification = Iap2IdentificationConfig("test", "test", "test", "test", "1", "1", carPlayUsbInterfaceNumber = 3)),
             airPlayConfig, identity, PairingStore(), object : AirPlaySessionListener {}, object : AirPlayMediaHandler {}, statuses::add)
 
     private fun awaitService(controller: CarPlayController): CarPlaySessionService? =
         ReflectionHelpers.callInstanceMethod(controller, "awaitSessionService")
 
-    @Test fun cachedVpnFallbackAdvertisesActualUserspacePortWhenPreferredPortIsBusy() {
+    @Test fun unavailablePreflightSkipsBothBindingsAndPreservesNcmForFallback() {
+        val lifecycle = Robolectric.buildService(CarPlaySessionService::class.java).create()
+        val context = BindingContext(lifecycle.get())
+        val controller = controller(context, preflightFailure = WiredBackendFailure.VPN_UNAVAILABLE)
+        val ncm = mock(NcmUsbBridge::class.java)
+        try {
+            val result = vpnOutcome(controller, ncm)
+            assertEquals(WiredBackendFailure.VPN_UNAVAILABLE, ReflectionHelpers.getField<Any?>(result, "failure"))
+            assertEquals(true, ReflectionHelpers.getField<Boolean>(result, "ncmReusable"))
+            assertEquals(false, ReflectionHelpers.getField<Boolean>(result, "started"))
+            assertTrue(context.requested.isEmpty())
+            verifyNoInteractions(ncm)
+        } finally { controller.close(); assertTrue(controller.awaitClosed(2000)); lifecycle.destroy() }
+    }
+
+    @Test fun explicitVpnIgnoresPreflightFallbackAndStillBindsVpn() {
+        val lifecycle = Robolectric.buildService(CarPlaySessionService::class.java).create()
+        val context = BindingContext(lifecycle.get())
+        val controller = controller(context, preference = WiredBackendPreference.VPN,
+            preflightFailure = WiredBackendFailure.VPN_UNAVAILABLE)
+        val ncm = mock(NcmUsbBridge::class.java)
+        try {
+            val result = vpnOutcome(controller, ncm)
+            assertEquals(WiredBackendFailure.VPN_UNAVAILABLE, ReflectionHelpers.getField<Any?>(result, "failure"))
+            assertEquals(true, ReflectionHelpers.getField<Boolean>(result, "ncmReusable"))
+            assertEquals(listOf(CarPlaySessionService::class.java.name, CarPlayVpnService::class.java.name), context.requested)
+            verifyNoInteractions(ncm)
+        } finally { controller.close(); assertTrue(controller.awaitClosed(2000)); lifecycle.destroy() }
+    }
+
+    @Test fun closedPreflightDoesNotBindOrTransferNcm() {
+        val lifecycle = Robolectric.buildService(CarPlaySessionService::class.java).create()
+        val context = BindingContext(lifecycle.get())
+        val controller = controller(context, preflightFailure = WiredBackendFailure.VPN_UNAVAILABLE)
+        val ncm = mock(NcmUsbBridge::class.java)
+        try {
+            controller.close()
+            assertTrue(controller.awaitClosed(2000))
+            val result = vpnOutcome(controller, ncm)
+            assertEquals(WiredBackendFailure.CANCELLED, ReflectionHelpers.getField<Any?>(result, "failure"))
+            assertTrue(context.requested.isEmpty())
+            verifyNoInteractions(ncm)
+        } finally { controller.close(); lifecycle.destroy() }
+    }
+
+    private fun vpnOutcome(controller: CarPlayController, ncm: NcmUsbBridge): Any =
+        ReflectionHelpers.callInstanceMethod(controller, "attachVpn",
+            ReflectionHelpers.ClassParameter.from(NcmUsbBridge::class.java, ncm),
+            ReflectionHelpers.ClassParameter.from(ByteArray::class.java, ByteArray(6)))
+
+    @Test fun autoVpnFallbackAdvertisesActualUserspacePortWhenPreferredPortIsBusy() {
         val lifecycle = Robolectric.buildService(CarPlaySessionService::class.java).create()
         val address = InetAddress.getByName("127.0.0.1")
         try {
@@ -73,9 +127,7 @@ class CarPlayControllerSessionServiceTest {
                 val airPlayConfig = config.copy(port = occupied.localPort)
                 val controller = controller(BindingContext(lifecycle.get()), airPlayConfig = airPlayConfig)
                 try {
-                    val selector = WiredBackendSelector(WiredBackendPreference.AUTO, false,
-                        WiredBackendSuccessCache(WiredBackendSelector.STACK_VERSION, "arm64-v8a"),
-                        WiredBackendSelector.STACK_VERSION, "arm64-v8a")
+                    val selector = WiredBackendSelector(WiredBackendPreference.AUTO)
                     assertEquals(WiredBackend.VPN, selector.begin())
                     assertEquals(WiredBackend.USERSPACE,
                         selector.afterFailure(WiredBackend.VPN, WiredBackendFailure.VPN_UNAVAILABLE))

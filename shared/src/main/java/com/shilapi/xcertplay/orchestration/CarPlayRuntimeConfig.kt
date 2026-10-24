@@ -4,7 +4,7 @@ import com.shilapi.xcertplay.transport.Iap2IdentificationConfig
 import com.shilapi.xcertplay.transport.UsbDeviceId
 import com.shilapi.xcertplay.network.WifiP2pChannels
 import com.shilapi.xcertplay.network.backend.WiredBackendPreference
-import com.shilapi.xcertplay.network.backend.WiredBackendSuccessCache
+import com.shilapi.xcertplay.network.backend.WiredBackendFailure
 import java.net.Inet6Address
 import java.net.InetAddress
 
@@ -12,6 +12,9 @@ enum class CarPlayTransport {
     WIRED,
     WIRELESS,
 }
+
+/** Internal debug-build experiments; ignored by non-debuggable applications. Never persisted. */
+enum class WiredRecoveryExperiment { COMPATIBILITY, DIRECT, EARLY_REUSE }
 
 enum class MfiTarget {
     LOCAL,
@@ -73,7 +76,9 @@ class CarPlayRuntimeConfig(
     val existingWifiSsid: String = "",
     val existingWifiPassphrase: String = "",
     val wiredBackendPreference: WiredBackendPreference = WiredBackendPreference.AUTO,
-    val wiredBackendSuccessCache: WiredBackendSuccessCache? = null,
+    /** This startup only: a platform VPN preparation/launch failure, never user refusal. */
+    val vpnPreflightFailure: WiredBackendFailure? = null,
+    val wiredRecoveryExperiment: WiredRecoveryExperiment = WiredRecoveryExperiment.COMPATIBILITY,
 ) {
     init {
         require(iphoneDevices.all { it.vendorId == APPLE_VENDOR_ID }) {

@@ -940,12 +940,10 @@
     <string name="settings_cluster_speedometer_album_color_description">Плавно змінює тло на колір рамки альбому. Зберігає вибрану непрозорість.</string>
     <string name="settings_wired_backend_title">Дротовий мережевий механізм (експериментально)</string>
     <string name="settings_wired_backend_mode">Режим</string>
-    <string name="settings_wired_backend_description">AUTO зберігає поточний шлях через VPN. VPN явно використовує VPN Android. USERSPACE перевіряє lwIP через USB. Зміни застосуються під час наступного підключення. Користувацький режим не запитує дозвіл VPN або ADB.</string>
+    <string name="settings_wired_backend_description">Автоматичний режим спочатку використовує VPN, а якщо VPN недоступний — пробує lwIP через USB. Режим VPN використовує лише VPN Android. Користувацький режим використовує lwIP напряму без дозволу VPN або ADB. Зміни застосуються під час наступного підключення.</string>
     <string name="settings_wired_backend_auto">Автоматично</string>
     <string name="settings_wired_backend_vpn">VPN</string>
     <string name="settings_wired_backend_userspace">Користувацький режим</string>
-    <string name="settings_wired_backend_clear_validation">Очистити запис перевірки lwIP</string>
-    <string name="settings_wired_backend_validation_cleared">Запис перевірки lwIP очищено.</string>
     <string name="wired_backend_failure_native_unavailable">Не вдалося запустити користувацький мережевий стек. Виберіть VPN або оновіть DiPlay.</string>
     <string name="wired_backend_failure_vpn_unavailable">Android не вдалося запустити мережу VPN. Перевірте дозвіл VPN або виберіть користувацький режим.</string>
 </resources>

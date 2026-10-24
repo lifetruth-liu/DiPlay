@@ -26,11 +26,19 @@ class DashboardContentDeliveryTest {
         val config = AirPlayConfig("test", "test", "", "1", AirPlayDisplayConfig(800, 480),
             cluster = AirPlayDisplayConfig(1600, 600, initialUrl = CarPlayClusterDisplay.Content.TURN_CARD.url))
         val controller = CarPlayController(RuntimeEnvironment.getApplication(),
-            CarPlayRuntimeConfig(mfiTarget = MfiTarget.LOCAL, identification = Iap2IdentificationConfig(
+            CarPlayRuntimeConfig(mfiTarget = MfiTarget.LOCAL, transport = CarPlayTransport.WIRELESS, identification = Iap2IdentificationConfig(
                 name = "test", modelIdentifier = "test", manufacturer = "test", serialNumber = "test",
                 firmwareVersion = "1", hardwareVersion = "1", carPlayUsbInterfaceNumber = 3)),
             config, AirPlayIdentity(ByteArray(32), ByteArray(32), "test"), PairingStore(),
             object : AirPlaySessionListener {}, object : AirPlayMediaHandler {}, {})
+        init {
+            // This fixture drives visibility explicitly; the vehicle's real one-second ticker
+            // must not resume the map between the paused-selection assertions.
+            val pause = Class.forName("com.shilapi.xcertplay.hud.BydClusterMapPause")
+            val control = pause.getDeclaredField("streamControl").apply { isAccessible = true }.get(null)
+            @Suppress("UNCHECKED_CAST")
+            com.shilapi.xcertplay.hud.BydNavigationOutputs.clearClusterStreamControl(control as (Boolean) -> Unit)
+        }
         private val phones = mutableListOf<AirPlaySession>()
         fun phone(setup: Boolean = true): AirPlaySession = AirPlaySession(Socket(), config,
             AirPlayIdentity(ByteArray(32), ByteArray(32), "test"), PairingStore(), null,

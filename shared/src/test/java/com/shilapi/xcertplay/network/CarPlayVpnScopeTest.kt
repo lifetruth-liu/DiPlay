@@ -82,6 +82,30 @@ class CarPlayVpnScopeTest {
         }
     }
 
+    @Test fun platformIoFailurePreservesNcmForAutoFallback() {
+        VpnScopeBoundary.establishFailure = java.io.IOException("TUN unavailable")
+        withService { service ->
+            ncm().use { transport ->
+                assertEquals(CarPlayVpnService.AttachResult.Failed("TUN unavailable",
+                    CarPlayVpnService.AttachFailure.VPN_UNAVAILABLE, ncmReusable = true),
+                    attachWired(service, transport))
+                assertFalse(ReflectionHelpers.getField<Boolean>(transport, "closed"))
+                service.detach(owner)
+                assertFalse(ReflectionHelpers.getField<Boolean>(transport, "closed"))
+                assertReleased(service)
+            }
+        }
+    }
+
+    @Test fun invalidEstablishmentConfigurationIsNotVpnUnavailability() {
+        VpnScopeBoundary.establishFailure = IllegalArgumentException("bad configuration")
+        withService { service ->
+            assertEquals(CarPlayVpnService.AttachResult.Failed("bad configuration",
+                CarPlayVpnService.AttachFailure.ATTACHMENT_FAILED, ncmReusable = true), attachWired(service))
+            assertReleased(service)
+        }
+    }
+
     @Test fun rejectedVpnAttachPreservesAnUnrelatedHostAndDoesNotBlockReplacement() {
         withService { service ->
             val previous = attachHost()
@@ -154,8 +178,8 @@ class CarPlayVpnScopeTest {
         try { check(controller.get()) } finally { controller.destroy(); host.close() }
     }
 
-    private fun attachWired(service: CarPlayVpnService): CarPlayVpnService.AttachResult =
-        service.attach(ncm(), "fe80::1234", ByteArray(6), config, identity, PairingStore(), null,
+    private fun attachWired(service: CarPlayVpnService, transport: NcmUsbBridge = ncm()): CarPlayVpnService.AttachResult =
+        service.attach(transport, "fe80::1234", ByteArray(6), config, identity, PairingStore(), null,
             object : AirPlaySessionListener {}, object : AirPlayMediaHandler {}, host = host, owner = owner)
 
     private fun attachHost(): AirPlaySessionHost.Lease =

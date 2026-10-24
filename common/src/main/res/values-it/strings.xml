@@ -1018,12 +1018,10 @@
     <string name="settings_cluster_speedometer_album_color_description">Abbina il colore della cornice dell’album con transizioni fluide. Mantiene l’opacità selezionata.</string>
     <string name="settings_wired_backend_title">Rete cablata (sperimentale)</string>
     <string name="settings_wired_backend_mode">Modalità</string>
-    <string name="settings_wired_backend_description">AUTO mantiene il percorso VPN attuale. VPN usa esplicitamente la VPN di Android. USERSPACE prova lwIP tramite USB. Le modifiche si applicano alla connessione successiva. La modalità utente non richiede autorizzazione VPN né ADB.</string>
+    <string name="settings_wired_backend_description">Auto prova prima la VPN, poi lwIP tramite USB se la VPN non è disponibile. VPN usa solo la VPN di Android. La modalità utente usa direttamente lwIP senza autorizzazione VPN o ADB. Le modifiche si applicano alla connessione successiva.</string>
     <string name="settings_wired_backend_auto">Automatico</string>
     <string name="settings_wired_backend_vpn">VPN</string>
     <string name="settings_wired_backend_userspace">Spazio utente</string>
-    <string name="settings_wired_backend_clear_validation">Cancella il record di convalida lwIP</string>
-    <string name="settings_wired_backend_validation_cleared">Record di convalida lwIP cancellato.</string>
     <string name="wired_backend_failure_native_unavailable">Impossibile avviare lo stack di rete utente. Scegli VPN o aggiorna DiPlay.</string>
     <string name="wired_backend_failure_vpn_unavailable">Android non è riuscito ad avviare la rete VPN. Controlla l’autorizzazione VPN o scegli la modalità utente.</string>
 </resources>

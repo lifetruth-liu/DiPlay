@@ -126,16 +126,35 @@ class UsbPermissionActivityProbeTest {
 
 @Implements(UsbManager::class)
 class PermissionRequestUsbManagerShadow : ShadowUsbManager() {
-    companion object { var requests = 0 }
+    companion object { var requests = 0; var lastRequest: PendingIntent? = null }
 
     @Implementation
-    protected fun requestPermission(device: UsbDevice, result: PendingIntent) { requests++ }
+    protected fun requestPermission(device: UsbDevice, result: PendingIntent) { requests++; lastRequest = result }
 }
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [29], manifest = Config.NONE, shadows = [PermissionRequestUsbManagerShadow::class])
 class UsbPermissionActivityProbeModernTest {
     @Before fun reset() { PermissionRequestUsbManagerShadow.requests = 0 }
+
+    @Test fun latePermissionBroadcastFromPreviousRequestCannotAuthorizeReplacement() {
+        val context = RuntimeEnvironment.getApplication()
+        val usb = context.getSystemService(UsbManager::class.java)
+        val host = IphoneUsbHost(context, usb, IphoneUsbMatcher.appleVendor())
+        val device = ReflectionHelpers.newInstance(UsbDevice::class.java).apply {
+            ReflectionHelpers.setField(this, "mName", "same-node")
+            ReflectionHelpers.setField(this, "mVendorId", IphoneUsbMatcher.APPLE_VENDOR_ID)
+            ReflectionHelpers.setField(this, "mProductId", 0x12a8)
+        }
+        host.requestPermission(device)
+        val old = android.content.Intent(shadowOf(checkNotNull(PermissionRequestUsbManagerShadow.lastRequest)).savedIntent)
+            .putExtra(UsbManager.EXTRA_DEVICE, device).putExtra(UsbManager.EXTRA_PERMISSION_GRANTED, true)
+        host.requestPermission(device)
+        val current = android.content.Intent(shadowOf(checkNotNull(PermissionRequestUsbManagerShadow.lastRequest)).savedIntent)
+            .putExtra(UsbManager.EXTRA_DEVICE, device).putExtra(UsbManager.EXTRA_PERMISSION_GRANTED, true)
+        org.junit.Assert.assertNull(host.parsePermissionResult(old))
+        assertTrue(host.parsePermissionResult(current) is IphoneUsbHost.PermissionResult.Granted)
+    }
 
     @Test fun androidTenDoesNotInferUiAbsenceFromTheLegacyComponent() {
         val context = RuntimeEnvironment.getApplication()

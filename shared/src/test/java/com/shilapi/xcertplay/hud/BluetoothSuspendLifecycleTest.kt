@@ -323,7 +323,8 @@ class BluetoothSuspendLifecycleTest {
             }
         }
         return CarPlayController(context, CarPlayRuntimeConfig(
-            mfiTarget = MfiTarget.LOCAL, transport = CarPlayTransport.WIRED,
+            // Session/lease races are independent of USB enumeration and its attachment owner.
+            mfiTarget = MfiTarget.LOCAL, transport = CarPlayTransport.WIRELESS,
             identification = Iap2IdentificationConfig(name = "test", modelIdentifier = "test", manufacturer = "test",
                 serialNumber = "test", firmwareVersion = "1", hardwareVersion = "1", carPlayUsbInterfaceNumber = 3),
         ), AirPlayConfig("test", "test", "", "1", AirPlayDisplayConfig(800, 480)),

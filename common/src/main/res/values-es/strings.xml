@@ -928,12 +928,10 @@
     <string name="settings_cluster_speedometer_album_color_description">Iguala el color del borde del álbum con transiciones suaves. Conserva la opacidad elegida.</string>
     <string name="settings_wired_backend_title">Red cableada (experimental)</string>
     <string name="settings_wired_backend_mode">Modo</string>
-    <string name="settings_wired_backend_description">AUTO conserva la ruta VPN actual. VPN usa explícitamente la VPN de Android. USERSPACE prueba lwIP por USB. Los cambios se aplican en la próxima conexión. El modo de usuario no solicita autorización VPN ni ADB.</string>
+    <string name="settings_wired_backend_description">Auto intenta primero VPN y después lwIP por USB si VPN no está disponible. VPN solo usa la VPN de Android. El modo de usuario usa lwIP directamente sin autorización VPN ni ADB. Los cambios se aplican en la próxima conexión.</string>
     <string name="settings_wired_backend_auto">Automático</string>
     <string name="settings_wired_backend_vpn">VPN</string>
     <string name="settings_wired_backend_userspace">Espacio de usuario</string>
-    <string name="settings_wired_backend_clear_validation">Borrar el registro de validación de lwIP</string>
-    <string name="settings_wired_backend_validation_cleared">Se borró el registro de validación de lwIP.</string>
     <string name="wired_backend_failure_native_unavailable">No se pudo iniciar la pila de red de usuario. Elige VPN o actualiza DiPlay.</string>
     <string name="wired_backend_failure_vpn_unavailable">Android no pudo iniciar la red VPN. Comprueba la autorización VPN o elige el modo de usuario.</string>
 </resources>

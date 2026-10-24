@@ -2084,13 +2084,6 @@ class DiPlayActivity : ComponentActivity(), AppAppearanceOwner {
                 AirPlayPersistence.saveWiredBackendPreference(this, preferences[index])
                 markReconnectNeeded()
             }
-            if (AirPlayPersistence.loadWiredBackendSuccessCache(this) != null) {
-                card.addView(button(getString(R.string.settings_wired_backend_clear_validation), false) {
-                    AirPlayPersistence.clearWiredBackendSuccessCache(this)
-                    toast(getString(R.string.settings_wired_backend_validation_cleared))
-                    render()
-                }, matchButton(0, 60))
-            }
         }
         filteredSection(content, SettingsSection.CAR_BUTTON,
             getString(R.string.car_button_in_carplay), R.drawable.ic_dp_car) { card -> carButtonCard = card; carButtonControls(card) }

@@ -21,6 +21,8 @@ import java.nio.ByteBuffer
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.ConcurrentHashMap
 
 /** Exact Apple USB identities allowed by the deployment configuration. */
 class IphoneUsbMatcher private constructor(
@@ -71,6 +73,7 @@ class IphoneUsbHost(
     private val onDiagnostic: (String) -> Unit = {},
 ) {
     private val appContext = context.applicationContext
+    private val permissionEpochs = ConcurrentHashMap<String, Int>()
 
     sealed class PermissionRequest {
         data class AlreadyGranted(val device: UsbDevice) : PermissionRequest()
@@ -111,6 +114,8 @@ class IphoneUsbHost(
     @Throws(IphoneUsbException::class)
     fun requestPermission(device: UsbDevice, allowAdbFallback: Boolean = true): PermissionRequest {
         requireConfiguredDevice(device)
+        val epoch = permissionRequests.incrementAndGet()
+        permissionEpochs[device.deviceName] = epoch
         if (usbManager.hasPermission(device)) return PermissionRequest.AlreadyGranted(device)
 
         val ui = UsbPermissionActivityProbe.inspect(appContext)
@@ -122,7 +127,7 @@ class IphoneUsbHost(
                 return PermissionRequest.AdbRequired(device)
             }
         }
-        usbManager.requestPermission(device, permissionPendingIntent())
+        usbManager.requestPermission(device, permissionPendingIntent(epoch))
         return PermissionRequest.Requested(
             device,
             afterMissingUiAdbFailure = ui.state == UsbPermissionActivityProbe.State.UNAVAILABLE,
@@ -134,6 +139,8 @@ class IphoneUsbHost(
         if (intent.action != permissionAction) return null
         val device = intent.usbDevice() ?: return null
         if (!matcher.matches(device.vendorId, device.productId)) return null
+        val epoch = permissionEpochs[device.deviceName] ?: return null
+        if (intent.getIntExtra(PERMISSION_EPOCH, -1) != epoch) return null
         return if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
             PermissionResult.Granted(device)
         } else {
@@ -148,6 +155,12 @@ class IphoneUsbHost(
         return device.takeIf { matcher.matches(it.vendorId, it.productId) }
     }
 
+    fun parseDetachedDevice(intent: Intent): UsbDevice? {
+        if (intent.action != UsbManager.ACTION_USB_DEVICE_DETACHED) return null
+        val device = intent.usbDevice() ?: return null
+        return device.takeIf { matcher.matches(it.vendorId, it.productId) }
+    }
+
     /** Register once for this host instance and close the returned handle to unregister it. */
     fun registerPermissionReceiver(onResult: (PermissionResult) -> Unit): Closeable =
         registerReceiver(IntentFilter(permissionAction)) { parsePermissionResult(it)?.let(onResult) }
@@ -156,6 +169,11 @@ class IphoneUsbHost(
     fun registerAttachReceiver(onAttached: (UsbDevice) -> Unit): Closeable =
         registerReceiver(IntentFilter(UsbManager.ACTION_USB_DEVICE_ATTACHED)) {
             parseAttachedDevice(it)?.let(onAttached)
+        }
+
+    fun registerDetachReceiver(onDetached: (UsbDevice) -> Unit): Closeable =
+        registerReceiver(IntentFilter(UsbManager.ACTION_USB_DEVICE_DETACHED)) {
+            parseDetachedDevice(it)?.let(onDetached)
         }
 
     /**
@@ -356,11 +374,11 @@ class IphoneUsbHost(
         }
     }
 
-    private fun permissionPendingIntent(): PendingIntent {
-        val intent = Intent(permissionAction).setPackage(appContext.packageName)
+    private fun permissionPendingIntent(epoch: Int): PendingIntent {
+        val intent = Intent(permissionAction).setPackage(appContext.packageName).putExtra(PERMISSION_EPOCH, epoch)
         return PendingIntent.getBroadcast(
             appContext,
-            0,
+            epoch,
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
@@ -399,6 +417,8 @@ class IphoneUsbHost(
     }
 
     companion object {
+        private const val PERMISSION_EPOCH = "diplay.usb.permission.epoch"
+        private val permissionRequests = AtomicInteger()
         private const val USB_VENDOR_DEVICE_IN = 0xc0
         private const val USB_STANDARD_DEVICE_IN = 0x80
         private const val GET_CONFIGURATION_REQUEST = 0x08

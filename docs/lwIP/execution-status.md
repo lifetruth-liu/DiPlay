@@ -23,8 +23,10 @@
   peer、native SETUP、Activity/配对及 VPN/无线所有权自动化通过。API 26 arm64 真机上的 native
   通道/JNI instrumentation 也通过；另有一次真实 iPhone NCM 会话通过视频、音乐、导航、Siri
   双向语音和触控烟测。电话及其余设备矩阵未测，不能据此宣称 P4 最终设备验收完成。
-- **P5：**后端偏好、受限 AUTO 回退、成功缓存、Advanced 实验选项及脱敏诊断已实现；AUTO
-  仍走既有 VPN 默认路径，USERSPACE 需显式选择。
+- **P5：**后端偏好、Advanced 实验选项及脱敏诊断已实现。A/P0 改为 AUTO 优先 VPN，
+  明确不可用时尝试一次 lwIP；移除成功缓存与清除按钮。历史实施记录中的缓存门槛已被此策略替代。
+- **USB 恢复 B/C：**进程级枚举 token、拔线取消、回调隔离及有界恢复已实现；仅 Start 未 active
+  不再触发旧会话 transition。默认仍保留 10 秒兼容窗口，DIRECT/2 秒策略仅 debug 注入；真机性能与兼容矩阵未验收。
 - **P6：**native CTest、Android 生命周期/端点回归、fuzz driver、配置成本与 release APK
   静态布局检查已接入。三个 seed-7 sanitizer campaign 均完成每目标 8 CPU 小时，报告/二进制摘要匹配，0 失败 batch、0 崩溃及 sanitizer 诊断；
   campaign 启动后仅新增宿主测试 harness，aggregate 源目录摘要变化已单独标注；
@@ -2725,3 +2727,21 @@ assistant 回传 PCM 也已播放，丢包、欠载和写错误均为 0。地图
 
 同日两次真实 USB 断开/重连的阶段耗时、原因分析和脱敏 logcat 事件摘录见
 [USERSPACE 重连时延分析](reconnect-latency-2026-10-24.md)。该短时测量不替代 G0/G1/G6 的长稳、循环重连或设备矩阵验收。
+
+### 2026-10-24：A/P0 自动回退，不再依赖验证记录
+
+AUTO 优先 VPN，明确不可用时尝试一次 lwIP；启动前授权组件缺失/平台限制不等待 VPN ADB 补授权。保留拒绝/取消、显式 VPN/USERSPACE 和 NCM 所有权边界。删除成功缓存读写、active 回调和清除按钮，更新九种语言说明。新一轮重连重新检查前置失败；同一个授权请求可跨 controller 重建，过期请求不能覆盖当前回退。
+
+先复现回归再修复；独立复核通过。AGENTS.md 九项检查加 `--max-workers=2` 完整成功（8m10s，250 个任务，36 执行、214 UP-TO-DATE），shared 1830、common 1612 项测试零失败/错误；三应用 lint/assemble、凭据扫描、四 ABI native/APK 核验及差异格式检查均通过。默认并发首次检查中的两个计时测试单独及完整复跑通过，未更改其断言。
+
+详见 [A/P0 实施与验证结果](wired-fallback-and-recovery-plan-2026-10-24.md)。截图在 `common/build/reports/lwip-settings-ui/`；本轮没有真机时延复测，B–E 尚未实施，完整设备门槛仍未验收。
+
+### 2026-10-24：B/C 枚举生命周期与有界恢复
+
+USB 监听在进程启动时安装，并跨 controller 间隙保留；枚举 token、授权 epoch 和 attempt generation 隔离旧广播/回调，期望重枚举与物理拔线分开处理。Start、active、停止原因和 transition 结果分开记录；旧 token 的迟到写入不能复活记录。旧 ADB pending key 只按旧 token 清理，排队任务在执行前复核。watchdog 失败与取消/active 原子发布。
+
+完整配置的新枚举或仅 Start 未 active 直接打开；同枚举旧 active 主动重连仍请求一次兼容 transition。直接路径超时后，只有旧资源关闭且 worker 退出才能领取一次恢复；恢复失败停止自动重试。debug-only DIRECT/EARLY_REUSE 可用于后续 A/B，2 秒时要求 vendor request 前后的接口/端点结构指纹相同；正式默认仍为 10 秒。
+
+独立规范/代码复核通过；确定性回归涵盖同名快速拔插、旧授权/ADB key、旧打开资源、关闭失败、worker 未退出、描述变化、延迟 detach、watchdog 竞争及预算耗尽。最终完整九项检查加 `--max-workers=1` 成功（7m02s，250 项任务：15 执行、235 UP-TO-DATE）；shared 1874、common 1633 项零失败/错误，三应用 lint/assemble、凭据扫描、四 ABI 核验与差异格式检查通过。APK SHA-256：`fdbcb8a9166c9ebc5806e114450c864e0fd24f161d907bed233480e48e333a97`。
+
+详见 [B/C 实施与测试记录](wired-fallback-and-recovery-plan-2026-10-24.md)。尚未安装到真机或完成时延/设备矩阵验证；D/E 未实施，不宣称已消除 18 秒端点等待。

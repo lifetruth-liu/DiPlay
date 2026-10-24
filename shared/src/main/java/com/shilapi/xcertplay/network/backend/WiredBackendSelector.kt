@@ -17,29 +17,16 @@ enum class WiredBackendFailure {
     INITIALIZATION,
 }
 
-/** A successful userspace probe is scoped to the stack build and process ABI that passed it. */
-data class WiredBackendSuccessCache(val stackVersion: String, val abi: String) {
-    fun matches(currentStackVersion: String, currentAbi: String): Boolean =
-        stackVersion.isNotBlank() && abi.isNotBlank() &&
-            stackVersion == currentStackVersion && abi == currentAbi
-}
-
 /** Per-connection selection state. Each backend can be attempted at most once. */
 class WiredBackendSelector(
     private val preference: WiredBackendPreference,
-    userspaceValidatedForRelease: Boolean,
-    successCache: WiredBackendSuccessCache? = null,
-    stackVersion: String = "",
-    abi: String = "",
 ) {
-    private val userspaceAllowedForAuto = userspaceValidatedForRelease ||
-        successCache?.matches(stackVersion, abi) == true
     private val attempted = linkedSetOf<WiredBackend>()
 
     /** AUTO deliberately begins with the established VPN behavior. */
     @Synchronized fun begin(): WiredBackend? {
         if (attempted.isNotEmpty()) return null
-        val first = firstAttempt(preference, userspaceValidatedForRelease = userspaceAllowedForAuto)
+        val first = firstAttempt(preference)
         attempted += first
         return first
     }
@@ -52,7 +39,7 @@ class WiredBackendSelector(
     ): WiredBackend? {
         if (cancelled || failure == WiredBackendFailure.CANCELLED || failure == WiredBackendFailure.USER_CANCELLED) return null
         if (backend !in attempted || preference != WiredBackendPreference.AUTO || backend != WiredBackend.VPN ||
-            failure != WiredBackendFailure.VPN_UNAVAILABLE || !userspaceAllowedForAuto ||
+            failure != WiredBackendFailure.VPN_UNAVAILABLE ||
             attempted.size >= MAX_ATTEMPTS || WiredBackend.USERSPACE in attempted) return null
         attempted += WiredBackend.USERSPACE
         return WiredBackend.USERSPACE
@@ -67,12 +54,8 @@ class WiredBackendSelector(
         const val MAX_ATTEMPTS = 2
         const val STACK_VERSION = "lwip-2.2.1-diplay.1"
 
-        /** Initial selection never uses a saved success to interrupt a working VPN path. */
-        @Suppress("UNUSED_PARAMETER")
-        fun firstAttempt(
-            preference: WiredBackendPreference,
-            userspaceValidatedForRelease: Boolean,
-        ): WiredBackend = when (preference) {
+        /** AUTO always starts with VPN; only explicit unavailability permits fallback. */
+        fun firstAttempt(preference: WiredBackendPreference): WiredBackend = when (preference) {
             WiredBackendPreference.VPN, WiredBackendPreference.AUTO -> WiredBackend.VPN
             WiredBackendPreference.USERSPACE -> WiredBackend.USERSPACE
         }

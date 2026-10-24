@@ -19,7 +19,6 @@ import com.shilapi.xcertplay.orchestration.MfiTarget
 import com.shilapi.xcertplay.orchestration.WirelessHotspotMode
 import com.shilapi.xcertplay.network.WifiP2pChannels
 import com.shilapi.xcertplay.network.backend.WiredBackendPreference
-import com.shilapi.xcertplay.network.backend.WiredBackendSuccessCache
 import com.shilapi.xcertplay.transport.LockdownPairRecord
 import java.io.File
 
@@ -56,8 +55,6 @@ object AirPlayPersistence {
     private const val KEY_WIRELESS_ENABLED = "wireless_enabled"
     private const val KEY_WIRELESS_HOTSPOT_MODE = "wireless_hotspot_mode"
     private const val KEY_WIRED_BACKEND_PREFERENCE = "wired_backend_preference"
-    private const val KEY_WIRED_BACKEND_SUCCESS_VERSION = "wired_backend_success_version"
-    private const val KEY_WIRED_BACKEND_SUCCESS_ABI = "wired_backend_success_abi"
     private const val KEY_WIFI_P2P_PREFERRED_CHANNEL = "wifi_p2p_preferred_channel"
     /** Read by CarPlayController in the shared module under the same name. */
     const val KEY_WIFI_DIRECT_SCAN_PAUSE = "wifi_direct_scan_pause"
@@ -347,27 +344,6 @@ object AirPlayPersistence {
     fun saveWiredBackendPreference(context: Context, preference: WiredBackendPreference) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putString(KEY_WIRED_BACKEND_PREFERENCE, preference.name).apply()
-    }
-
-    fun loadWiredBackendSuccessCache(context: Context): WiredBackendSuccessCache? {
-        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        val version = prefs.getString(KEY_WIRED_BACKEND_SUCCESS_VERSION, null)
-        val abi = prefs.getString(KEY_WIRED_BACKEND_SUCCESS_ABI, null)
-        return if (version.isNullOrBlank() || abi.isNullOrBlank()) null
-            else WiredBackendSuccessCache(version, abi)
-    }
-
-    fun saveWiredBackendSuccessCache(context: Context, stackVersion: String, abi: String) {
-        require(stackVersion.isNotBlank() && abi.isNotBlank())
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putString(KEY_WIRED_BACKEND_SUCCESS_VERSION, stackVersion)
-            .putString(KEY_WIRED_BACKEND_SUCCESS_ABI, abi).apply()
-    }
-
-    fun clearWiredBackendSuccessCache(context: Context) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .remove(KEY_WIRED_BACKEND_SUCCESS_VERSION)
-            .remove(KEY_WIRED_BACKEND_SUCCESS_ABI).apply()
     }
 
     fun loadMfiTarget(context: Context): MfiTarget {

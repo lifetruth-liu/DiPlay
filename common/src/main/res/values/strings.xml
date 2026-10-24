@@ -1031,12 +1031,10 @@
     <string name="settings_cluster_speedometer_album_color_description">Match the album frame color with smooth transitions. Keeps the selected opacity.</string>
     <string name="settings_wired_backend_title">Wired network backend (experimental)</string>
     <string name="settings_wired_backend_mode">Backend</string>
-    <string name="settings_wired_backend_description">AUTO keeps the current VPN path. VPN explicitly uses Android VPN. USERSPACE tests lwIP over USB. Changes apply on the next connection. User-space does not request VPN authorization or ADB.</string>
+    <string name="settings_wired_backend_description">Auto tries VPN first, then lwIP over USB if VPN is unavailable. VPN uses Android VPN only. User-space uses lwIP directly without VPN authorization or ADB. Changes apply on the next connection.</string>
     <string name="settings_wired_backend_auto">Auto</string>
     <string name="settings_wired_backend_vpn">VPN</string>
     <string name="settings_wired_backend_userspace">User-space</string>
-    <string name="settings_wired_backend_clear_validation">Clear lwIP validation record</string>
-    <string name="settings_wired_backend_validation_cleared">lwIP validation record cleared.</string>
     <string name="wired_backend_failure_native_unavailable">The user-space network stack could not start. Choose VPN or update DiPlay.</string>
     <string name="wired_backend_failure_vpn_unavailable">Android could not start the VPN network. Check VPN authorization or choose User-space.</string>
 </resources>

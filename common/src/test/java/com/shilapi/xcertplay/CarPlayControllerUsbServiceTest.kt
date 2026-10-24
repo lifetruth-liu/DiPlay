@@ -66,17 +66,27 @@ class CarPlayControllerUsbServiceTest {
         assertEquals(0, context.receivers.size)
     }
 
-    @Test fun availableWiredUsbStillRegistersAndClosesBothIphoneReceivers() {
+    @Test fun availableWiredUsbRegistersAndClosesAllIphoneReceivers() {
         val context = UsbContext(true)
         val controller = controller(context, CarPlayTransport.WIRED, MfiTarget.LOCAL)
         controller.start()
-        assertEquals(2, context.receivers.size)
+        assertEquals(4, context.receivers.size)
         assertTrue(context.receivers.values.any { it.hasAction("${context.packageName}.IPHONE_USB_PERMISSION") })
         assertTrue(context.receivers.values.any { it.hasAction("android.hardware.usb.action.USB_DEVICE_ATTACHED") })
         controller.close()
         assertTrue(controller.awaitClosed(2_000))
-        assertEquals(0, context.receivers.size)
-        assertEquals(2, context.unregistered)
+        assertEquals(1, context.receivers.size) // process lifecycle receiver outlives this controller
+        assertEquals(3, context.unregistered)
+    }
+
+    @Test fun registrationFailureClosesEarlierControllerReceiversAndKeepsOnlyProcessOwner() {
+        val context = UsbContext(true, failRegistrationAt = 3)
+        val controller = controller(context, CarPlayTransport.WIRED, MfiTarget.LOCAL)
+        controller.start()
+        shadowOf(Looper.getMainLooper()).idle()
+        assertEquals(1, context.receivers.size)
+        assertEquals(1, context.unregistered)
+        assertTrue(statuses.any { it is CarPlayStatus.Failed })
     }
 
     @Test fun availableWirelessCh341StillWaitsForMfiAndClosesItsPermissionReceiver() {
@@ -203,6 +213,7 @@ class CarPlayControllerUsbServiceTest {
             ReflectionHelpers.setField(this, "mName", node)
             ReflectionHelpers.setField(this, "mVendorId", vendor)
             ReflectionHelpers.setField(this, "mProductId", product)
+            ReflectionHelpers.setField(this, "mConfigurations", emptyArray<android.hardware.usb.UsbConfiguration>())
         }
 
     private fun missingServiceFailsNormally(transport: CarPlayTransport, target: MfiTarget) {
@@ -228,14 +239,17 @@ class CarPlayControllerUsbServiceTest {
                 override fun onDebugLog(message: String) { logs?.add(message) }
             }, object : AirPlayMediaHandler {}, statuses::add).also(controllers::add)
 
-    private class UsbContext(private val hasUsb: Boolean) : ContextWrapper(RuntimeEnvironment.getApplication()) {
+    private class UsbContext(private val hasUsb: Boolean, private val failRegistrationAt: Int = -1) : ContextWrapper(RuntimeEnvironment.getApplication()) {
         val receivers = mutableMapOf<BroadcastReceiver, IntentFilter>()
         var unregistered = 0
+        var registrations = 0
         override fun getApplicationContext(): Context = this
         override fun bindService(service: Intent, conn: ServiceConnection, flags: Int): Boolean = false
         override fun getSystemService(name: String): Any? =
             if (name == USB_SERVICE && !hasUsb) null else super.getSystemService(name)
         override fun registerReceiver(receiver: BroadcastReceiver?, filter: IntentFilter): Intent? {
+            registrations++
+            if (registrations == failRegistrationAt) throw SecurityException("receiver registration blocked")
             if (receiver != null) receivers[receiver] = filter
             return super.registerReceiver(receiver, filter)
         }

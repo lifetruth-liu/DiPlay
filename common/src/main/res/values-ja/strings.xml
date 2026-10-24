@@ -1030,12 +1030,10 @@
     <string name="settings_cluster_speedometer_album_color_description">アルバムの枠の色に滑らかに切り替わります。選択した不透明度は維持されます。</string>
     <string name="settings_wired_backend_title">有線ネットワークバックエンド（実験的機能）</string>
     <string name="settings_wired_backend_mode">方式</string>
-    <string name="settings_wired_backend_description">AUTO は現在の VPN 経路を維持します。VPN は Android VPN を明示的に使用します。USERSPACE は USB 経由で lwIP をテストします。変更は次回の接続から適用されます。ユーザー空間モードでは VPN の許可や ADB を要求しません。</string>
+    <string name="settings_wired_backend_description">自動モードは VPN を優先し、VPN が利用できない場合は USB 経由の lwIP を試します。VPN モードは Android VPN のみを使用します。ユーザー空間モードは lwIP を直接使用し、VPN の許可や ADB は不要です。変更は次回の接続から適用されます。</string>
     <string name="settings_wired_backend_auto">自動</string>
     <string name="settings_wired_backend_vpn">VPN</string>
     <string name="settings_wired_backend_userspace">ユーザー空間</string>
-    <string name="settings_wired_backend_clear_validation">lwIP 検証記録を消去</string>
-    <string name="settings_wired_backend_validation_cleared">lwIP 検証記録を消去しました。</string>
     <string name="wired_backend_failure_native_unavailable">ユーザー空間ネットワークを起動できませんでした。VPNを選ぶか、DiPlayを更新してください。</string>
     <string name="wired_backend_failure_vpn_unavailable">AndroidでVPNネットワークを起動できませんでした。VPNの許可を確認するか、ユーザー空間を選んでください。</string>
 </resources>

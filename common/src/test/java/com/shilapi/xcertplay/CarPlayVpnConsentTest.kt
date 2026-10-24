@@ -45,6 +45,7 @@ class CarPlayVpnConsentTest {
         activity = Robolectric.buildActivity(CarPlayHostActivity::class.java).get()
         ReflectionHelpers.setField(activity, "stageStatusView", TextView(activity))
         invoke("initializeSessionLog")
+        ReflectionHelpers.setField(activity, "wiredBackendPreference", WiredBackendPreference.VPN)
         replaceLauncher { launches += 1 }
     }
 
@@ -54,6 +55,104 @@ class CarPlayVpnConsentTest {
         ReflectionHelpers.getField<ExecutorService>(activity, "teardownExecutor").shutdownNow()
         ReflectionHelpers.getField<ExecutorService>(activity, "airPlayCommandExecutor").shutdownNow()
         CarPlayBackgroundSession.clear()
+    }
+
+    @Test fun autoUnavailableSkipsAdbAndCarriesFailureIntoRuntimeConfig() {
+        ReflectionHelpers.setField(activity, "wiredBackendPreference", WiredBackendPreference.AUTO)
+        replaceLauncher { throw ActivityNotFoundException("Missing OEM VPN dialog") }
+        invoke("requestVpnConsent")
+        assertFalse(field("vpnReady"))
+        assertFalse(field("vpnAdbConsentTried"))
+        assertEquals(com.shilapi.xcertplay.network.backend.WiredBackendFailure.VPN_UNAVAILABLE,
+            ReflectionHelpers.getField<Any?>(activity, "vpnPreflightFailure"))
+    }
+
+    @Test fun autoPlatformFailureDuringPrepareSkipsAdb() {
+        ReflectionHelpers.setField(activity, "wiredBackendPreference", WiredBackendPreference.AUTO)
+        VpnConsentTestShadow.failure = SecurityException("VPN preparation blocked")
+        invoke("requestVpnConsent")
+        assertFalse(field("vpnReady"))
+        assertFalse(field("vpnAdbConsentTried"))
+        assertFalse(field("awaitingVpnConsent"))
+        assertEquals(0, launches)
+        assertEquals(com.shilapi.xcertplay.network.backend.WiredBackendFailure.VPN_UNAVAILABLE,
+            ReflectionHelpers.getField<Any?>(activity, "vpnPreflightFailure"))
+    }
+
+    @Test fun autoRefusalDoesNotBecomePlatformUnavailability() {
+        ReflectionHelpers.setField(activity, "wiredBackendPreference", WiredBackendPreference.AUTO)
+        invoke("requestVpnConsent")
+        ReflectionHelpers.callInstanceMethod<Unit>(activity, "onVpnConsentResult",
+            ReflectionHelpers.ClassParameter.from(Int::class.javaPrimitiveType, Activity.RESULT_CANCELED))
+        assertFalse(field("vpnReady"))
+        assertFalse(field("vpnAdbConsentTried"))
+        assertNull(ReflectionHelpers.getField<Any?>(activity, "vpnPreflightFailure"))
+    }
+
+    @Test fun retryClearsPreviousPlatformFailureAndLateResultCannotOverrideFallback() {
+        ReflectionHelpers.setField(activity, "wiredBackendPreference", WiredBackendPreference.AUTO)
+        replaceLauncher { throw ActivityNotFoundException("missing") }
+        invoke("requestVpnConsent")
+        ReflectionHelpers.callInstanceMethod<Unit>(activity, "onVpnConsentResult",
+            ReflectionHelpers.ClassParameter.from(Int::class.javaPrimitiveType, Activity.RESULT_OK))
+        assertFalse(field("vpnReady"))
+        assertNotNull(ReflectionHelpers.getField<Any?>(activity, "vpnPreflightFailure"))
+        replaceLauncher { launches++ }
+        invoke("requestVpnConsent")
+        assertNull(ReflectionHelpers.getField<Any?>(activity, "vpnPreflightFailure"))
+        assertTrue(field("awaitingVpnConsent"))
+    }
+
+    @Test fun pendingConsentRemainsValidAcrossAControllerRebuild() {
+        invoke("requestVpnConsent")
+        ReflectionHelpers.setField(activity, "restartGeneration", 1)
+        ReflectionHelpers.callInstanceMethod<Unit>(activity, "onVpnConsentResult",
+            ReflectionHelpers.ClassParameter.from(Int::class.javaPrimitiveType, Activity.RESULT_OK))
+        assertTrue(field("vpnReady"))
+        assertFalse(field("awaitingVpnConsent"))
+    }
+
+    @Test fun explicitVpnAdbConsentCanCompleteWhilePreviousWirelessControllerStillRuns() {
+        ReflectionHelpers.setField(activity, "controller", org.mockito.Mockito.mock(
+            com.shilapi.xcertplay.orchestration.CarPlayController::class.java))
+        VpnConsentTestShadow.consent = null
+        adbResult()
+        assertTrue(field("vpnReady"))
+    }
+
+    @Test fun staleAdbResultCannotAuthorizeReplacementOrFallback() {
+        VpnConsentTestShadow.consent = null
+        ReflectionHelpers.setField(activity, "vpnConsentGeneration", 1)
+        adbResult()
+        assertFalse(field("vpnReady"))
+        ReflectionHelpers.setField(activity, "vpnConsentGeneration", 0)
+        ReflectionHelpers.setField(activity, "vpnPreflightFailure",
+            com.shilapi.xcertplay.network.backend.WiredBackendFailure.VPN_UNAVAILABLE)
+        adbResult()
+        assertFalse(field("vpnReady"))
+    }
+
+    @Test fun adbConsentCanCompleteAfterControllerRebuildForTheSameRequest() {
+        ReflectionHelpers.setField(activity, "restartGeneration", 1)
+        VpnConsentTestShadow.consent = null
+        adbResult()
+        assertTrue(field("vpnReady"))
+    }
+
+    @Test fun pendingConsentCannotAuthorizeAfterSwitchingToUserspace() {
+        invoke("requestVpnConsent")
+        ReflectionHelpers.setField(activity, "wiredBackendPreference", WiredBackendPreference.USERSPACE)
+        ReflectionHelpers.callInstanceMethod<Unit>(activity, "onVpnConsentResult",
+            ReflectionHelpers.ClassParameter.from(Int::class.javaPrimitiveType, Activity.RESULT_OK))
+        assertFalse(field("vpnReady"))
+        assertFalse(field("awaitingVpnConsent"))
+    }
+
+    private fun adbResult() {
+        ReflectionHelpers.callInstanceMethod<Unit>(activity, "onVpnAdbConsentResult",
+            ReflectionHelpers.ClassParameter.from(Int::class.javaPrimitiveType, 0),
+            ReflectionHelpers.ClassParameter.from(com.shilapi.xcertplay.adb.LocalAdb.Access::class.java,
+                com.shilapi.xcertplay.adb.LocalAdb.Access.READY))
     }
 
     @Test fun missingConsentDialogDoesNotCrashOrLeaveAuthorizationPending() {

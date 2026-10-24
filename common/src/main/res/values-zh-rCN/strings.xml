@@ -988,12 +988,10 @@
     <string name="settings_cluster_speedometer_album_color_description">平滑过渡到专辑边框的颜色，并保留所选的不透明度。</string>
     <string name="settings_wired_backend_title">有线网络后端（实验性）</string>
     <string name="settings_wired_backend_mode">模式</string>
-    <string name="settings_wired_backend_description">AUTO 保持当前 VPN 路径。VPN 明确使用 Android VPN。USERSPACE 用于测试通过 USB 运行的 lwIP。更改会在下次连接时生效。用户态模式不会请求 VPN 授权或 ADB。</string>
+    <string name="settings_wired_backend_description">自动模式优先使用 VPN，VPN 不可用时尝试通过 USB 运行的 lwIP。VPN 模式仅使用 Android VPN。用户态模式直接使用 lwIP，无需 VPN 授权或 ADB。更改在下次连接时生效。</string>
     <string name="settings_wired_backend_auto">自动</string>
     <string name="settings_wired_backend_vpn">VPN</string>
     <string name="settings_wired_backend_userspace">用户态</string>
-    <string name="settings_wired_backend_clear_validation">清除 lwIP 验证记录</string>
-    <string name="settings_wired_backend_validation_cleared">已清除 lwIP 验证记录。</string>
     <string name="wired_backend_failure_native_unavailable">用户态网络栈无法启动。请选择 VPN 或更新 DiPlay。</string>
     <string name="wired_backend_failure_vpn_unavailable">Android 无法启动 VPN 网络。请检查 VPN 授权，或选择用户态模式。</string>
 </resources>
