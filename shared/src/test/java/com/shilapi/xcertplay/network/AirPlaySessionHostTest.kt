@@ -44,6 +44,31 @@ class AirPlaySessionHostTest {
         }
     }
 
+    @Test fun wiredAttachmentReportsAcceptedTcpWithAnIdentityUniqueToItsLease() {
+        val accepted = LinkedBlockingQueue<AirPlayTcpAccepted>()
+        val listener = object : AirPlaySessionListener {
+            override fun onTcpAccepted(event: AirPlayTcpAccepted) { accepted.add(event) }
+        }
+        AirPlaySessionHost().use { host ->
+            fun wired() = host.attach(address, config, identity, PairingStore(), null, listener,
+                object : AirPlayMediaHandler {})
+            val first = wired()
+            val firstEvent = Socket(address, checkNotNull(host.boundPort(first))).use {
+                checkNotNull(accepted.poll(3, TimeUnit.SECONDS)) { "Wired attachment did not report TCP acceptance" }
+            }
+            // A wired acceptance identity must not acquire wireless detach/filter semantics.
+            assertFalse(host.detachWireless(firstEvent.listener))
+            assertTrue(host.isAttached())
+            val second = wired()
+            val secondEvent = Socket(address, checkNotNull(host.boundPort(second))).use {
+                checkNotNull(accepted.poll(3, TimeUnit.SECONDS)) { "Replacement wired attachment did not report TCP acceptance" }
+            }
+            assertNotSame(firstEvent.listener, secondEvent.listener)
+            assertTrue(firstEvent.internal)
+            assertTrue(secondEvent.acceptedAtNanos >= firstEvent.acceptedAtNanos)
+        }
+    }
+
     @Test fun delayedFailureOfOldListenerCannotCloseOrNotifyReplacement() {
         val failures = LinkedBlockingQueue<() -> Unit>()
         val bound = LinkedBlockingQueue<TcpListener>()

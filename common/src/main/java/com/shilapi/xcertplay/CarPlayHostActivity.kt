@@ -230,11 +230,20 @@ class CarPlayHostActivity : ComponentActivity() {
         availableCurrentMilliAmps = AirPlayPersistence.loadUsbChargingCurrent(this).milliAmps,
         wiredBackendPreference = AirPlayPersistence.loadWiredBackendPreference(this),
         vpnPreflightFailure = vpnPreflightFailure.takeIf { vpnPreflightRestartGeneration == restartGeneration },
+        wiredCloseExperiment = if (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0)
+            intent?.getStringExtra("wiredCloseExperiment")?.let { value ->
+                com.shilapi.xcertplay.orchestration.WiredCloseExperiment.entries.firstOrNull { it.name == value }
+            } ?: com.shilapi.xcertplay.orchestration.WiredCloseExperiment.LEGACY
+        else com.shilapi.xcertplay.orchestration.WiredCloseExperiment.LEGACY,
+        wiredStartQuiet = com.shilapi.xcertplay.orchestration.WiredStartQuietPolicy.resolve(
+            intent?.getLongExtra("wiredStartQuietMillis", 2_000L),
+            applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0,
+        ),
         wiredRecoveryExperiment = if (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0)
             intent?.getStringExtra("wiredRecoveryExperiment")?.let { value ->
                 com.shilapi.xcertplay.orchestration.WiredRecoveryExperiment.entries.firstOrNull { it.name == value }
-            } ?: com.shilapi.xcertplay.orchestration.WiredRecoveryExperiment.COMPATIBILITY
-        else com.shilapi.xcertplay.orchestration.WiredRecoveryExperiment.COMPATIBILITY,
+            } ?: com.shilapi.xcertplay.orchestration.WiredRecoveryExperiment.DEFAULT
+        else com.shilapi.xcertplay.orchestration.WiredRecoveryExperiment.DEFAULT,
     )
 
     private val vpnConsent =
@@ -641,6 +650,7 @@ class CarPlayHostActivity : ComponentActivity() {
     // last time. A retry scheduled before the count went up leaves the attempt alone only while it is
     // still running when the retry fires (#873).
     private var controlRunningCount = 0
+    private var wiredControlRunningGeneration: Int? = null
     private var lossSinceControlRunning = false
     private var requestedSmallWindowForStream: Boolean? = null
     @Volatile private var adbNaviMode: com.shilapi.xcertplay.hud.BydClusterNaviMode? = null
@@ -5440,8 +5450,12 @@ class CarPlayHostActivity : ComponentActivity() {
         controllerGeneration: Int,
     ): (CarPlayStatus) -> Unit = report@{ status ->
         if (controllerGeneration != restartGeneration) return@report
-        if (status is CarPlayStatus.RunningControl || status is CarPlayStatus.RunningWireless) {
+        val firstWiredTcp = status is CarPlayStatus.EstablishingWiredSession &&
+            wiredControlRunningGeneration != controllerGeneration
+        if (status is CarPlayStatus.RunningControl || status is CarPlayStatus.RunningWireless || firstWiredTcp) {
             controlRunningCount++
+            if (status is CarPlayStatus.RunningControl || firstWiredTcp)
+                wiredControlRunningGeneration = controllerGeneration
             lossSinceControlRunning = false
         } else if (status is CarPlayStatus.Failed || status is CarPlayStatus.ControlEnded) {
             lossSinceControlRunning = true
@@ -6714,6 +6728,9 @@ class CarPlayHostActivity : ComponentActivity() {
 
     // The keywords are English; matching the English text keeps the result the same in every UI language.
     private fun friendlyStage(message: String, englishMessage: String = message): String = when {
+        message in listOf(R.string.wired_stage_changing_usb, R.string.wired_stage_authenticating,
+            R.string.wired_stage_waiting_network, R.string.wired_stage_establishing_session,
+            R.string.wired_stage_trying_userspace).map { getString(it) } -> message
         message == getString(R.string.wired_backend_failure_native_unavailable) ||
             message == getString(R.string.wired_backend_failure_vpn_unavailable) -> message
         message == getString(R.string.vpn_authorization_unavailable) -> message
@@ -6867,11 +6884,14 @@ class CarPlayHostActivity : ComponentActivity() {
         CarPlayStatus.DiscoveringIphone -> res.getString(R.string.discovering_iphone)
         CarPlayStatus.WaitingForIphone -> res.getString(R.string.waiting_for_iphone_over_usb)
         CarPlayStatus.RequestingIphonePermission -> res.getString(R.string.requesting_iphone_usb_permission)
-        CarPlayStatus.WaitingForReenumeration -> res.getString(R.string.status_waiting_reenumeration)
+        CarPlayStatus.WaitingForReenumeration -> res.getString(R.string.wired_stage_changing_usb)
         CarPlayStatus.SelectingConfiguration -> res.getString(R.string.selecting_carplay_configuration)
         CarPlayStatus.OpeningDataPaths -> res.getString(R.string.opening_usb_data_paths)
         CarPlayStatus.Pairing -> res.getString(R.string.pairing_with_iphone)
-        CarPlayStatus.ConnectingControl -> res.getString(R.string.connecting_iap2_control)
+        CarPlayStatus.ConnectingControl -> res.getString(R.string.wired_stage_authenticating)
+        CarPlayStatus.WaitingForWiredNetwork -> res.getString(R.string.wired_stage_waiting_network)
+        CarPlayStatus.EstablishingWiredSession -> res.getString(R.string.wired_stage_establishing_session)
+        CarPlayStatus.TryingUserspace -> res.getString(R.string.wired_stage_trying_userspace)
         CarPlayStatus.AttachingNetwork ->
             if (wirelessEnabled) res.getString(R.string.starting_airplay_service) else res.getString(R.string.status_attaching_ncm)
         CarPlayStatus.RunningControl -> res.getString(R.string.carplay_control_running)

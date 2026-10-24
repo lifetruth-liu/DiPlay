@@ -32,12 +32,10 @@ class WiredSessionMemoryTest {
         WiredSessionMemory.directFailed(phone, 21)
         assertTrue(WiredSessionMemory.claimRecovery(phone))
         WiredSessionMemory.started(phone, 30)
-        WiredSessionMemory.transition(phone, WiredTransitionResult.REQUESTED, 31)
-        WiredSessionMemory.transition(phone, WiredTransitionResult.UNCHANGED_TIMEOUT, 40)
+        WiredSessionMemory.transitionRequested(phone)
         WiredSessionMemory.directFailed(phone, 50)
         assertFalse(WiredSessionMemory.claimRecovery(phone))
         assertEquals(1, WiredSessionMemory.snapshot(phone)!!.transitionsRequested)
-        assertEquals(WiredTransitionResult.UNCHANGED_TIMEOUT, WiredSessionMemory.snapshot(phone)!!.transitionResult)
         WiredSessionMemory.active(phone, 60)
         assertEquals(0, WiredSessionMemory.snapshot(phone)!!.transitionsRequested)
         WiredSessionMemory.stopped(phone, WiredSessionStopReason.STARTUP_FAILURE, 65)
@@ -57,18 +55,6 @@ class WiredSessionMemoryTest {
         assertFalse(WiredSessionMemory.claimRecovery(phone))
     }
 
-    @Test fun transitionOutcomesRetainTheirTimeWithoutConsumingAnotherRequest() {
-        WiredSessionMemory.transition(phone, WiredTransitionResult.REQUESTED, 1)
-        for ((index, outcome) in WiredTransitionResult.entries.filter { it != WiredTransitionResult.REQUESTED }.withIndex()) {
-            val now = index + 2L
-            WiredSessionMemory.transition(phone, outcome, now)
-            val record = WiredSessionMemory.snapshot(phone)!!
-            assertEquals(outcome, record.transitionResult)
-            assertEquals(now, record.transitionAtNanos)
-            assertEquals(1, record.transitionsRequested)
-        }
-    }
-
     @Test fun invalidationPermanentlyRevokesLateCallbacksForThatToken() {
         WiredSessionMemory.active(phone, 1)
         WiredSessionMemory.invalidate(phone)
@@ -76,7 +62,7 @@ class WiredSessionMemoryTest {
             { WiredSessionMemory.started(phone, 2) },
             { WiredSessionMemory.active(phone, 3) },
             { WiredSessionMemory.stopped(phone, WiredSessionStopReason.STARTUP_FAILURE, 4) },
-            { WiredSessionMemory.transition(phone, WiredTransitionResult.REQUESTED, 5) },
+            { WiredSessionMemory.transitionRequested(phone) },
             { WiredSessionMemory.directFailed(phone, 6) },
             { WiredSessionMemory.released(phone, 7) },
             { WiredSessionMemory.recoveryFailed(phone, 8) },

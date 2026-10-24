@@ -983,4 +983,9 @@
     <string name="settings_wired_backend_userspace">وضع المستخدم</string>
     <string name="wired_backend_failure_native_unavailable">تعذر تشغيل مكدس الشبكة في وضع المستخدم. اختر VPN أو حدّث DiPlay.</string>
     <string name="wired_backend_failure_vpn_unavailable">تعذر على Android تشغيل شبكة VPN. تحقق من إذن VPN أو اختر وضع المستخدم.</string>
+    <string name="wired_stage_changing_usb">جارٍ تغيير وضع USB…</string>
+    <string name="wired_stage_authenticating">جارٍ التحقق من الهوية مع iPhone…</string>
+    <string name="wired_stage_waiting_network">في انتظار شبكة USB الخاصة بـ iPhone…</string>
+    <string name="wired_stage_establishing_session">جارٍ إنشاء جلسة CarPlay…</string>
+    <string name="wired_stage_trying_userspace">VPN غير متاح. جارٍ تجربة الشبكة في مساحة المستخدم…</string>
 </resources>

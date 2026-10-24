@@ -103,7 +103,8 @@ class NcmUsbBridgeFramingTest {
             assertArrayEquals(alignedFrame, ncm.recv(50))
             assertArrayEquals(smallFrame, ncm.recv(50))
         }
-        assertEquals(listOf("NCM resynchronized after Invalid NTB16 short-packet pad; skipped=1 resyncs=1"), diagnostics)
+        assertEquals(listOf("NCM resynchronized after Invalid NTB16 short-packet pad; skipped=1 resyncs=1"),
+            diagnostics.filterNot { it.startsWith("NCM transfer ") })
     }
 
     @Test fun nextHeaderWithOnlyItsFirstSignatureByteCorrectIsDropped() {
@@ -141,7 +142,8 @@ class NcmUsbBridgeFramingTest {
             assertArrayEquals(frame64, ncm.recv(50))
             assertArrayEquals(smallFrame, ncm.recv(50))
         }
-        assertTrue("A 64-byte link pad is expected, not a resync: $diagnostics", diagnostics.isEmpty())
+        assertTrue("A 64-byte link pad is expected, not a resync: $diagnostics",
+            diagnostics.none { !it.startsWith("NCM transfer ") })
     }
 
     @Test fun aBlockCutShortInTheMiddleOfAStreamLosesOnlyThatBlock() {

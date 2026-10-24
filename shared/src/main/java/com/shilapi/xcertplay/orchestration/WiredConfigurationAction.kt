@@ -9,10 +9,6 @@ internal enum class WiredConfigurationAction(val diagnostic: String) {
     ;
 
     companion object {
-        fun choose(found: Boolean, carPlayMode: Boolean, transitionsTried: Int, maximumTransitions: Int,
-                   context: RecoveryContext): WiredConfigurationAction =
-            WiredRecoveryPolicy.decide(found, carPlayMode, transitionsTried, maximumTransitions, context).action
-
         /** Older iPhones and locked devices may reject a mode request yet offer usable interfaces. */
         fun fallbackAfterRejection(found: Boolean, carPlayMode: Boolean, context: RecoveryContext): Boolean =
             found && (!carPlayMode || context.previousActiveReconnect || context.currentRecord?.recoveryClaimed == true)

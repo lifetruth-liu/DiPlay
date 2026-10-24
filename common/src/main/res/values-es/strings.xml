@@ -934,4 +934,9 @@
     <string name="settings_wired_backend_userspace">Espacio de usuario</string>
     <string name="wired_backend_failure_native_unavailable">No se pudo iniciar la pila de red de usuario. Elige VPN o actualiza DiPlay.</string>
     <string name="wired_backend_failure_vpn_unavailable">Android no pudo iniciar la red VPN. Comprueba la autorización VPN o elige el modo de usuario.</string>
+    <string name="wired_stage_changing_usb">Cambiando el modo USB…</string>
+    <string name="wired_stage_authenticating">Autenticando con el iPhone…</string>
+    <string name="wired_stage_waiting_network">Esperando la red USB del iPhone…</string>
+    <string name="wired_stage_establishing_session">Estableciendo la sesión de CarPlay…</string>
+    <string name="wired_stage_trying_userspace">VPN no disponible. Probando la red en espacio de usuario…</string>
 </resources>

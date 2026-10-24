@@ -946,4 +946,9 @@
     <string name="settings_wired_backend_userspace">Користувацький режим</string>
     <string name="wired_backend_failure_native_unavailable">Не вдалося запустити користувацький мережевий стек. Виберіть VPN або оновіть DiPlay.</string>
     <string name="wired_backend_failure_vpn_unavailable">Android не вдалося запустити мережу VPN. Перевірте дозвіл VPN або виберіть користувацький режим.</string>
+    <string name="wired_stage_changing_usb">Перемикання режиму USB…</string>
+    <string name="wired_stage_authenticating">Автентифікація з iPhone…</string>
+    <string name="wired_stage_waiting_network">Очікування USB-мережі iPhone…</string>
+    <string name="wired_stage_establishing_session">Встановлення сеансу CarPlay…</string>
+    <string name="wired_stage_trying_userspace">VPN недоступна. Спроба мережі в просторі користувача…</string>
 </resources>

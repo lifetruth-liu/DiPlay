@@ -1036,4 +1036,9 @@
     <string name="settings_wired_backend_userspace">ユーザー空間</string>
     <string name="wired_backend_failure_native_unavailable">ユーザー空間ネットワークを起動できませんでした。VPNを選ぶか、DiPlayを更新してください。</string>
     <string name="wired_backend_failure_vpn_unavailable">AndroidでVPNネットワークを起動できませんでした。VPNの許可を確認するか、ユーザー空間を選んでください。</string>
+    <string name="wired_stage_changing_usb">USB モードを切り替えています…</string>
+    <string name="wired_stage_authenticating">iPhone と認証しています…</string>
+    <string name="wired_stage_waiting_network">iPhone の USB ネットワークを待っています…</string>
+    <string name="wired_stage_establishing_session">CarPlay セッションを確立しています…</string>
+    <string name="wired_stage_trying_userspace">VPN を利用できません。ユーザー空間ネットワークを試しています…</string>
 </resources>

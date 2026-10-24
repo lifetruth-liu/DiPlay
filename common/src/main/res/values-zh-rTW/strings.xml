@@ -994,4 +994,9 @@
     <string name="settings_wired_backend_userspace">使用者空間</string>
     <string name="wired_backend_failure_native_unavailable">使用者空間網路堆疊無法啟動。請選擇 VPN 或更新 DiPlay。</string>
     <string name="wired_backend_failure_vpn_unavailable">Android 無法啟動 VPN 網路。請檢查 VPN 授權，或選擇使用者空間模式。</string>
+    <string name="wired_stage_changing_usb">正在切換 USB 模式…</string>
+    <string name="wired_stage_authenticating">正在與 iPhone 進行身分驗證…</string>
+    <string name="wired_stage_waiting_network">正在等待 iPhone USB 網路…</string>
+    <string name="wired_stage_establishing_session">正在建立 CarPlay 工作階段…</string>
+    <string name="wired_stage_trying_userspace">VPN 無法使用，正在嘗試使用者空間網路…</string>
 </resources>

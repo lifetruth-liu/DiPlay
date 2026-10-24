@@ -157,6 +157,28 @@ class LwipTcpStreamTest {
         failure(BackendFailure.Kind.CANCELLED) { stream.read(target) }
         assertNull(f.runner.snapshot().failure)
     }
+    @Test(timeout = 10_000) fun gracefulCloseModeCanBeSetWhileCoreIsBlockedInAnotherOperation() = Fixture().use { f ->
+        val stream = f.connect()
+        stream.configure(TcpOptions(resetOnClose = true))
+        val gate = CountDownLatch(1)
+        f.core.readGate.set(gate)
+        f.core.incoming.add(byteArrayOf(1))
+        val read = Call { stream.read(ByteArray(1)) }
+        val configured = CountDownLatch(1)
+        var configure: Call<Unit>? = null
+        try {
+            assertTrue(f.core.reading.await(2, TimeUnit.SECONDS))
+            configure = Call { stream.configure(TcpOptions(resetOnClose = false)); configured.countDown() }
+            assertTrue("local close mode must not wait for the core", configured.await(100, TimeUnit.MILLISECONDS))
+        } finally {
+            gate.countDown()
+            read.finish().getOrThrow()
+            configure?.finish()?.getOrThrow()
+            stream.close()
+        }
+        await { f.core.graceful.get() == 1 }
+        assertEquals(0, f.core.aborts.get())
+    }
     private class Port : EthernetFramePort {
         override val hostMac: ByteArray? = null
         val frames = LinkedBlockingQueue<ByteArray>()

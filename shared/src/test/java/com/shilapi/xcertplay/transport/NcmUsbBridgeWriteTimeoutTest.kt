@@ -33,7 +33,9 @@ class NcmUsbBridgeWriteTimeoutTest {
         val diagnostics = withBridge { ncm -> repeat(4) { ncm.send(frame, 2_000) } }
         val short = NcmUsbBridge.NOT_READY_WRITE_TIMEOUT_MILLIS
         assertEquals(listOf(short, short, short, 2_000), NcmWriteReplay.timeouts)
-        assertEquals(listOf("NCM bulk-out ready after 2 dropped frames"), diagnostics)
+        assertEquals(listOf("NCM bulk-out ready after 2 dropped frames"), diagnostics.filter { it.startsWith("NCM bulk-out") })
+        assertTrue(diagnostics.any { it.startsWith("NCM transfer tx returned=-1") && it.contains("durationMs=") })
+        assertTrue(diagnostics.any { it.startsWith("NCM transfer close") && it.contains("notReady=2") })
     }
 
     @Test fun theLinkOpensWithTheFirstFrameThePhoneTakes() {
@@ -55,6 +57,14 @@ class NcmUsbBridgeWriteTimeoutTest {
         NcmWriteReplay.results.add(-1)
         withBridge { ncm -> ncm.send(frame, 5) }
         assertEquals(listOf(5), NcmWriteReplay.timeouts)
+    }
+
+    @Test fun diagnosticConsumerFailureCannotChangeUsbResults() {
+        NcmWriteReplay.results.addAll(listOf(-1, NcmWriteReplay.ALL))
+        withBridge(onDiagnostic = { throw IllegalStateException("diagnostic sink unavailable") }) { ncm ->
+            assertEquals(NcmSendResult.NotReady, ncm.sendFrame(frame, 100))
+            assertEquals(NcmSendResult.Sent, ncm.sendFrame(frame, 100))
+        }
     }
 
     @Test fun explicitResultsNeverCountNotReadyFramesAsSent() {

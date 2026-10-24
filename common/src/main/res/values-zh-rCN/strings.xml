@@ -994,4 +994,9 @@
     <string name="settings_wired_backend_userspace">用户态</string>
     <string name="wired_backend_failure_native_unavailable">用户态网络栈无法启动。请选择 VPN 或更新 DiPlay。</string>
     <string name="wired_backend_failure_vpn_unavailable">Android 无法启动 VPN 网络。请检查 VPN 授权，或选择用户态模式。</string>
+    <string name="wired_stage_changing_usb">正在切换 USB 模式…</string>
+    <string name="wired_stage_authenticating">正在与 iPhone 进行身份认证…</string>
+    <string name="wired_stage_waiting_network">正在等待 iPhone USB 网络…</string>
+    <string name="wired_stage_establishing_session">正在建立 CarPlay 会话…</string>
+    <string name="wired_stage_trying_userspace">VPN 不可用，正在尝试用户态网络…</string>
 </resources>

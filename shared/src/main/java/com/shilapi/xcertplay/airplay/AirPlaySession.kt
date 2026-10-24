@@ -107,6 +107,7 @@ class AirPlaySession private constructor(
     private val closed = AtomicBoolean(false)
     internal val isClosed: Boolean get() = closed.get()
     private val notified = AtomicBoolean(false)
+    private val eventLifecycleLock = Any()
     private var eventServer: TcpListener? = null
     private var eventSocket: TcpStream? = null
     private var eventCipher: ControlCipher? = null
@@ -155,8 +156,23 @@ class AirPlaySession private constructor(
         }
     }
 
-    override fun close() {
-        if (!closed.compareAndSet(false, true)) return
+    @Volatile internal var gracefulClosing: Boolean = false
+        private set
+
+    override fun close() = closeSession(graceful = false)
+
+    /** Debug close candidate: requests ordinary TCP close, without claiming FIN delivery. */
+    internal fun closeGracefully() = closeSession(graceful = true)
+
+    private fun closeSession(graceful: Boolean) {
+        synchronized(eventLifecycleLock) {
+            if (!closed.compareAndSet(false, true)) return
+            gracefulClosing = graceful
+            if (graceful) {
+                eventSocket?.let { event -> runCatching { event.configure(TcpOptions(resetOnClose = false)) } }
+            }
+        }
+        if (graceful) runCatching { socket.configure(TcpOptions(resetOnClose = false)) }
         mainScreenToken = null
         clearClusterContent()
         safeClose(socket)
@@ -849,7 +865,10 @@ class AirPlaySession private constructor(
 
     private fun openEvent(): Int {
         val server = endpoints.listen(network.wildcard())
-        eventServer = server
+        synchronized(eventLifecycleLock) {
+            if (closed.get()) { safeClose(server); throw BackendFailure(BackendFailure.Kind.CANCELLED) }
+            eventServer = server
+        }
         spawnEvent("airplay-event-accept") { acceptEvent(server) }
         return server.localEndpoint.port
     }
@@ -862,22 +881,32 @@ class AirPlaySession private constructor(
         keepAliveSocket = null
         keepAliveThread?.interrupt()
         keepAliveThread = null
-        safeClose(eventServer)
-        eventServer = null
-        safeClose(eventSocket)
-        eventSocket = null
-        eventCipher = null
+        val oldEvent = synchronized(eventLifecycleLock) {
+            val old = eventServer to eventSocket
+            eventServer = null
+            eventSocket = null
+            eventCipher = null
+            old
+        }
+        safeClose(oldEvent.first)
+        safeClose(oldEvent.second)
         eventThreads.forEach { it.interrupt() }
         eventThreads.clear()
     }
 
+    /** Publish and set abortive mode in the same lifecycle critical section as session close. */
+    internal fun publishEventSocket(server: TcpListener, accepted: TcpStream): Boolean =
+        synchronized(eventLifecycleLock) {
+            if (closed.get() || eventServer !== server) return@synchronized false
+            accepted.configure(TcpOptions(resetOnClose = true))
+            eventSocket = accepted
+            true
+        }
     private fun acceptEvent(server: TcpListener) {
         try {
             val socket = endpoints.accept(server)
-            socket.configure(TcpOptions(resetOnClose = true))
+            if (!publishEventSocket(server, socket)) { socket.close(); return }
             debugLog("airplay event connection accepted from ${socket.remoteEndpoint} noDelay=true")
-            if (closed.get()) { socket.close(); return }
-            eventSocket = socket
             val shared = pairVerify.shared
             if (shared == null) {
                 Log.e(TAG, "airplay event rejected: pair-verify shared secret unavailable")
@@ -897,7 +926,10 @@ class AirPlaySession private constructor(
                 "Events-Read-Encryption-Key".asciiBytes(),
                 32,
             )
-            eventCipher = ControlCipher(readKey, writeKey)
+            synchronized(eventLifecycleLock) {
+                if (closed.get() || eventSocket !== socket) return
+                eventCipher = ControlCipher(readKey, writeKey)
+            }
             synchronized(eventWriteLock) {
                 sendPendingNightModeLocked()
             }
@@ -957,8 +989,13 @@ class AirPlaySession private constructor(
         } finally {
             debugLog("airplay event connection closed")
             videoPlaybackAvailability.setEventReady(false)
-            if (eventSocket === socket) eventSocket = null
-            eventCipher = null
+            synchronized(eventLifecycleLock) {
+                if (eventSocket === socket) {
+                    if (gracefulClosing) runCatching { socket.configure(TcpOptions(resetOnClose = false)) }
+                    eventSocket = null
+                    eventCipher = null
+                }
+            }
             safeClose(socket)
             if (!closed.get()) close()
         }

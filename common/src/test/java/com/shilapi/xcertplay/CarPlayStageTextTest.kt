@@ -59,7 +59,23 @@ class CarPlayStageTextTest {
         )
     }
 
+    @Test fun earlyWiredTcpCountsAsControlProgressWithoutRegressingTheStage() {
+        assertStage(R.string.wired_stage_establishing_session, CarPlayStatus.EstablishingWiredSession)
+        assertEquals(1, ReflectionHelpers.getField<Int>(activity, "controlRunningCount"))
+    }
+
+    @Test fun ordinaryWiredTcpDoesNotCountTheSameControlRunTwice() {
+        assertStage(R.string.opening_carplay, CarPlayStatus.RunningControl)
+        assertStage(R.string.wired_stage_establishing_session, CarPlayStatus.EstablishingWiredSession)
+        assertEquals(1, ReflectionHelpers.getField<Int>(activity, "controlRunningCount"))
+    }
+
     private fun stagesFollowTheConnection() {
+        assertStage(R.string.wired_stage_changing_usb, CarPlayStatus.WaitingForReenumeration)
+        assertStage(R.string.wired_stage_authenticating, CarPlayStatus.ConnectingControl)
+        assertStage(R.string.wired_stage_waiting_network, CarPlayStatus.WaitingForWiredNetwork)
+        assertStage(R.string.wired_stage_establishing_session, CarPlayStatus.EstablishingWiredSession)
+        assertStage(R.string.wired_stage_trying_userspace, CarPlayStatus.TryingUserspace)
         // A wired Android 7.1 failure (#557) is a retry, not a stage that never ends.
         assertStage(R.string.connection_interrupted_retrying, CarPlayStatus.Failed("Invalid argument"))
         assertStage(R.string.iphone_usb_mode_rejected,

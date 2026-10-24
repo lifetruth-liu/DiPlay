@@ -51,7 +51,7 @@ class UsbReadQueueCompatibilityTest {
         val ncm = ncm(diagnostics::add)
         try { assertEquals(payload.size, readChunk(ncm)) } finally { ncm.close() }
         assertEquals(listOf(32_768), UsbQueueReplay.sizes)
-        assertTrue(diagnostics.isEmpty())
+        assertTrue(diagnostics.none { !it.startsWith("NCM transfer ") })
     }
 
     @Test fun usbmuxExplicitRejectionRetriesAndRetainsSmallerSuccessfulSize() {
@@ -177,7 +177,7 @@ class UsbReadQueueCompatibilityTest {
     }
 
     private fun checkFallbackDiagnostic(diagnostics: List<String>, pipe: String, firstBytes: Int) {
-        val diagnostic = diagnostics.single()
+        val diagnostic = diagnostics.filterNot { it.startsWith("NCM transfer ") }.single()
         assertTrue(diagnostic.startsWith("$pipe read queue compatibility fallback "))
         assertTrue(diagnostic.contains("api=28"))
         assertTrue(diagnostic.contains("endpoint=0x85(direction=128,type=2,maxPacket=512)"))

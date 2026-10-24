@@ -1,0 +1,99 @@
+{
+  "date": "2026-10-25",
+  "apk_sha256": "43cc05e1b10c5de8139d980bbb08e9906ee17587e5da75e6e9cb12173d4e2120",
+  "no_experiment_extras": true,
+  "measurement": "controller-to-active, not click-to-active or first frame",
+  "samples": [
+    {
+      "kind": "installed_startup",
+      "attempt": 1,
+      "start_ms": 1989,
+      "ready_ms": 18262,
+      "resend_ms": 20551,
+      "tcp_ms": 20718,
+      "active_ms": 21929,
+      "mode_transition_requested": false,
+      "backend_userspace": true,
+      "start_to_ready_ms": 16273,
+      "ready_to_active_ms": 3667,
+      "first_syn_ms": 2124,
+      "network_up_notification_ms": 11168,
+      "first_success_counters": {
+        "attempts": 44,
+        "notReady": 43,
+        "writeTotalMs": 750,
+        "writeMaxMs": 30,
+        "rxFrames": 21
+      }
+    },
+    {
+      "kind": "active_reconnect",
+      "attempt": 2,
+      "start_ms": 1186,
+      "ready_ms": 22248,
+      "resend_ms": 24315,
+      "tcp_ms": 24470,
+      "active_ms": 25466,
+      "mode_transition_requested": false,
+      "backend_userspace": true,
+      "start_to_ready_ms": 21062,
+      "ready_to_active_ms": 3218,
+      "first_syn_ms": 1273,
+      "network_up_notification_ms": 14256,
+      "first_success_counters": {
+        "attempts": 56,
+        "notReady": 55,
+        "writeTotalMs": 917,
+        "writeMaxMs": 22,
+        "rxFrames": 59
+      },
+      "measurement_errors": []
+    },
+    {
+      "kind": "active_reconnect",
+      "attempt": 3,
+      "start_ms": 1156,
+      "ready_ms": 15791,
+      "resend_ms": 18173,
+      "tcp_ms": 18332,
+      "active_ms": 19577,
+      "mode_transition_requested": false,
+      "backend_userspace": true,
+      "start_to_ready_ms": 14635,
+      "ready_to_active_ms": 3786,
+      "first_syn_ms": 1297,
+      "network_up_notification_ms": 8482,
+      "first_success_counters": {
+        "attempts": 36,
+        "notReady": 35,
+        "writeTotalMs": 557,
+        "writeMaxMs": 20,
+        "rxFrames": 21
+      },
+      "measurement_errors": []
+    },
+    {
+      "kind": "active_reconnect",
+      "attempt": 4,
+      "start_ms": 1075,
+      "ready_ms": 16899,
+      "resend_ms": 19225,
+      "tcp_ms": 19359,
+      "active_ms": 20219,
+      "mode_transition_requested": false,
+      "backend_userspace": true,
+      "start_to_ready_ms": 15824,
+      "ready_to_active_ms": 3320,
+      "first_syn_ms": 1230,
+      "network_up_notification_ms": 8453,
+      "first_success_counters": {
+        "attempts": 43,
+        "notReady": 42,
+        "writeTotalMs": 763,
+        "writeMaxMs": 21,
+        "rxFrames": 30
+      },
+      "measurement_errors": []
+    }
+  ]
+}

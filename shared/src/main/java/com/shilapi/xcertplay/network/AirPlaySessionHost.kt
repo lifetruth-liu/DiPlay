@@ -29,6 +29,32 @@ class AirPlaySessionHost(
 ) : Closeable {
     class Lease internal constructor()
 
+    /** Owns only the old network after listener/session quiescence; cannot detach a new lease. */
+    class RetainedNetwork internal constructor(
+        private val network: SessionNetwork,
+        private val closeSessions: (Boolean) -> Unit,
+    ) : Closeable {
+        private val closed = java.util.concurrent.atomic.AtomicBoolean()
+        private val sessionCloseStarted = java.util.concurrent.atomic.AtomicBoolean()
+        /** Run on the candidate worker: close may independently abort the network at its deadline. */
+        fun closeSessionsGracefully() {
+            if (sessionCloseStarted.compareAndSet(false, true)) closeSessions(!closed.get())
+        }
+        fun awaitLocalEgress(timeoutMillis: Long, cancelled: () -> Boolean): LocalEgressResult {
+            if (closed.get() || cancelled()) return LocalEgressResult.CANCELLED
+            return (network as? LocalEgressObserver)?.awaitLocalEgress(timeoutMillis) {
+                closed.get() || cancelled()
+            } ?: LocalEgressResult.UNSUPPORTED
+        }
+        override fun close() {
+            if (!closed.compareAndSet(false, true)) return
+            try { network.close() } finally {
+                if (sessionCloseStarted.compareAndSet(false, true)) {
+                    Thread({ closeSessions(false) }, "airplay-retained-abort").apply { isDaemon = true; start() }
+                }
+            }
+        }
+    }
     private data class Attachment(
         val lease: Lease,
         val network: SessionNetwork,
@@ -39,6 +65,7 @@ class AirPlaySessionHost(
         val listener: AirPlaySessionListener,
         val media: AirPlayMediaHandler,
         val listenerIdentity: AirPlayListenerIdentity?,
+        val acceptanceIdentity: AirPlayListenerIdentity,
         val onFailure: (Throwable) -> Unit,
     )
 
@@ -82,7 +109,7 @@ class AirPlaySessionHost(
             require(bound.isNotEmpty()) { "No AirPlay listener" }
             val lease = Lease()
             val current = Attachment(lease, sessionNetwork, config.copy(port = bound.first().localEndpoint.port), identity,
-                pairings, mfi, listener, media, listenerIdentity, onFailure)
+                pairings, mfi, listener, media, listenerIdentity, listenerIdentity ?: AirPlayListenerIdentity(0), onFailure)
             servers = bound
             attachment = current
             bound.forEach { server ->
@@ -104,6 +131,23 @@ class AirPlaySessionHost(
     @Synchronized fun boundPort(lease: Lease? = null): Int? = attachment
         ?.takeIf { lease == null || it.lease === lease }?.config?.port
 
+    /** Debug-only candidate. Stop accepting/processing sessions, preserving their borrowed network. */
+    @Synchronized fun quiesce(lease: Lease): RetainedNetwork? {
+        if (attachment?.lease !== lease) return null
+        val network = checkNotNull(attachment).network
+        attachment = null
+        val oldServers = servers
+        servers = emptyList()
+        val oldSessions = sessions.toList()
+        sessions.clear()
+        return RetainedNetwork(network) { graceful ->
+            oldServers.forEach { server -> runCatching { server.close() }.onFailure { Log.w(TAG, "AirPlay listener close failed", it) } }
+            oldSessions.forEach { session ->
+                runCatching { if (graceful) session.closeGracefully() else session.close() }
+                    .onFailure { Log.w(TAG, "AirPlay session close failed", it) }
+            }
+        }
+    }
     @Synchronized fun detach(lease: Lease) {
         if (attachment?.lease === lease) releaseLocked()
     }
@@ -128,9 +172,7 @@ class AirPlaySessionHost(
                     val session = synchronized(this) {
                         if (attachment !== current || servers.none { it === server }) return
                         val internalPeer = isInternalAirPlayPeer(InetAddress.getByAddress(socket.remoteEndpoint.address), InetAddress.getByAddress(socket.localEndpoint.address))
-                        current.listenerIdentity?.let { owner ->
-                            current.listener.onTcpAccepted(AirPlayTcpAccepted(owner, internalPeer, acceptedAtNanos))
-                        }
+                        current.listener.onTcpAccepted(AirPlayTcpAccepted(current.acceptanceIdentity, internalPeer, acceptedAtNanos))
                         runCatching { current.listener.onDebugLog("airplay TCP accepted family=${family(InetAddress.getByAddress(socket.remoteEndpoint.address))}") }
                         // Listener callbacks can synchronously stop/restart the host.
                         if (attachment !== current) return

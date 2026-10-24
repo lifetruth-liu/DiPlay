@@ -395,6 +395,7 @@ class CarPlayMediaEngine(
         )
         val tunnel = IapTunnel(
             readKey = key,
+            gracefulClose = { session.gracefulClosing },
             network = session.network,
             bindAddress = session.localAddress
                 ?: when (session.remoteAddress) {

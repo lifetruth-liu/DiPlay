@@ -165,8 +165,7 @@ class CarPlayControllerUsbServiceTest {
         val logs = mutableListOf<String>()
         val controller = waitingForReenumeration(context, logs)
 
-        ReflectionHelpers.callInstanceMethod<Unit>(controller, "watchReenumeration",
-            ReflectionHelpers.ClassParameter.from(UsbDevice::class.java, iphone))
+        watchReenumeration(controller)
         shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(CarPlayController.REENUMERATION_WAIT_MILLIS - 100))
         assertTrue(logs.none { it.contains("USB transition unanswered") || it.contains("permission already granted") })
 
@@ -184,8 +183,7 @@ class CarPlayControllerUsbServiceTest {
         val controller = waitingForReenumeration(context, logs)
 
         // The iPhone came back on its own: its attach answered the request.
-        ReflectionHelpers.callInstanceMethod<Unit>(controller, "watchReenumeration",
-            ReflectionHelpers.ClassParameter.from(UsbDevice::class.java, iphone))
+        watchReenumeration(controller)
         ReflectionHelpers.getField<java.util.concurrent.atomic.AtomicInteger>(controller, "availabilityPollGeneration")
             .incrementAndGet()
         shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(11))
@@ -193,10 +191,15 @@ class CarPlayControllerUsbServiceTest {
 
         // The iPhone is off the bus while it re-enumerates: its attach will end the wait.
         shadowOf(usb).removeUsbDevice(iphone)
-        ReflectionHelpers.callInstanceMethod<Unit>(controller, "watchReenumeration",
-            ReflectionHelpers.ClassParameter.from(UsbDevice::class.java, iphone))
+        watchReenumeration(controller)
         shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(11))
         assertTrue(logs.none { it.contains("USB transition unanswered") })
+    }
+
+    private fun watchReenumeration(controller: CarPlayController) {
+        val attempt = ReflectionHelpers.getField<Any>(controller, "wiredAttempt")
+        ReflectionHelpers.callInstanceMethod<Unit>(controller, "watchReenumeration",
+            ReflectionHelpers.ClassParameter.from(attempt.javaClass, attempt))
     }
 
     private fun waitingForReenumeration(context: Context, logs: MutableList<String>): CarPlayController {
@@ -205,6 +208,13 @@ class CarPlayControllerUsbServiceTest {
             Class.forName("com.shilapi.xcertplay.orchestration.CarPlayController\$Phase").enumConstants
                 .single { (it as Enum<*>).name == "REENUMERATION" })
         ReflectionHelpers.setField(controller, "reenumerationAttempts", 1)
+        val lifecycle = checkNotNull(WiredUsbLifecycle.install(context))
+        val phone = lifecycle.reconcile().single()
+        val attemptClass = Class.forName("com.shilapi.xcertplay.orchestration.CarPlayController" + "$" + "WiredAttempt")
+        val attempt = attemptClass.declaredConstructors.single().apply { isAccessible = true }.newInstance(1, phone)
+        ReflectionHelpers.setField(controller, "wiredAttempt", attempt)
+        ReflectionHelpers.setField(controller, "wiredEnumeration", phone)
+        ReflectionHelpers.getField<java.util.concurrent.atomic.AtomicInteger>(controller, "wiredGeneration").set(1)
         return controller
     }
 

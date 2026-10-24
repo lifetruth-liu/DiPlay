@@ -8,10 +8,10 @@ import org.junit.Test
 class WiredConfigurationActionTest {
     private val phone = IphoneUsbEnumeration(1, "same-node", 0x05ac, 1)
     @Before fun reset() = WiredSessionMemory.clear()
-    private fun context(strategy: WiredRecoveryStrategy = WiredRecoveryStrategy.COMPATIBILITY) =
+    private fun context(strategy: WiredRecoveryExperiment = WiredRecoveryExperiment.DEFAULT) =
         RecoveryContext(phone, WiredSessionMemory.snapshot(phone), strategy)
     private fun choose(found: Boolean, mode: Boolean, tried: Int = 0) =
-        WiredConfigurationAction.choose(found, mode, tried, 2, context())
+        WiredRecoveryPolicy.decide(found, mode, tried, 2, context()).action
     private fun previousActive() {
         WiredSessionMemory.active(phone, 10)
         WiredSessionMemory.stopped(phone, WiredSessionStopReason.ACTIVE_RECONNECT, 20)
@@ -24,25 +24,36 @@ class WiredConfigurationActionTest {
         assertEquals(WiredConfigurationAction.USE, choose(true, true))
     }
 
-    @Test fun sameEnumerationVoluntaryActiveReconnectRequestsOneCompatibilityTransition() {
+    @Test fun sameEnumerationVoluntaryActiveReconnectReusesOnlyAfterRelease() {
         previousActive()
-        assertEquals(WiredConfigurationAction.REQUEST_TRANSITION, choose(true, true))
-        WiredSessionMemory.transition(phone, WiredTransitionResult.REQUESTED, 30)
-        // A replacement controller still sees the spent transition.
+        assertEquals(WiredConfigurationAction.REJECT, choose(true, true))
+        WiredSessionMemory.released(phone, 30)
         assertEquals(WiredConfigurationAction.USE, choose(true, true))
-        assertTrue(WiredConfigurationAction.fallbackAfterRejection(true, true, context()))
+        assertEquals(0, WiredSessionMemory.snapshot(phone)!!.transitionsRequested)
+    }
+
+    @Test fun anyUnreleasedActiveSessionBlocksOverlappingReuse() {
+        for (reason in WiredSessionStopReason.entries) {
+            WiredSessionMemory.active(phone, 1)
+            assertEquals(WiredConfigurationAction.REJECT, choose(true, true))
+            WiredSessionMemory.stopped(phone, reason, 2)
+            assertEquals(WiredConfigurationAction.REJECT, choose(true, true))
+            WiredSessionMemory.released(phone, 3)
+            assertEquals(WiredConfigurationAction.USE, choose(true, true))
+        }
     }
 
     @Test fun stopReasonsAndOldTokensCannotTriggerTheCompatibilityWorkaround() {
         for (reason in WiredSessionStopReason.entries.filter { it != WiredSessionStopReason.ACTIVE_RECONNECT }) {
             WiredSessionMemory.active(phone, 1)
             WiredSessionMemory.stopped(phone, reason, 2)
+            WiredSessionMemory.released(phone, 3)
             assertEquals(WiredConfigurationAction.USE, choose(true, true))
         }
         previousActive()
         val newPhone = phone.copy(token = 2)
         assertEquals(WiredConfigurationAction.USE,
-            WiredConfigurationAction.choose(true, true, 0, 2, RecoveryContext(newPhone, WiredSessionMemory.snapshot(phone))))
+            WiredRecoveryPolicy.decide(true, true, 0, 2, RecoveryContext(newPhone, WiredSessionMemory.snapshot(phone))).action)
     }
 
     @Test fun missingAppleEthernetKeeps634AndRejectedRequestKeeps509And455() {
@@ -56,23 +67,27 @@ class WiredConfigurationActionTest {
 
     @Test fun transitionBudgetSurvivesControllerRecreationAndHonorsZeroBudget() {
         previousActive()
+        WiredSessionMemory.released(phone, 30)
         assertEquals(WiredConfigurationAction.REJECT,
-            WiredConfigurationAction.choose(false, false, 0, 0, context()))
+            WiredRecoveryPolicy.decide(false, false, 0, 0, context()).action)
         assertEquals(WiredConfigurationAction.USE,
-            WiredConfigurationAction.choose(true, true, 0, 0, context()))
-        repeat(2) { WiredSessionMemory.transition(phone, WiredTransitionResult.REQUESTED, 30L + it) }
+            WiredRecoveryPolicy.decide(true, true, 0, 0, context()).action)
+        repeat(2) { WiredSessionMemory.transitionRequested(phone) }
         assertEquals(WiredConfigurationAction.REJECT, choose(false, false))
     }
 
-    @Test fun experimentsOnlyChangePreviousActiveReconnectAndCompatibilityRemainsTenSeconds() {
-        assertEquals(10_000L, WiredRecoveryPolicy.decide(true, true, 0, 2, context()).reenumerationTimeoutMs)
+    @Test fun compatibilityOverrideOnlyChangesReleasedPreviousActiveReconnect() {
+        assertEquals(WiredConfigurationAction.USE,
+            WiredRecoveryPolicy.decide(true, true, 0, 2, context(WiredRecoveryExperiment.COMPATIBILITY)).action)
         previousActive()
-        val direct = WiredRecoveryPolicy.decide(true, true, 0, 2, context(WiredRecoveryStrategy.DIRECT))
-        assertEquals(WiredConfigurationAction.USE, direct.action)
-        val early = WiredRecoveryPolicy.decide(true, true, 0, 2, context(WiredRecoveryStrategy.EARLY_REUSE))
-        assertEquals(WiredConfigurationAction.REQUEST_TRANSITION, early.action)
-        assertEquals(2_000L, early.reenumerationTimeoutMs)
-        assertEquals(10_000L, WiredRecoveryPolicy.decide(true, false, 0, 2, context(WiredRecoveryStrategy.EARLY_REUSE)).reenumerationTimeoutMs)
+        assertEquals(WiredConfigurationAction.REJECT,
+            WiredRecoveryPolicy.decide(true, true, 0, 2, context(WiredRecoveryExperiment.COMPATIBILITY)).action)
+        WiredSessionMemory.released(phone, 30)
+        assertEquals(WiredConfigurationAction.REQUEST_TRANSITION,
+            WiredRecoveryPolicy.decide(true, true, 0, 2, context(WiredRecoveryExperiment.COMPATIBILITY)).action)
+        WiredSessionMemory.transitionRequested(phone)
+        assertEquals(WiredConfigurationAction.USE,
+            WiredRecoveryPolicy.decide(true, true, 0, 2, context(WiredRecoveryExperiment.COMPATIBILITY)).action)
     }
 
     @Test fun aReleasedDirectFailureCanRequestOneRecoveryEvenUnderDirectStrategy() {
@@ -82,10 +97,10 @@ class WiredConfigurationActionTest {
         WiredSessionMemory.directFailed(phone, 3)
         assertTrue(WiredSessionMemory.claimRecovery(phone))
         assertEquals(WiredConfigurationAction.REQUEST_TRANSITION,
-            WiredConfigurationAction.choose(true, true, 0, 2, context(WiredRecoveryStrategy.DIRECT)))
-        WiredSessionMemory.transition(phone, WiredTransitionResult.REQUESTED, 4)
+            WiredRecoveryPolicy.decide(true, true, 0, 2, context(WiredRecoveryExperiment.DEFAULT)).action)
+        WiredSessionMemory.transitionRequested(phone)
         assertEquals(WiredConfigurationAction.USE,
-            WiredConfigurationAction.choose(true, true, 0, 2, context(WiredRecoveryStrategy.DIRECT)))
+            WiredRecoveryPolicy.decide(true, true, 0, 2, context(WiredRecoveryExperiment.DEFAULT)).action)
     }
 
     @Test fun failedRecoveryEndsTheCycleAcrossControllerGenerationsUntilActiveOrNewEnumeration() {
@@ -96,7 +111,7 @@ class WiredConfigurationActionTest {
         WiredSessionMemory.released(phone, 4)
         assertTrue(WiredSessionMemory.claimRecovery(phone))
         assertEquals(WiredConfigurationAction.REQUEST_TRANSITION, choose(true, true))
-        WiredSessionMemory.transition(phone, WiredTransitionResult.REQUESTED, 5)
+        WiredSessionMemory.transitionRequested(phone)
         WiredSessionMemory.started(phone, 6)
         WiredSessionMemory.stopped(phone, WiredSessionStopReason.STARTUP_FAILURE, 7)
         WiredSessionMemory.recoveryFailed(phone, 8)
@@ -108,13 +123,16 @@ class WiredConfigurationActionTest {
         assertEquals(WiredConfigurationAction.REJECT, choose(true, true))
         val fresh = phone.copy(token = 2)
         assertEquals(WiredConfigurationAction.USE,
-            WiredConfigurationAction.choose(true, true, 0, 2, RecoveryContext(fresh)))
+            WiredRecoveryPolicy.decide(true, true, 0, 2, RecoveryContext(fresh)).action)
         WiredSessionMemory.active(phone, 11)
+        assertEquals(WiredConfigurationAction.REJECT, choose(true, true))
+        WiredSessionMemory.stopped(phone, WiredSessionStopReason.ACTIVE_RECONNECT, 12)
+        WiredSessionMemory.released(phone, 13)
         assertEquals(WiredConfigurationAction.USE, choose(true, true))
     }
 
     @Test fun releasedFailureUsesRemainingTransitionBudgetAndRejectsAnExhaustedBudget() {
-        WiredSessionMemory.transition(phone, WiredTransitionResult.REQUESTED, 1)
+        WiredSessionMemory.transitionRequested(phone)
         WiredSessionMemory.started(phone, 2)
         WiredSessionMemory.stopped(phone, WiredSessionStopReason.STARTUP_FAILURE, 3)
         WiredSessionMemory.directFailed(phone, 4)
@@ -122,8 +140,8 @@ class WiredConfigurationActionTest {
         assertTrue(WiredSessionMemory.claimRecovery(phone))
         assertEquals(WiredConfigurationAction.REQUEST_TRANSITION, choose(true, true))
         assertEquals(WiredConfigurationAction.REJECT,
-            WiredConfigurationAction.choose(true, true, 0, 1, context()))
-        WiredSessionMemory.transition(phone, WiredTransitionResult.REQUESTED, 6)
+            WiredRecoveryPolicy.decide(true, true, 0, 1, context()).action)
+        WiredSessionMemory.transitionRequested(phone)
         assertEquals(WiredConfigurationAction.USE, choose(true, true))
     }
 

@@ -76,6 +76,7 @@ class NcmUsbBridge internal constructor(
     private val readQueuePolicy = UsbReadQueuePolicy.forCurrentPlatform()
     private val readRequests = UsbRequestQueue(connection, "ncm-read-reaper")
     private val traffic = NcmTrafficCounter()
+    private val transferDiagnostics = NcmTransferDiagnostics()
     private val statusRunning = AtomicBoolean(statusEndpoint != null)
     private val statusThread = statusEndpoint?.let { endpoint ->
         Thread({ drainStatus(endpoint) }, "ncm-status-in").apply {
@@ -116,16 +117,20 @@ class NcmUsbBridge internal constructor(
         // timeout, and each USBMUX write of the iAP2 handshake finished only when one expired:
         // ~2 s per step on Android 8.1–14 (#634, #335, #301). Until the phone takes its first
         // frame, a frame that cannot go out at once is dropped, as it was after the full timeout.
+        val writeTimeout = if (bulkOutAccepted) timeoutMillis else minOf(timeoutMillis, NOT_READY_WRITE_TIMEOUT_MILLIS)
+        val writeStarted = System.nanoTime()
         val transferred = try {
             connection.bulkTransfer(
                 outEndpoint,
                 block,
                 block.size,
-                if (bulkOutAccepted) timeoutMillis else minOf(timeoutMillis, NOT_READY_WRITE_TIMEOUT_MILLIS),
+                writeTimeout,
             )
         } catch (error: RuntimeException) {
+            emitDiagnostic("NCM transfer tx exception=${error.javaClass.simpleName} timeoutMs=$writeTimeout durationMs=${(System.nanoTime() - writeStarted) / 1_000_000L}")
             throw failSession("NCM write failed", error)
         }
+        val writeDuration = System.nanoTime() - writeStarted
         // A detach/close may have completed while bulkTransfer was in flight.
         var readyDiagnostic: String? = null
         val result = synchronized(stateLock) {
@@ -136,8 +141,11 @@ class NcmUsbBridge internal constructor(
             }
         }
         readyDiagnostic?.let { message -> runCatching { onDiagnostic(message) } }
+        transferDiagnostics.write(block.size, transferred, writeTimeout, writeDuration, frame)?.let(::emitDiagnostic)
         return result
     }
+
+    private fun emitDiagnostic(message: String) { runCatching { onDiagnostic(message) } }
 
     private fun completeSendLocked(transferred: Int, expected: Int): NcmSendResult {
         // Before StartCarPlaySession the phone keeps the NCM data path NAKed. Android reports the
@@ -252,11 +260,11 @@ class NcmUsbBridge internal constructor(
         readRequests.close()
         connection.close()
         runCatching { requestToClose?.close() }
+        emitDiagnostic("NCM transfer close completedTransfersOnly=true ${transferDiagnostics.summary()} ${traffic.summary(null)}")
     }
 
     private fun drainStatus(endpoint: UsbEndpoint) {
         val buffer = ByteArray(endpoint.maxPacketSize.coerceAtLeast(64))
-        var loggedFirst = false
         while (statusRunning.get()) {
             // Short synchronous polls keep this thread out of JNI critical sections most of the time;
             // notifications are rare, small interrupt packets that are only logged.
@@ -273,18 +281,9 @@ class NcmUsbBridge internal constructor(
                 }
                 continue
             }
-            if (!loggedFirst) {
-                loggedFirst = true
-                Log.i(
-                    IphoneCarPlayConfiguration.TAG,
-                    "ncm status notification bytes=$transferred data=${buffer.copyOf(transferred).hex(32)}",
-                )
-            }
+            transferDiagnostics.status(buffer, transferred)?.let(::emitDiagnostic)
         }
     }
-
-    private fun ByteArray.hex(limit: Int): String =
-        take(limit).joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
 
     private fun drainFrames() {
         while (true) {
@@ -406,7 +405,8 @@ class NcmUsbBridge internal constructor(
     private fun pollFrame(): ByteArray {
         val frame = frames.removeFirst()
         queuedBytes -= frame.size
-        traffic.received(frame)
+        val header = traffic.received(frame)
+        transferDiagnostics.received(frame, header)?.let(::emitDiagnostic)
         return frame
     }
 

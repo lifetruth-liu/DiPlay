@@ -1037,4 +1037,9 @@
     <string name="settings_wired_backend_userspace">User-space</string>
     <string name="wired_backend_failure_native_unavailable">The user-space network stack could not start. Choose VPN or update DiPlay.</string>
     <string name="wired_backend_failure_vpn_unavailable">Android could not start the VPN network. Check VPN authorization or choose User-space.</string>
+    <string name="wired_stage_changing_usb">Changing USB mode…</string>
+    <string name="wired_stage_authenticating">Authenticating with iPhone…</string>
+    <string name="wired_stage_waiting_network">Waiting for iPhone USB network…</string>
+    <string name="wired_stage_establishing_session">Establishing CarPlay session…</string>
+    <string name="wired_stage_trying_userspace">VPN unavailable. Trying userspace networking…</string>
 </resources>

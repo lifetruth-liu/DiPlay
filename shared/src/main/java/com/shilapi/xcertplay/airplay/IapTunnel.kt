@@ -21,6 +21,7 @@ class IapTunnel(
     private val readKey: ByteArray,
     bindAddress: InetAddress = InetAddress.getByName("0.0.0.0"),
     network: SessionNetwork? = null,
+    private val gracefulClose: () -> Boolean = { false },
 ) : Closeable {
     interface Listener {
         fun onOpen(remoteAddress: String?) {}
@@ -32,6 +33,7 @@ class IapTunnel(
     private val transport = EndpointOwner(network, "airplay-iap", bindAddress)
     private val sessionNetwork get() = transport.network
     private val closed = AtomicBoolean(false)
+    private val lifecycleLock = Any()
     private val readCounter = AtomicLong(0)
     private val bindAddress =
         if (bindAddress is Inet4Address) InetAddress.getByName("0.0.0.0") else bindAddress
@@ -71,8 +73,16 @@ class IapTunnel(
     private fun bindAny(): TcpListener = transport.listen(sessionNetwork.endpoint(bindAddress, 0), reuseAddress = true)
 
     override fun close() {
-        if (!closed.compareAndSet(false, true)) return
-        safeClose(socket)
+        val oldSocket = synchronized(lifecycleLock) {
+            if (!closed.compareAndSet(false, true)) return
+            socket.also { current ->
+                if (gracefulClose() && current != null) {
+                    runCatching { current.configure(TcpOptions(resetOnClose = false)) }
+                }
+                socket = null
+            }
+        }
+        safeClose(oldSocket)
         servers.toList().forEach(::safeClose)
         servers.clear()
         threads.toList().forEach(Thread::interrupt)
@@ -92,6 +102,13 @@ class IapTunnel(
         }
     }
 
+    /** No accepted socket may enable reset after close has captured the graceful mode. */
+    internal fun publishSocket(accepted: TcpStream): Boolean = synchronized(lifecycleLock) {
+        if (closed.get()) return@synchronized false
+        accepted.configure(TcpOptions(resetOnClose = true))
+        socket = accepted
+        true
+    }
     private fun accept(bound: TcpListener) {
         listener.onDebug(
             "AirPlay iAP tunnel accepting local=${bound.localEndpoint}",
@@ -107,8 +124,7 @@ class IapTunnel(
                 safeClose(accepted)
                 return
             }
-            accepted.configure(TcpOptions(resetOnClose = true))
-            socket = accepted
+            if (!publishSocket(accepted)) { accepted.close(); return }
             if (closed.get()) { accepted.close(); return }
             readCounter.set(0)
             peerConnected.countDown()
@@ -144,7 +160,12 @@ class IapTunnel(
         } catch (error: Exception) {
             failure = error
         } finally {
-            if (socket === sock) socket = null
+            synchronized(lifecycleLock) {
+                if (socket === sock) {
+                    if (closed.get() && gracefulClose()) runCatching { sock.configure(TcpOptions(resetOnClose = false)) }
+                    socket = null
+                }
+            }
             runCatching { transport.release(sock) }
             if (!closed.get() && failure != null) listener.onClosed(failure)
         }

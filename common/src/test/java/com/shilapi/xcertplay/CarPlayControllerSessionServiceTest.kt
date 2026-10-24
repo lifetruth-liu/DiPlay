@@ -69,6 +69,25 @@ class CarPlayControllerSessionServiceTest {
     private fun awaitService(controller: CarPlayController): CarPlaySessionService? =
         ReflectionHelpers.callInstanceMethod(controller, "awaitSessionService")
 
+    @Test fun endedSessionFromClosedControllerCannotClearReplacementConnectionState() {
+        val old = controller(RuntimeEnvironment.getApplication())
+        val session = mock(AirPlaySession::class.java)
+        try {
+            ReflectionHelpers.setField(old, "activeSession", session)
+            old.close()
+            assertTrue(old.awaitClosed(2000))
+            // A replacement controller has become active before the old media callback finishes.
+            com.shilapi.xcertplay.glance.CarPlayGlance.setConnected(true)
+            val callbacks = ReflectionHelpers.getField<AirPlaySessionListener>(old, "sessionListener")
+            callbacks.onSessionEnded(session)
+            assertTrue(com.shilapi.xcertplay.glance.CarPlayGlance.snapshot().connected)
+            assertNull(old.activeAirPlaySession())
+        } finally {
+            old.close()
+            old.awaitClosed(2000)
+            com.shilapi.xcertplay.glance.CarPlayGlance.setConnected(false)
+        }
+    }
     @Test fun unavailablePreflightSkipsBothBindingsAndPreservesNcmForFallback() {
         val lifecycle = Robolectric.buildService(CarPlaySessionService::class.java).create()
         val context = BindingContext(lifecycle.get())

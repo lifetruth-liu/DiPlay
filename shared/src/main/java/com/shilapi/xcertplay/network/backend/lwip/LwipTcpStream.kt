@@ -91,8 +91,11 @@ internal class LwipTcpStream private constructor(
         runner.executeCommand(scope = scope) { core -> allocation { tcp(core).tcpShutdownOutput(lease.token.get()) } }
     }
     override fun configure(options: TcpOptions) {
-        if (closed.get()) throw BackendFailure(BackendFailure.Kind.CANCELLED)
-        runner.executeCommand(scope = scope) { lease.reset.set(options.resetOnClose); CoreAttempt.Ready(Unit) }
+        synchronized(lease) {
+            if (closed.get()) throw BackendFailure(BackendFailure.Kind.CANCELLED)
+            runner.checkCommandCaller()
+            lease.reset.set(options.resetOnClose)
+        }
     }
     override fun configureLiveness(diagnostic: (String) -> Unit) {
         if (closed.get()) throw BackendFailure(BackendFailure.Kind.CANCELLED)
@@ -105,7 +108,7 @@ internal class LwipTcpStream private constructor(
         retire(BackendFailure(BackendFailure.Kind.CANCELLED))
     }
     private fun retire(reason: BackendFailure) {
-        if (closed.compareAndSet(false, true)) runner.closeResourceScope(scope, reason)
+        synchronized(lease) { if (closed.compareAndSet(false, true)) runner.closeResourceScope(scope, reason) }
     }
     companion object {
         private const val IO_CHUNK_BYTES = 32768

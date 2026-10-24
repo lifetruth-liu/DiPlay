@@ -1,8 +1,8 @@
 # USB 有线后端自动回退与恢复逻辑收敛：实现及测试方案
 
-日期：2026-10-24。状态：A/P0、B/C 已实施并通过自动化验证；D/E 仍为方案，未执行本轮真机验证。
+日期：2026-10-24；更新：2026-10-25。A/P0、B/C、D/E 代码及自动化已实施；D/E 真机短时实验见独立报告，性能/兼容性发布门槛仍未验收。
 
-使用 writing-plans 方法整理；每阶段先补行为测试，再实现和验证。用户已授权实施 A/P0、B/C；D/E 尚未实施。现有未跟踪采集文件保留原样，本轮不提交。
+使用 writing-plans 技能整理；各阶段先补行为测试，再实现和验证。用户已授权 A/P0、B/C 和 D/E。原始分析报告与采集材料不因新实验结论而改写。
 
 ## 目标与边界
 
@@ -226,7 +226,9 @@ A和B可独立落地；C/D/E行为优化各有独立回退点。回退配置或�
 - 预期重枚举 detach 只失效旧请求，继续等待新枚举；其他 detach 同步取消 owner/watchdog，后续 USB/MFi/service 关闭在后台执行。晚到打开成功的 USB pipe 立即由回调关闭，不进入 NCM；mux、CSM 和本地 NCM 的发布有关闭竞争检查。
 - `WiredSessionMemory` 分开记录 Start、active、结束原因和 transition 结果。失效 token 不能被晚到写入复活；仅保留不含设备身份的 opaque token 撤销标记至进程结束。日志增加 token、generation 和单调 elapsedMs，记录 Start/重发、TCP 接入、active、detach 和关闭结果；不更改 NCM NotReady/DAD 行为。
 
-### C：默认策略、一次恢复与实验入口
+### C：初次交付策略、一次恢复与实验入口（历史记录）
+
+2026-10-25 后续修正：完整配置且旧 active 资源已释放时默认直接复用；debug仅保留COMPATIBILITY对照，DIRECT/EARLY_REUSE实现已删除。下面记录初次交付状态，当前规则以[修正记录](wired-bc-default-and-diagnostics-2026-10-25.md)和维护文档为准。
 
 | 上下文 | 默认动作 |
 | --- | --- |
@@ -252,3 +254,9 @@ EARLY_REUSE 取 2 秒作为实验候选。结构指纹在 vendor request 前保�
 最终 AGENTS.md 九项 Gradle 命令加 `--max-workers=1 --console=plain --stacktrace` 成功：7m02s，250 个任务中 15 执行、235 UP-TO-DATE。JUnit 报告 shared 1874、common 1633 项，合计 3507 项，零失败/错误；home 无测试源。三个应用的 lint 与 assemble 全部通过。`check_public_tree.py`、`git diff --check` 及四 ABI native/APK 核验通过；最终 APK 与核验报告的 SHA-256 一致，为 `fdbcb8a9166c9ebc5806e114450c864e0fd24f161d907bed233480e48e333a97`。本机日志位于临时目录 `diplay-bc-final-ci.log`、`diplay-bc-final-targeted.log`、`diplay-bc-native-report.json`，JUnit/HTML 报告位于各模块 `build/test-results` 和 `build/reports/tests`。
 
 真机 API26/车机/不同 iPhone 的成功率、时延分布和广播到取消的 P95 尚未验收；2 秒/DIRECT 不升为正式默认。D 的关闭顺序和 E 的 Start 静默/轮询调优未实施。
+
+## D/E 实施（2026-10-25）
+
+D 的关闭候选和 E 的阶段提示/实验入口已实现，完整 Android CI 3542 项单测及三个应用 lint/build 通过。
+关闭语义审计、750 ms 截止、lease 隔离和默认限制见 [执行计划](wired-de-execution-plan-2026-10-25.md)。
+真机结果见 [D/E 报告](reconnect-latency-2026-10-25-de-report.md)。未经 30 轮分组门槛，不将关闭候选或较短静默窗口升为生产默认。

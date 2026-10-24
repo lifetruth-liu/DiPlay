@@ -99,6 +99,17 @@ class CarPlaySessionService : Service() {
         wiredOwner === owner && wiredLease?.let { host.boundPort(it) != null } == true
     @Synchronized fun boundPort(owner: WiredOwner): Int? =
         if (wiredOwner === owner) wiredLease?.let(host::boundPort) else null
+    /** Cancels one user-space attachment while retaining its network for bounded debug observation. */
+    @Synchronized fun quiesceWired(owner: WiredOwner): AirPlaySessionHost.RetainedNetwork? {
+        if (wiredOwner !== owner) return null
+        owner.cancel()
+        generation++
+        val lease = wiredLease
+        wiredOwner = null
+        wiredLease = null
+        return lease?.let(host::quiesce)
+    }
+
     @Synchronized fun detachWired(owner: WiredOwner) {
         if (wiredOwner !== owner) return
         owner.cancel()

@@ -1,6 +1,6 @@
 # 实施记录
 
-执行日期：2026-10-21 至 2026-10-24。工作分支：`codex/lwip-backend`。起点：`143f4674`。
+执行日期：2026-10-21 至 2026-10-25。工作分支：`codex/lwip-backend`。起点：`143f4674`。
 
 ## 当前交付
 
@@ -27,6 +27,9 @@
   明确不可用时尝试一次 lwIP；移除成功缓存与清除按钮。历史实施记录中的缓存门槛已被此策略替代。
 - **USB 恢复 B/C：**进程级枚举 token、拔线取消、回调隔离及有界恢复已实现；仅 Start 未 active
   不再触发旧会话 transition。默认仍保留 10 秒兼容窗口，DIRECT/2 秒策略仅 debug 注入；真机性能与兼容矩阵未验收。
+- **USB 恢复 D/E：**有界会话关闭候选、旧 lease 网络保留、local-egress 屏障及真实 TCP 阶段提示已实现。
+  D 仅 debug 的 USERSPACE 主动关闭实验启用；生产继续使用兼容关闭路径。Start 默认仍为 2 秒静默、500 ms 轮询和最多一次重发；
+  1 秒/500 ms 仅 debug 启动注入。2026-10-25 的完整 Android CI 已通过；真机分组冒烟见独立报告，不替代 30 轮策略门槛。
 - **P6：**native CTest、Android 生命周期/端点回归、fuzz driver、配置成本与 release APK
   静态布局检查已接入。三个 seed-7 sanitizer campaign 均完成每目标 8 CPU 小时，报告/二进制摘要匹配，0 失败 batch、0 崩溃及 sanitizer 诊断；
   campaign 启动后仅新增宿主测试 harness，aggregate 源目录摘要变化已单独标注；
@@ -2745,3 +2748,30 @@ USB 监听在进程启动时安装，并跨 controller 间隙保留；枚举 tok
 独立规范/代码复核通过；确定性回归涵盖同名快速拔插、旧授权/ADB key、旧打开资源、关闭失败、worker 未退出、描述变化、延迟 detach、watchdog 竞争及预算耗尽。最终完整九项检查加 `--max-workers=1` 成功（7m02s，250 项任务：15 执行、235 UP-TO-DATE）；shared 1874、common 1633 项零失败/错误，三应用 lint/assemble、凭据扫描、四 ABI 核验与差异格式检查通过。APK SHA-256：`fdbcb8a9166c9ebc5806e114450c864e0fd24f161d907bed233480e48e333a97`。
 
 详见 [B/C 实施与测试记录](wired-fallback-and-recovery-plan-2026-10-24.md)。尚未安装到真机或完成时延/设备矩阵验证；D/E 未实施，不宣称已消除 18 秒端点等待。
+
+## USB 恢复 D/E（2026-10-25）
+
+工作分支 `codex/wired-close-and-start-stages`，基于 `f014530d`。拆分 AirPlay 会话停止与网络销毁，
+旧 lease 的 retained handle 只能释放自己的网络。仅调试构建在有效 USB 枚举、USERSPACE、已 active 且主动结束时允许候选顺序；
+失败/拔线直接终止。750 ms 单调截止覆盖会话关闭及本地排空，超时不认证资源完全释放。期间保留 service binding、NCM 和 iAP2；
+关闭控制/事件/媒体 TCP 的 reset-on-close 后才观察发送队列，随后释放 CSM/USBMUX 和网络。
+
+local-egress 仅证明本地关闭命令及已产生的输出已处理，不能证明 FIN 生成、到达或被对端 ACK；历史 NotReady 降低结论但不跳过屏障。
+VPN 没有等价屏障，仍沿用兼容关闭。事件/IAP tunnel 接受与关闭的竞争、关闭配置与资源 retirement、迟到旧会话清除新状态均有回归测试。
+
+E 增加九种语言的真实阶段提示；TCP 接入事件在有线 listener 上实际转发，并绑定原 attempt，旧回调不能推进新会话。
+静默时间和关闭实验都不持久化、不增加设置，Host 和 controller 双重限制 debuggable。早于 Start 的 active 不再被后续初始化清掉。
+
+AGENTS.md 九项 Gradle 检查加 `--max-workers=1 --console=plain --stacktrace`：13m15s，250 项任务中 42 执行、208 UP-TO-DATE。
+shared 1895、common 1647，共 3542 项单测，零失败/错误；home 无测试源。三个应用 lint 和 assemble 通过。
+公共树扫描及四 ABI APK 核验通过。安装到 API26/arm64 真机的 APK SHA-256：
+`d8b96045cb91b888e0dd5b68b12f73f2bb2a5c1103b2df7204a2d294160e5e02`。
+
+具体方案及语义审计见 [D/E 执行计划](wired-de-execution-plan-2026-10-25.md)；设备数据和未验收项见
+[D/E 真机记录](reconnect-latency-2026-10-25-de-report.md)。
+
+## B/C 默认复用与诊断收敛（2026-10-25）
+
+完整配置且旧active资源已释放时默认直接打开，失败后单次兼容恢复仍受释放屏障与跨controller预算约束。已移除旧DIRECT/EARLY_REUSE实验分支、重复枚举/转发方法/失效通知及未读取的transition结果缓存；保留必要的生命周期与资源所有权保护。NCM新增有界传输采样与完成传输汇总，计数和诊断共用包头解析。
+
+完整九项CI通过：3547项单测零失败，三个应用Lint/构建和四ABI检查通过。覆盖安装后首次连接及三次无实验参数主动重连均成功，后者19.577–25.466秒、全部零模式切换请求。NCM长等待仍存在，尚未证明底层根因。详见[实现、审查及设备结果](wired-bc-default-and-diagnostics-2026-10-25.md)。

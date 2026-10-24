@@ -3,6 +3,7 @@ package com.shilapi.xcertplay.network.backend.lwip
 import com.shilapi.xcertplay.network.backend.BackendFailure
 import com.shilapi.xcertplay.network.backend.EthernetFramePort
 import com.shilapi.xcertplay.network.backend.MonotonicClock
+import com.shilapi.xcertplay.network.backend.LocalEgressResult
 import com.shilapi.xcertplay.transport.NcmSendResult
 import java.io.Closeable
 import java.util.ArrayDeque
@@ -77,6 +78,9 @@ class LwipPrototype(
     private var rxDropped = 0L
     private var txSent = 0L
     private var txNotReady = 0L
+    private var txInFlight = false
+    private var egressRequested = 0L
+    private var egressDrained = 0L
     private var revision = 0L
     private var readinessRevision = 0L
     private var usbReady = false
@@ -89,6 +93,35 @@ class LwipPrototype(
     private var inlineCloseInProgress = false
     private var inlineClosePendingForCore = false
 
+    /**
+     * Observe local close-command/output retirement while keeping NCM alive. A native FIN can still
+     * be deferred behind DAD or allocation pressure; this is deliberately not a protocol completion.
+     * The hard deadline uses wall monotonic time even when a test command clock is paused.
+     */
+    fun awaitLocalEgress(timeoutMillis: Long, cancelled: () -> Boolean): LocalEgressResult {
+        require(timeoutMillis in 1..MAX_EGRESS_TIMEOUT_MILLIS)
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
+        synchronized(signal) {
+            val requested = ++egressRequested
+            wake()
+            while (true) {
+                if (cancelled() || Thread.currentThread().isInterrupted) return LocalEgressResult.CANCELLED
+                if (stopping || failure != null) return LocalEgressResult.NOT_CONFIRMED
+                if (egressDrained >= requested && tx.isEmpty() && !txInFlight) {
+                    // A historical drop affects the label, never the close-command/output barrier.
+                    return if (txNotReady > 0) LocalEgressResult.NOT_CONFIRMED else LocalEgressResult.LOCAL_EGRESS_DRAINED
+                }
+                val left = deadline - System.nanoTime()
+                if (left <= 0) return LocalEgressResult.DEADLINE
+                try {
+                    TimeUnit.NANOSECONDS.timedWait(signal, minOf(left, TimeUnit.MILLISECONDS.toNanos(25)))
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return LocalEgressResult.CANCELLED
+                }
+            }
+        }
+    }
     fun snapshot(): Snapshot = synchronized(signal) {
         val commandState = commands.snapshot()
         val commandHighWater = commands.highWaterSnapshot()
@@ -341,8 +374,10 @@ class LwipPrototype(
                 val moreCommands = commands.hasReady()
                 if (stopping) break
                 var drained = 0
+                var outputEmpty = false
                 while (drained < BATCH_FRAMES && !stopping && canQueueTx()) {
-                    val frame = core.takeOutput() ?: break
+                    val frame = core.takeOutput()
+                    if (frame == null) { outputEmpty = true; break }
                     check(frame.size in MIN_FRAME_BYTES..MAX_FRAME_BYTES) { "invalid core output length" }
                     synchronized(signal) {
                         if (!stopping) {
@@ -353,6 +388,12 @@ class LwipPrototype(
                         }
                     }
                     drained++
+                }
+                synchronized(signal) {
+                    if (outputEmpty && commands.snapshot().closingResources == 0) {
+                        egressDrained = egressRequested
+                        signal.notifyAll()
+                    }
                 }
                 // A queued startup probe is not a delivered DAD probe. Keep it tentative while
                 // the writer is still waiting for its first result, even if USB stalls.
@@ -422,11 +463,12 @@ class LwipPrototype(
             while (!stopping) {
                 val frame = synchronized(signal) {
                     while (!stopping && tx.isEmpty()) signal.wait()
-                    if (stopping) null else tx.removeFirst().also { txBytes -= it.size; wake() }
+                    if (stopping) null else tx.removeFirst().also { txInFlight = true; txBytes -= it.size; wake() }
                 } ?: break
                 val result = port.send(frame, IO_TIMEOUT_MILLIS)
                 var sendFailure: BackendFailure? = null
                 synchronized(signal) {
+                    txInFlight = false
                     if (!stopping) when (result) {
                         NcmSendResult.Sent -> { txSent++; usbReady = true; state = State.LINK_ACTIVE }
                         NcmSendResult.NotReady -> { txNotReady++; usbReady = false; linkMustPause = true; state = State.LISTENING }
@@ -461,6 +503,7 @@ class LwipPrototype(
             }
         }
 
+        private const val MAX_EGRESS_TIMEOUT_MILLIS = 2_000L
         const val RX_QUEUE_BYTES = 128 * 1024
         const val RX_QUEUE_FRAMES = 128
         const val TX_QUEUE_BYTES = 192 * 1024

@@ -3,7 +3,6 @@ package com.shilapi.xcertplay.orchestration
 import com.shilapi.xcertplay.transport.IphoneUsbEnumeration
 
 internal enum class WiredSessionStopReason { ACTIVE_RECONNECT, STARTUP_FAILURE, DETACHED, ERROR }
-internal enum class WiredTransitionResult { REQUESTED, REJECTED, DETACHED, ATTACHED, UNCHANGED_TIMEOUT }
 
 /** Process-local session evidence. A USB node alone never identifies an enumeration. */
 internal object WiredSessionMemory {
@@ -13,8 +12,6 @@ internal object WiredSessionMemory {
         val activeAtNanos: Long? = null,
         val stoppedAtNanos: Long? = null,
         val stopReason: WiredSessionStopReason? = null,
-        val transitionResult: WiredTransitionResult? = null,
-        val transitionAtNanos: Long? = null,
         val transitionsRequested: Int = 0,
         val directFailureAtNanos: Long? = null,
         val recoveryClaimed: Boolean = false,
@@ -47,11 +44,10 @@ internal object WiredSessionMemory {
         records[enumeration] = old.copy(stoppedAtNanos = nowNanos, stopReason = reason)
     }
 
-    @Synchronized fun transition(enumeration: IphoneUsbEnumeration, result: WiredTransitionResult, nowNanos: Long) {
+    @Synchronized fun transitionRequested(enumeration: IphoneUsbEnumeration) {
         if (enumeration.token in revokedTokens) return
         val old = records[enumeration] ?: Record(enumeration)
-        records[enumeration] = old.copy(transitionResult = result, transitionAtNanos = nowNanos,
-            transitionsRequested = old.transitionsRequested + if (result == WiredTransitionResult.REQUESTED) 1 else 0)
+        records[enumeration] = old.copy(transitionsRequested = old.transitionsRequested + 1)
     }
 
     @Synchronized fun directFailed(enumeration: IphoneUsbEnumeration, nowNanos: Long) {
