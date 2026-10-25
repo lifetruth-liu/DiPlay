@@ -5,6 +5,7 @@
 
 # Gradle and local tooling
 .gradle/
+/.gradle-user/
 .kotlin/
 .android-sdk/
 build/
@@ -17,6 +18,9 @@ captures/
 
 # Local agent working notes
 /agent_docs/
+
+# Local raw device capture (reports and sample summaries remain tracked)
+/docs/lwIP/reconnect-latency-2026-10-24-live/
 
 # OS files
 .DS_Store
