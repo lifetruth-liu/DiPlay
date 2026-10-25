@@ -17,26 +17,26 @@ class AirPlayEventCloseRaceTest {
         AirPlayIdentity(ByteArray(32), ByteArray(32), "test"), PairingStore(), null,
         object : AirPlaySessionListener {}, object : AirPlayMediaHandler {},
     )
-    @Test fun eventAcceptedAfterGracefulCloseCannotEnableResetOrPublish() {
+    @Test fun eventAcceptedAfterCloseCannotEnableResetOrPublish() {
         val session = session()
         val server = Listener()
         val accepted = Stream()
-        session.closeGracefully()
+        session.close()
         assertFalse(session.publishEventSocket(server, accepted))
         assertTrue(accepted.events.isEmpty())
     }
-    @Test fun publishedEventSocketChangesToOrdinaryCloseBeforeItCloses() {
+    @Test fun publishedEventSocketClosesWithSession() {
         val session = session()
         val server = Listener()
         val accepted = Stream()
         AirPlaySession::class.java.getDeclaredField("eventServer").apply { isAccessible = true }.set(session, server)
         assertTrue(session.publishEventSocket(server, accepted))
-        session.closeGracefully()
-        assertEquals(listOf("reset=true", "reset=false", "close"), accepted.events)
+        session.close()
+        assertEquals(listOf("reset=true", "close"), accepted.events)
     }
-    @Test fun tunnelAcceptedAfterGracefulCloseCannotEnableResetOrPublish() {
+    @Test fun tunnelAcceptedAfterCloseCannotEnableResetOrPublish() {
         val accepted = Stream()
-        val tunnel = IapTunnel(ByteArray(32), gracefulClose = { true })
+        val tunnel = IapTunnel(ByteArray(32))
         tunnel.close()
         assertFalse(tunnel.publishSocket(accepted))
         assertTrue(accepted.events.isEmpty())

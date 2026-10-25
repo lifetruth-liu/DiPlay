@@ -1,5 +1,7 @@
 # USB 恢复 D/E 真机与自动化记录（2026-10-25）
 
+代码清理状态：GRACEFUL 关闭候选、短 Start 静默窗口和对应启动入口已按用户要求删除，保留原有关闭流程和固定 2000ms 静默窗口。以下为清理前 APK 的历史实验记录。
+
 ## 构建与范围
 
 基于 `f014530d`，分支 `codex/wired-close-and-start-stages`。设备为 MI 5s Plus、Android 8/API26、arm64，iPhone 保持 USB 连接；使用 Wi-Fi ADB 覆盖安装并保留应用数据。实际后端为 USERSPACE/lwIP。APK SHA-256：`d8b96045cb91b888e0dd5b68b12f73f2bb2a5c1103b2df7204a2d294160e5e02`。

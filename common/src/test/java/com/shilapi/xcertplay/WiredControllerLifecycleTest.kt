@@ -201,13 +201,6 @@ class WiredControllerLifecycleTest {
         assertTrue(logs.any { it.contains("transition unanswered after 10000ms") })
     }
 
-    @Test fun releaseBuildIgnoresExperimentalRecoveryPolicy() {
-        context.applicationInfo.flags = context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE.inv()
-        val controller = controller(experiment = WiredRecoveryExperiment.COMPATIBILITY)
-        val strategy = ReflectionHelpers.callInstanceMethod<Enum<*>>(controller, "getWiredRecoveryStrategy")
-        assertEquals("DEFAULT", strategy.name)
-    }
-
     @Test fun lateAcceptedTcpFromOldAttachmentCannotAdvanceReplacementAttempt() {
         val old = attach()
         val controller = preparing(old)
@@ -251,27 +244,6 @@ class WiredControllerLifecycleTest {
     private fun reportNetworkStage(controller: CarPlayController, attempt: Any, link: Boolean, tcp: Boolean) {
         CarPlayController::class.java.declaredMethods.single { it.name == "reportWiredNetworkStage" }
             .apply { isAccessible = true }.invoke(controller, attempt, link, tcp)
-    }
-
-    @Test fun releaseBuildIgnoresInjectedStartQuietWindow() {
-        context.applicationInfo.flags = context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE.inv()
-        val controller = controller(quiet = com.shilapi.xcertplay.orchestration.WiredStartQuietPolicy.HALF_SECOND)
-        assertEquals(com.shilapi.xcertplay.orchestration.WiredStartQuietPolicy.DEFAULT,
-            ReflectionHelpers.callInstanceMethod<com.shilapi.xcertplay.orchestration.WiredStartQuietPolicy>(controller, "getWiredStartQuiet"))
-    }
-
-    @Test fun debugBuildAcceptsInjectedStartQuietWindow() {
-        context.applicationInfo.flags = context.applicationInfo.flags or android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE
-        val controller = controller(quiet = com.shilapi.xcertplay.orchestration.WiredStartQuietPolicy.HALF_SECOND)
-        assertEquals(com.shilapi.xcertplay.orchestration.WiredStartQuietPolicy.HALF_SECOND,
-            ReflectionHelpers.callInstanceMethod<com.shilapi.xcertplay.orchestration.WiredStartQuietPolicy>(controller, "getWiredStartQuiet"))
-    }
-
-    @Test fun debugBuildCanInjectExperimentalRecoveryPolicy() {
-        context.applicationInfo.flags = context.applicationInfo.flags or android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE
-        val controller = controller(experiment = WiredRecoveryExperiment.COMPATIBILITY)
-        val strategy = ReflectionHelpers.callInstanceMethod<Enum<*>>(controller, "getWiredRecoveryStrategy")
-        assertEquals("COMPATIBILITY", strategy.name)
     }
 
     @Test fun failedResourceCloseDoesNotReleaseTheRecoveryBarrier() {
@@ -366,55 +338,6 @@ class WiredControllerLifecycleTest {
         assertTrue(statuses.filterIsInstance<CarPlayStatus.Failed>().any { !it.retryAllowed })
     }
 
-    @Test fun gracefulCandidateClosesSessionsBeforeControlAndNetwork() {
-        context.applicationInfo.flags = context.applicationInfo.flags or android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE
-        val phone = attach()
-        val controller = controller(closeExperiment = WiredCloseExperiment.GRACEFUL)
-        controller.start()
-        phase(controller, "IPHONE")
-        ReflectionHelpers.callInstanceMethod<Unit>(controller, "requestIphonePermission", ClassParameter.from(UsbDevice::class.java, phone))
-        shadowOf(Looper.getMainLooper()).idle()
-        phase(controller, "CONTROL")
-        val service = mock(com.shilapi.xcertplay.network.CarPlaySessionService::class.java)
-        val retained = mock(com.shilapi.xcertplay.network.AirPlaySessionHost.RetainedNetwork::class.java) { call ->
-            if (call.method.name == "awaitLocalEgress") com.shilapi.xcertplay.network.backend.LocalEgressResult.LOCAL_EGRESS_DRAINED
-            else org.mockito.Answers.RETURNS_DEFAULTS.answer(call)
-        }
-        val control = mock(com.shilapi.xcertplay.iap2.session.Iap2Session::class.java)
-        val owner = ReflectionHelpers.getField<com.shilapi.xcertplay.network.CarPlaySessionService.WiredOwner>(controller, "wiredOwner")
-        `when`(service.quiesceWired(owner)).thenReturn(retained)
-        ReflectionHelpers.setField(controller, "sessionService", service)
-        ReflectionHelpers.setField(controller, "csm", control)
-        ReflectionHelpers.setField(controller, "wiredSessionActive", true)
-        ReflectionHelpers.setField(controller, "effectiveWiredBackend", com.shilapi.xcertplay.network.backend.WiredBackend.USERSPACE)
-        controller.close()
-        assertTrue(controller.awaitClosed(2000))
-        val order = inOrder(service, retained, control)
-        order.verify(service).quiesceWired(owner)
-        order.verify(retained).closeSessionsGracefully()
-        order.verify(control).close()
-        order.verify(retained).close()
-        assertTrue(logs.any { it.contains("result=LOCAL_EGRESS_DRAINED") })
-    }
-
-    @Test fun aFailedSessionDoesNotUseGracefulCandidate() {
-        context.applicationInfo.flags = context.applicationInfo.flags or android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE
-        val phone = attach()
-        val controller = controller(closeExperiment = WiredCloseExperiment.GRACEFUL)
-        controller.start()
-        phase(controller, "IPHONE")
-        ReflectionHelpers.callInstanceMethod<Unit>(controller, "requestIphonePermission", ClassParameter.from(UsbDevice::class.java, phone))
-        shadowOf(Looper.getMainLooper()).idle()
-        val service = mock(com.shilapi.xcertplay.network.CarPlaySessionService::class.java)
-        ReflectionHelpers.setField(controller, "sessionService", service)
-        ReflectionHelpers.setField(controller, "wiredSessionActive", true)
-        ReflectionHelpers.setField(controller, "effectiveWiredBackend", com.shilapi.xcertplay.network.backend.WiredBackend.USERSPACE)
-        fail(controller)
-        controller.close()
-        assertTrue(controller.awaitClosed(2000))
-        assertTrue(mockingDetails(service).invocations.none { it.method.name == "quiesceWired" })
-    }
-
     private fun fail(controller: CarPlayController) {
         CarPlayController::class.java.getDeclaredMethod("failAttempt", Throwable::class.java,
             Int::class.javaObjectType, Boolean::class.javaPrimitiveType).apply { isAccessible = true }
@@ -454,10 +377,9 @@ class WiredControllerLifecycleTest {
         return controller
     }
 
-    private fun controller(host: IphoneUsbHost? = null, experiment: WiredRecoveryExperiment = WiredRecoveryExperiment.DEFAULT,
-        quiet: com.shilapi.xcertplay.orchestration.WiredStartQuietPolicy = com.shilapi.xcertplay.orchestration.WiredStartQuietPolicy.DEFAULT, closeExperiment: WiredCloseExperiment = WiredCloseExperiment.LEGACY): CarPlayController {
+    private fun controller(host: IphoneUsbHost? = null): CarPlayController {
         val controller = CarPlayController(context,
-            CarPlayRuntimeConfig(mfiTarget = MfiTarget.LOCAL, wiredRecoveryExperiment = experiment, wiredStartQuiet = quiet, wiredCloseExperiment = closeExperiment,
+            CarPlayRuntimeConfig(mfiTarget = MfiTarget.LOCAL,
                 identification = Iap2IdentificationConfig("test", "test", "test", "test", "1", "1", 3)),
             AirPlayConfig("test", "test", "", "1", AirPlayDisplayConfig(800, 480)),
             AirPlayIdentity(ByteArray(32), ByteArray(32), "test"), PairingStore(),

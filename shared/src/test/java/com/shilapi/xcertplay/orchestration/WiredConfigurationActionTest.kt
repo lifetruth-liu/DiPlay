@@ -8,8 +8,8 @@ import org.junit.Test
 class WiredConfigurationActionTest {
     private val phone = IphoneUsbEnumeration(1, "same-node", 0x05ac, 1)
     @Before fun reset() = WiredSessionMemory.clear()
-    private fun context(strategy: WiredRecoveryExperiment = WiredRecoveryExperiment.DEFAULT) =
-        RecoveryContext(phone, WiredSessionMemory.snapshot(phone), strategy)
+    private fun context() =
+        RecoveryContext(phone, WiredSessionMemory.snapshot(phone))
     private fun choose(found: Boolean, mode: Boolean, tried: Int = 0) =
         WiredRecoveryPolicy.decide(found, mode, tried, 2, context()).action
     private fun previousActive() {
@@ -43,7 +43,7 @@ class WiredConfigurationActionTest {
         }
     }
 
-    @Test fun stopReasonsAndOldTokensCannotTriggerTheCompatibilityWorkaround() {
+    @Test fun stopReasonsAndOldTokensDoNotRequestExtraTransitions() {
         for (reason in WiredSessionStopReason.entries.filter { it != WiredSessionStopReason.ACTIVE_RECONNECT }) {
             WiredSessionMemory.active(phone, 1)
             WiredSessionMemory.stopped(phone, reason, 2)
@@ -76,31 +76,17 @@ class WiredConfigurationActionTest {
         assertEquals(WiredConfigurationAction.REJECT, choose(false, false))
     }
 
-    @Test fun compatibilityOverrideOnlyChangesReleasedPreviousActiveReconnect() {
-        assertEquals(WiredConfigurationAction.USE,
-            WiredRecoveryPolicy.decide(true, true, 0, 2, context(WiredRecoveryExperiment.COMPATIBILITY)).action)
-        previousActive()
-        assertEquals(WiredConfigurationAction.REJECT,
-            WiredRecoveryPolicy.decide(true, true, 0, 2, context(WiredRecoveryExperiment.COMPATIBILITY)).action)
-        WiredSessionMemory.released(phone, 30)
-        assertEquals(WiredConfigurationAction.REQUEST_TRANSITION,
-            WiredRecoveryPolicy.decide(true, true, 0, 2, context(WiredRecoveryExperiment.COMPATIBILITY)).action)
-        WiredSessionMemory.transitionRequested(phone)
-        assertEquals(WiredConfigurationAction.USE,
-            WiredRecoveryPolicy.decide(true, true, 0, 2, context(WiredRecoveryExperiment.COMPATIBILITY)).action)
-    }
-
-    @Test fun aReleasedDirectFailureCanRequestOneRecoveryEvenUnderDirectStrategy() {
+    @Test fun aReleasedDirectFailureCanRequestOneRecovery() {
         WiredSessionMemory.started(phone, 1)
         WiredSessionMemory.stopped(phone, WiredSessionStopReason.STARTUP_FAILURE, 2)
         WiredSessionMemory.released(phone, 2)
         WiredSessionMemory.directFailed(phone, 3)
         assertTrue(WiredSessionMemory.claimRecovery(phone))
         assertEquals(WiredConfigurationAction.REQUEST_TRANSITION,
-            WiredRecoveryPolicy.decide(true, true, 0, 2, context(WiredRecoveryExperiment.DEFAULT)).action)
+            WiredRecoveryPolicy.decide(true, true, 0, 2, context()).action)
         WiredSessionMemory.transitionRequested(phone)
         assertEquals(WiredConfigurationAction.USE,
-            WiredRecoveryPolicy.decide(true, true, 0, 2, context(WiredRecoveryExperiment.DEFAULT)).action)
+            WiredRecoveryPolicy.decide(true, true, 0, 2, context()).action)
     }
 
     @Test fun failedRecoveryEndsTheCycleAcrossControllerGenerationsUntilActiveOrNewEnumeration() {

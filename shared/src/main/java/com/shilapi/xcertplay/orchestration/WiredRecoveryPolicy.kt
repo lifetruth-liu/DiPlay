@@ -5,7 +5,6 @@ import com.shilapi.xcertplay.transport.IphoneUsbEnumeration
 internal data class RecoveryContext(
     val enumeration: IphoneUsbEnumeration,
     val record: WiredSessionMemory.Record? = null,
-    val strategy: WiredRecoveryExperiment = WiredRecoveryExperiment.DEFAULT,
 ) {
     // Even an accidentally supplied stale snapshot must not affect this enumeration.
     val currentRecord: WiredSessionMemory.Record? get() = record?.takeIf { it.enumeration == enumeration }
@@ -33,9 +32,6 @@ internal object WiredRecoveryPolicy {
                 Decision(WiredConfigurationAction.REQUEST_TRANSITION, "released-direct-startup-failure")
             complete && record?.activeAtNanos != null && record.releasedAtNanos == null ->
                 Decision(WiredConfigurationAction.REJECT, "previous-session-not-released")
-            complete && context.previousActiveReconnect && tried == 0 && canTransition &&
-                context.strategy == WiredRecoveryExperiment.COMPATIBILITY ->
-                Decision(WiredConfigurationAction.REQUEST_TRANSITION, "debug-compatibility-reconnect")
             complete -> Decision(WiredConfigurationAction.USE,
                 if (context.previousActiveReconnect) "previous-active-reuse" else "complete-configuration")
             found && tried > 0 -> Decision(WiredConfigurationAction.USE_WITHOUT_APPLE_ETHERNET, "mode-request-already-tried")

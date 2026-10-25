@@ -8,7 +8,7 @@ internal class LwipSessionNetwork private constructor(
     private val runner: LwipPrototype,
     override val linkId: String,
     private val frameCounters: BackendRuntimeCountersProvider? = null,
-) : SessionNetwork, BackendRuntimeCountersProvider, LocalEgressObserver {
+) : SessionNetwork, BackendRuntimeCountersProvider {
     override val clock: MonotonicClock get() = runner.commandClock
     private val closed = AtomicBoolean()
     private fun validate(endpoint: NetworkEndpoint) {
@@ -24,9 +24,6 @@ internal class LwipSessionNetwork private constructor(
     override fun bindUdp(local: NetworkEndpoint): UdpEndpoint {
         validate(local); return LwipUdpEndpoint.bind(runner, local)
     }
-    override fun awaitLocalEgress(timeoutMillis: Long, cancelled: () -> Boolean): LocalEgressResult =
-        runner.awaitLocalEgress(timeoutMillis, cancelled)
-
     override fun close() {
         closed.set(true)
         // Repeated calls may finish a previous bounded join. Only the owner destroys the core.

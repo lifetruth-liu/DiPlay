@@ -230,20 +230,6 @@ class CarPlayHostActivity : ComponentActivity() {
         availableCurrentMilliAmps = AirPlayPersistence.loadUsbChargingCurrent(this).milliAmps,
         wiredBackendPreference = AirPlayPersistence.loadWiredBackendPreference(this),
         vpnPreflightFailure = vpnPreflightFailure.takeIf { vpnPreflightRestartGeneration == restartGeneration },
-        wiredCloseExperiment = if (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0)
-            intent?.getStringExtra("wiredCloseExperiment")?.let { value ->
-                com.shilapi.xcertplay.orchestration.WiredCloseExperiment.entries.firstOrNull { it.name == value }
-            } ?: com.shilapi.xcertplay.orchestration.WiredCloseExperiment.LEGACY
-        else com.shilapi.xcertplay.orchestration.WiredCloseExperiment.LEGACY,
-        wiredStartQuiet = com.shilapi.xcertplay.orchestration.WiredStartQuietPolicy.resolve(
-            intent?.getLongExtra("wiredStartQuietMillis", 2_000L),
-            applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0,
-        ),
-        wiredRecoveryExperiment = if (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0)
-            intent?.getStringExtra("wiredRecoveryExperiment")?.let { value ->
-                com.shilapi.xcertplay.orchestration.WiredRecoveryExperiment.entries.firstOrNull { it.name == value }
-            } ?: com.shilapi.xcertplay.orchestration.WiredRecoveryExperiment.DEFAULT
-        else com.shilapi.xcertplay.orchestration.WiredRecoveryExperiment.DEFAULT,
     )
 
     private val vpnConsent =

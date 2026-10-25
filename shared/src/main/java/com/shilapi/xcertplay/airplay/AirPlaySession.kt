@@ -156,23 +156,10 @@ class AirPlaySession private constructor(
         }
     }
 
-    @Volatile internal var gracefulClosing: Boolean = false
-        private set
-
-    override fun close() = closeSession(graceful = false)
-
-    /** Debug close candidate: requests ordinary TCP close, without claiming FIN delivery. */
-    internal fun closeGracefully() = closeSession(graceful = true)
-
-    private fun closeSession(graceful: Boolean) {
+    override fun close() {
         synchronized(eventLifecycleLock) {
             if (!closed.compareAndSet(false, true)) return
-            gracefulClosing = graceful
-            if (graceful) {
-                eventSocket?.let { event -> runCatching { event.configure(TcpOptions(resetOnClose = false)) } }
-            }
         }
-        if (graceful) runCatching { socket.configure(TcpOptions(resetOnClose = false)) }
         mainScreenToken = null
         clearClusterContent()
         safeClose(socket)
@@ -991,7 +978,6 @@ class AirPlaySession private constructor(
             videoPlaybackAvailability.setEventReady(false)
             synchronized(eventLifecycleLock) {
                 if (eventSocket === socket) {
-                    if (gracefulClosing) runCatching { socket.configure(TcpOptions(resetOnClose = false)) }
                     eventSocket = null
                     eventCipher = null
                 }

@@ -116,3 +116,11 @@ D 仅对 USERSPACE、有效枚举、已 active 的主动结束启用；其他失
 网络保持到会话关闭/本地发送排空或 750 ms 截止，之后正常销毁；超时不认证资源完全释放。
 本地排空不代表 FIN/ACK 完成，不得依据该日志认定 iPhone 已释放旧会话。正式默认变更须遵守独立 A/B 门槛和设备矩阵。
 详见 [D/E 语义审计](wired-de-execution-plan-2026-10-25.md) 和 [设备记录](reconnect-latency-2026-10-25-de-report.md)。
+
+### NCM 启动独立探测对照（2026-10-25）
+
+历史实验中，debug启动Intent曾接受`lwipStartupPolicy=PROBE`；该开关及探测实现已按用户要求删除。采样结果保留在[对照报告](ncm-startup-probe-report-2026-10-25.md)，不能据此认定当前代码仍提供实验入口。
+
+### 连接实验清理（2026-10-25）
+
+已撤除配置 A/B、原生 OUT 20/100ms、PROBE、GRACEFUL 关闭、短 Start 静默窗口和兼容恢复对照的启动参数及候选分支，保留原有配置选择、Java20 启动写入、默认 lwIP 链路恢复、2000ms Start 静默与资源释放屏障。临时 iPhone syslog 抓取和逐包实验日志一并清理；保留通用诊断和历史报告。此前 D/E 与 PROBE 章节描述的是历史实验，不是现有启动选项。

@@ -13,9 +13,6 @@ enum class CarPlayTransport {
     WIRELESS,
 }
 
-/** Internal debug-build experiments; ignored by non-debuggable applications. Never persisted. */
-enum class WiredRecoveryExperiment { DEFAULT, COMPATIBILITY }
-
 enum class MfiTarget {
     LOCAL,
     USB_CH341,
@@ -78,9 +75,6 @@ class CarPlayRuntimeConfig(
     val wiredBackendPreference: WiredBackendPreference = WiredBackendPreference.AUTO,
     /** This startup only: a platform VPN preparation/launch failure, never user refusal. */
     val vpnPreflightFailure: WiredBackendFailure? = null,
-    val wiredCloseExperiment: WiredCloseExperiment = WiredCloseExperiment.LEGACY,
-    val wiredStartQuiet: WiredStartQuietPolicy = WiredStartQuietPolicy.DEFAULT,
-    val wiredRecoveryExperiment: WiredRecoveryExperiment = WiredRecoveryExperiment.DEFAULT,
 ) {
     init {
         require(iphoneDevices.all { it.vendorId == APPLE_VENDOR_ID }) {

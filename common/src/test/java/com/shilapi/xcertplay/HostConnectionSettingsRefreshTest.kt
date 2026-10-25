@@ -48,31 +48,22 @@ class HostConnectionSettingsRefreshTest {
         assertEquals(149, config.wifiP2pPreferredChannel)
     }
 
-    @Test fun releaseLaunchCannotEnableInternalWiredExperiments() {
-        val oldFlags = app.applicationInfo.flags
-        try {
-            app.applicationInfo.flags = oldFlags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE.inv()
-            val host = Robolectric.buildActivity(CarPlayHostActivity::class.java,
-                android.content.Intent().putExtra("wiredStartQuietMillis", 500L)
-                    .putExtra("wiredCloseExperiment", "GRACEFUL")).get()
-            val config = runtimeConfig(host)
-            assertEquals(com.shilapi.xcertplay.orchestration.WiredStartQuietPolicy.DEFAULT, config.wiredStartQuiet)
-            assertEquals(com.shilapi.xcertplay.orchestration.WiredCloseExperiment.LEGACY, config.wiredCloseExperiment)
-        } finally { app.applicationInfo.flags = oldFlags }
-    }
-
-    @Test fun debugLaunchAcceptsOnlySupportedQuietCandidates() {
+    @Test fun obsoleteExperimentExtrasDoNotAffectConnectionSettings() {
         val oldFlags = app.applicationInfo.flags
         try {
             app.applicationInfo.flags = oldFlags or android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE
-            for (millis in listOf(500L, 1_000L, 2_000L, 750L)) {
-                val host = Robolectric.buildActivity(CarPlayHostActivity::class.java,
-                    android.content.Intent().putExtra("wiredStartQuietMillis", millis)
-                        .putExtra("wiredCloseExperiment", "GRACEFUL")).get()
-                val config = runtimeConfig(host)
-                assertEquals(if (millis == 750L) 2_000L else millis, config.wiredStartQuiet.millis)
-                assertEquals(com.shilapi.xcertplay.orchestration.WiredCloseExperiment.GRACEFUL, config.wiredCloseExperiment)
-            }
+            AirPlayPersistence.saveWirelessHotspotMode(app, WirelessHotspotMode.MANUAL)
+            AirPlayPersistence.saveManualHotspotSsid(app, "Driver hotspot")
+            val host = Robolectric.buildActivity(CarPlayHostActivity::class.java,
+                android.content.Intent().putExtra("wiredStartQuietMillis", 500L)
+                    .putExtra("wiredCloseExperiment", "GRACEFUL")
+                    .putExtra("lwipStartupPolicy", "PROBE")
+                    .putExtra("ncmOutExperiment", "NATIVE_100")
+                    .putExtra("usbConfigurationExperiment", "REPEAT")
+                    .putExtra("wiredRecoveryExperiment", "COMPATIBILITY")).setup().get()
+            val config = runtimeConfig(host)
+            assertEquals(WirelessHotspotMode.MANUAL, config.wirelessHotspotMode)
+            assertEquals("Driver hotspot", config.manualHotspotSsid)
         } finally { app.applicationInfo.flags = oldFlags }
     }
 

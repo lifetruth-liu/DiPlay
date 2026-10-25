@@ -13,7 +13,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
-import android.content.pm.ApplicationInfo
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.os.Build
@@ -250,9 +249,6 @@ class CarPlayController(
     @Volatile private var pendingWiredUsb: Iap2UsbSession? = null
     @Volatile private var locallyOwnedNcm: NcmUsbBridge? = null
     @Volatile private var teardownResourceFailed = false
-    private val wiredRecoveryStrategy: WiredRecoveryExperiment
-        get() = if (appContext.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0)
-            config.wiredRecoveryExperiment else WiredRecoveryExperiment.DEFAULT
     private val executor: ExecutorService = Executors.newSingleThreadExecutor()
     private val touchExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val tunnelExecutor: ExecutorService = Executors.newSingleThreadExecutor()
@@ -328,9 +324,6 @@ class CarPlayController(
     @Volatile private var wiredStartSentAtNanos: Long? = null
     @Volatile private var wiredTcpAttempt: WiredAttempt? = null
     private var wiredEstablishingAttempt: WiredAttempt? = null
-    private val wiredStartQuiet: WiredStartQuietPolicy
-        get() = WiredStartQuietPolicy.resolve(config.wiredStartQuiet.millis,
-            appContext.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0)
     @Volatile private var wirelessPublishedAddress: InetAddress? = null
     @Volatile private var wirelessAlternateAddress: InetAddress? = null
     @Volatile private var wirelessAddressRecovery: HotspotAddressRecovery? = null
@@ -789,15 +782,8 @@ class CarPlayController(
 
     override fun close() {
         val endingEnumeration = wiredEnumeration
-        var drainWiredSession = false
         synchronized(wirelessResourceLock) {
             if (closed) return
-            // Failures and physical detach never wait for the experimental close candidate.
-            drainWiredSession = config.transport == CarPlayTransport.WIRED &&
-                config.wiredCloseExperiment == WiredCloseExperiment.GRACEFUL &&
-                appContext.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0 &&
-                effectiveWiredBackend == WiredBackend.USERSPACE && wiredSessionActive && wiredStopReason == null &&
-                endingEnumeration != null && iphoneLifecycle.isCurrent(endingEnumeration)
             closed = true
             wiredGeneration.incrementAndGet()
             wiredAttempt = null
@@ -839,28 +825,10 @@ class CarPlayController(
         val service = vpnService
         val ordinaryService = sessionService
         unbindVpn()
-        if (!drainWiredSession) unbindSessionService()
+        unbindSessionService()
         Thread(
             {
-                var retainedNetwork: com.shilapi.xcertplay.network.AirPlaySessionHost.RetainedNetwork? = null
                 try {
-                    if (drainWiredSession && endingEnumeration != null && iphoneLifecycle.isCurrent(endingEnumeration)) {
-                        retainedNetwork = ordinaryService?.quiesceWired(wiredOwner)
-                        val retained = retainedNetwork
-                        if (retained != null) {
-                            val result = WiredCloseDrain.await(
-                                closeSessions = retained::closeSessionsGracefully,
-                                awaitEgress = retained::awaitLocalEgress,
-                                cancelled = { !iphoneLifecycle.isCurrent(endingEnumeration) },
-                            )
-                            if (result == com.shilapi.xcertplay.network.backend.LocalEgressResult.DEADLINE ||
-                                result == com.shilapi.xcertplay.network.backend.LocalEgressResult.CANCELLED) {
-                                // A timed-out callback may still be returning; do not certify full release.
-                                teardownResourceFailed = true
-                            }
-                            connectionDiagnostic("USB close candidate result=$result localEgressOnly=true")
-                        } else connectionDiagnostic("USB close candidate result=NO_CURRENT_LEASE")
-                    }
                     if (config.transport == CarPlayTransport.WIRELESS) {
                         closeBestEffort("wireless stack") { closeWirelessStack(ordinaryService) }
                         closeBestEffort("Wi-Fi scan pause") { wifiScanPause?.close() }
@@ -875,8 +843,6 @@ class CarPlayController(
                     pendingWiredUsb = null
                     closeBestEffort("untransferred NCM") { locallyOwnedNcm?.close() }
                     locallyOwnedNcm = null
-                    closeBestEffort("retained AirPlay network") { retainedNetwork?.close() }
-                    retainedNetwork = null
                     if (config.transport == CarPlayTransport.WIRED) {
                         closeBestEffort("VPN/NCM") { service?.detach(vpnOwner) }
                         closeBestEffort("userspace NCM") { ordinaryService?.detachWired(wiredOwner) }
@@ -887,8 +853,6 @@ class CarPlayController(
                     wirelessAirPlayEndpoint = null
                     closeBestEffort("location provider") { locationProvider?.close() }
                 } finally {
-                    closeBestEffort("retained AirPlay abort") { retainedNetwork?.close() }
-                    if (drainWiredSession) unbindSessionService()
                     executor.shutdownNow()
                     var executorTerminated = false
                     try {
@@ -2311,7 +2275,7 @@ class CarPlayController(
                             }
                             wiredRecoveryAttempt = true
                         }
-                        val context = RecoveryContext(enumeration, WiredSessionMemory.snapshot(enumeration), wiredRecoveryStrategy)
+                        val context = RecoveryContext(enumeration, WiredSessionMemory.snapshot(enumeration))
                         val decision = WiredRecoveryPolicy.decide(
                             configuration != null, carPlayMode, reenumerationAttempts,
                             MAXIMUM_REENUMERATION_ATTEMPTS, context,
@@ -2540,38 +2504,6 @@ class CarPlayController(
             )
             onStatus(CarPlayStatus.ConnectingControl)
             val carKitClient = LockdownCarKitClient(mux)
-            // Temporary lab capture, limited to accessory/authentication messages and two minutes.
-            try {
-                val relay = carKitClient.openService(pairRecord, config.label, "com.apple.syslog_relay")
-                Thread({
-                    try {
-                        relay.use {
-                            val deadline = System.nanoTime() + 120_000_000_000L
-                            val pending = StringBuilder()
-                            val relevant = Regex(" (accessoryd|ACCCarPlayService|iap2d|CarPlay)([\\[(])", RegexOption.IGNORE_CASE)
-                            while (!closed && System.nanoTime() < deadline) {
-                                val bytes = relay.recv(8192, 1000) ?: continue
-                                if (bytes.isEmpty()) break
-                                pending.append(bytes.toString(Charsets.UTF_8).replace('\u0000', '\n'))
-                                while (true) {
-                                    val end = pending.indexOf("\n")
-                                    if (end < 0) break
-                                    val line = pending.substring(0, end)
-                                    pending.delete(0, end + 1)
-                                    if (relevant.containsMatchIn(line)) debugLog("PHONE ${line.take(2000)}")
-                                }
-                                if (pending.length > 65536) pending.clear()
-                            }
-                        }
-                        debugLog("phone authentication diagnostic capture ended")
-                    } catch (error: Exception) {
-                        debugLog("phone authentication diagnostic capture ended: ${error.javaClass.simpleName}")
-                    }
-                }, "carplay-lab-phone-diagnostics").apply { isDaemon = true; start() }
-                debugLog("phone authentication diagnostic capture started")
-            } catch (error: Exception) {
-                debugLog("phone authentication diagnostics unavailable: ${error.message}")
-            }
             val carkit = try {
                 carKitClient.open(pairRecord, config.label)
             } catch (error: Throwable) {
@@ -2584,26 +2516,13 @@ class CarPlayController(
                 carKitClient.open(pairRecord, config.label)
             }
             debugLog("wired com.apple.carkit.service stream opened")
-            // Lab transport diagnostics: packet headers only, never certificate or challenge data.
-            fun wireSummary(bytes: ByteArray): String {
-                if (bytes.size < 9 || bytes[0].toInt() and 0xff != 0xff ||
-                    bytes[1].toInt() and 0xff != 0x5a) return "bytes=${bytes.size}"
-                fun value(index: Int) = bytes[index].toInt() and 0xff
-                return "bytes=${bytes.size} length=${(value(2) shl 8) or value(3)} " +
-                    "flags=${value(4)} seq=${value(5)} ack=${value(6)} session=${value(7)}"
-            }
-            val tracedCarkit = object : com.shilapi.xcertplay.transport.BlockingDuplexByteStream {
+            val diagnosedCarkit = object : com.shilapi.xcertplay.transport.BlockingDuplexByteStream {
                 private val io = ConnectionIoDiagnostics(::connectionDiagnostic)
                 override fun send(data: ByteArray) {
                     val started = System.nanoTime()
                     var result = ConnectionIoDiagnostics.Result.FAILED
                     try {
-                        debugLog("wired link TX begin ${wireSummary(data)}")
-                        // Bound each TLS write while diagnosing the stalled certificate transfer.
-                        for (offset in data.indices step 256) {
-                            carkit.send(data.copyOfRange(offset, minOf(offset + 256, data.size)))
-                        }
-                        debugLog("wired link TX completed bytes=${data.size}")
+                        carkit.send(data)
                         result = ConnectionIoDiagnostics.Result.COMPLETED
                     } finally {
                         io.record(ConnectionIoDiagnostics.Operation.WRITE, result, elapsedMillis(started))
@@ -2619,7 +2538,6 @@ class CarPlayController(
                                 bytes.isEmpty() -> ConnectionIoDiagnostics.Result.ENDED
                                 else -> ConnectionIoDiagnostics.Result.COMPLETED
                             }
-                            if (bytes != null) debugLog("wired link RX ${wireSummary(bytes)}")
                         }
                     } finally {
                         io.record(ConnectionIoDiagnostics.Operation.READ, result, elapsedMillis(started))
@@ -2630,7 +2548,7 @@ class CarPlayController(
                 }
             }
             val csm = Iap2Session.open(
-                tracedCarkit,
+                diagnosedCarkit,
                 traceContext = "wired",
                 onTrace = ::debugLog,
                 onArtwork = ::onArtworkTransfer,
@@ -2816,7 +2734,6 @@ class CarPlayController(
                         startSentAtNanos = wiredStartSentAtNanos ?: System.nanoTime(),
                         linkOpenedAtNanos = opened,
                         sessionActive = wiredSessionActive,
-                        quiet = wiredStartQuiet,
                         connectionAttemptSinceLinkOpened = wiredTcpAttempt == attempt ||
                             (opened != null && ncm.connectionAttemptSince(endpoint.airPlayPort, opened)),
                     )

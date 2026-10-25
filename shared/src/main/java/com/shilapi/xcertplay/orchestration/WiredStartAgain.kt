@@ -22,12 +22,11 @@ internal object WiredStartAgain {
         linkOpenedAtNanos: Long?,
         sessionActive: Boolean,
         connectionAttemptSinceLinkOpened: Boolean,
-        quiet: WiredStartQuietPolicy = WiredStartQuietPolicy.DEFAULT,
     ): StartAgain = when {
         sessionActive || connectionAttemptSinceLinkOpened -> StartAgain.DONE
         linkOpenedAtNanos == null -> StartAgain.WAIT
         linkOpenedAtNanos - startSentAtNanos < 0 -> StartAgain.DONE
-        nowNanos - linkOpenedAtNanos < quiet.millis * NANOS_PER_MILLI -> StartAgain.WAIT
+        nowNanos - linkOpenedAtNanos < QUIET_MILLIS * NANOS_PER_MILLI -> StartAgain.WAIT
         else -> StartAgain.SEND
     }
 

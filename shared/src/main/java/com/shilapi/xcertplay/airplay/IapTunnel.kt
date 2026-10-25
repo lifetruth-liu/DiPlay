@@ -21,7 +21,6 @@ class IapTunnel(
     private val readKey: ByteArray,
     bindAddress: InetAddress = InetAddress.getByName("0.0.0.0"),
     network: SessionNetwork? = null,
-    private val gracefulClose: () -> Boolean = { false },
 ) : Closeable {
     interface Listener {
         fun onOpen(remoteAddress: String?) {}
@@ -75,10 +74,7 @@ class IapTunnel(
     override fun close() {
         val oldSocket = synchronized(lifecycleLock) {
             if (!closed.compareAndSet(false, true)) return
-            socket.also { current ->
-                if (gracefulClose() && current != null) {
-                    runCatching { current.configure(TcpOptions(resetOnClose = false)) }
-                }
+            socket.also {
                 socket = null
             }
         }
@@ -102,7 +98,7 @@ class IapTunnel(
         }
     }
 
-    /** No accepted socket may enable reset after close has captured the graceful mode. */
+    /** Serialize accepted socket publication with close. */
     internal fun publishSocket(accepted: TcpStream): Boolean = synchronized(lifecycleLock) {
         if (closed.get()) return@synchronized false
         accepted.configure(TcpOptions(resetOnClose = true))
@@ -162,7 +158,6 @@ class IapTunnel(
         } finally {
             synchronized(lifecycleLock) {
                 if (socket === sock) {
-                    if (closed.get() && gracefulClose()) runCatching { sock.configure(TcpOptions(resetOnClose = false)) }
                     socket = null
                 }
             }
