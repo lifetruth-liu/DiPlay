@@ -115,15 +115,15 @@ class CarHotspotAdbFallbackTest {
         assertEquals(listOf("cmd connectivity help"), commands)
     }
 
-    @Test fun boundedDeadlineAbortsStalledIoWithoutTakingASecondBudget() {
-        val entered = CountDownLatch(1)
+    @Test fun boundedDeadlineAbortsPendingIoWithoutTakingASecondBudget() {
         val release = CountDownLatch(1)
         val aborted = AtomicBoolean(false)
         val started = System.nanoTime()
         assertFalse(CarHotspotAdbFallback.bounded(deadline(50), { false }, { aborted.set(true); release.countDown() }) {
-            entered.countDown(); release.await(2, TimeUnit.SECONDS); false
+            release.await(2, TimeUnit.SECONDS); false
         })
-        assertTrue(entered.await(1, TimeUnit.SECONDS))
+        // Cancellation before the worker is scheduled is also correct. Requiring it to enter
+        // within 50ms makes this deadline test depend on host load instead of bounded().
         assertTrue(aborted.get())
         assertTrue(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started) < 1_000)
     }

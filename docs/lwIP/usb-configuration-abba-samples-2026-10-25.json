@@ -1,0 +1,1015 @@
+{
+  "date": "2026-10-25",
+  "design": "ABBA x3; A=REPEAT, B=SKIP_IF_CURRENT; same native20/LEGACY/default close/2000ms quiet; fresh controller after confirmed teardown",
+  "rows": [
+    {
+      "stage": "seed",
+      "mode": "REPEAT",
+      "out_mode": "NATIVE_20",
+      "attempt": 1,
+      "success": true,
+      "policy_verified": true,
+      "experiment_verified": true,
+      "out_verified": true,
+      "start_ms": 1889,
+      "first_syn_ms": 30930,
+      "ready_ms": 28314,
+      "dad_ms": 30292,
+      "resend_ms": 30841,
+      "tcp_ms": 30970,
+      "active_ms": 32529,
+      "down_ms": [
+        7052
+      ],
+      "up_ms": [
+        20618
+      ],
+      "mode_transition": false,
+      "probe_executed": false,
+      "backend_userspace": true,
+      "teardown_to_launch_ms": null,
+      "errors": [],
+      "native_errno_counts": "110:68,0:1",
+      "sample_id": 1,
+      "start_out_ms": 26425,
+      "out_dad_ms": 1978,
+      "start_syn_ms": 29041,
+      "start_down_ms": [
+        5163
+      ],
+      "start_up_ms": [
+        18729
+      ],
+      "up_out_ms": 7696,
+      "down_up_ms": 13566,
+      "set_results": [
+        false
+      ],
+      "configuration_trace": [
+        "experiment=REPEAT monoNs=54808851050965 request=GET_CONFIGURATION phase=before event=begin",
+        "experiment=REPEAT monoNs=54808855297059 request=GET_CONFIGURATION phase=before event=end value=6 durationUs=4236",
+        "experiment=REPEAT monoNs=54808857917215 decision target=6 before=6 action=SET",
+        "experiment=REPEAT monoNs=54808860809351 request=SET_CONFIGURATION target=6 event=begin",
+        "experiment=REPEAT monoNs=54808863292944 request=SET_CONFIGURATION target=6 event=end ok=false durationUs=2448",
+        "experiment=REPEAT monoNs=54808865676746 request=GET_CONFIGURATION phase=fallback event=begin",
+        "experiment=REPEAT monoNs=54808868744298 request=GET_CONFIGURATION phase=fallback event=end value=6 durationUs=3045",
+        "experiment=REPEAT monoNs=54808871517788 request=GET_CONFIGURATION phase=after event=begin",
+        "experiment=REPEAT monoNs=54808874572788 request=GET_CONFIGURATION phase=after event=end value=6 durationUs=3036",
+        "experiment=REPEAT monoNs=54808877076017 completed target=6 before=6 after=6 skipped=false"
+      ]
+    },
+    {
+      "sample_id": 2,
+      "stage": "seed",
+      "mode": "REPEAT",
+      "out_mode": "NATIVE_20",
+      "attempt": 1,
+      "success": true,
+      "policy_verified": true,
+      "experiment_verified": true,
+      "out_verified": true,
+      "start_ms": 1961,
+      "first_syn_ms": 2083,
+      "ready_ms": 15332,
+      "dad_ms": 17312,
+      "resend_ms": 17511,
+      "tcp_ms": 17599,
+      "active_ms": 18946,
+      "down_ms": [
+        1334
+      ],
+      "up_ms": [
+        8120
+      ],
+      "mode_transition": false,
+      "probe_executed": false,
+      "backend_userspace": true,
+      "teardown_to_launch_ms": null,
+      "previous_teardown_ms": null,
+      "errors": [],
+      "native_errno_counts": "110:35,0:1",
+      "start_out_ms": 13371,
+      "out_dad_ms": 1980,
+      "start_syn_ms": 122,
+      "start_down_ms": [
+        -627
+      ],
+      "start_up_ms": [
+        6159
+      ],
+      "up_out_ms": 7212,
+      "down_up_ms": 6786,
+      "set_results": [
+        false
+      ],
+      "configuration_trace": [
+        "experiment=REPEAT monoNs=55060453946494 request=GET_CONFIGURATION phase=before event=begin",
+        "experiment=REPEAT monoNs=55060458517171 request=GET_CONFIGURATION phase=before event=end value=6 durationUs=4533",
+        "experiment=REPEAT monoNs=55060461788838 decision target=6 before=6 action=SET",
+        "experiment=REPEAT monoNs=55060464397640 request=SET_CONFIGURATION target=6 event=begin",
+        "experiment=REPEAT monoNs=55060468436702 request=SET_CONFIGURATION target=6 event=end ok=false durationUs=4015",
+        "experiment=REPEAT monoNs=55060471543421 request=GET_CONFIGURATION phase=fallback event=begin",
+        "experiment=REPEAT monoNs=55060474559775 request=GET_CONFIGURATION phase=fallback event=end value=6 durationUs=2980",
+        "experiment=REPEAT monoNs=55060476997432 request=GET_CONFIGURATION phase=after event=begin",
+        "experiment=REPEAT monoNs=55060479749202 request=GET_CONFIGURATION phase=after event=end value=6 durationUs=2735",
+        "experiment=REPEAT monoNs=55060482719515 completed target=6 before=6 after=6 skipped=false"
+      ]
+    },
+    {
+      "sample_id": 3,
+      "stage": "formal",
+      "mode": "REPEAT",
+      "out_mode": "NATIVE_20",
+      "attempt": 1,
+      "success": true,
+      "policy_verified": true,
+      "experiment_verified": true,
+      "out_verified": true,
+      "start_ms": 1708,
+      "first_syn_ms": 1837,
+      "ready_ms": 20213,
+      "dad_ms": 22217,
+      "resend_ms": 22303,
+      "tcp_ms": 22459,
+      "active_ms": 23619,
+      "down_ms": [
+        7044
+      ],
+      "up_ms": [
+        13829
+      ],
+      "mode_transition": false,
+      "probe_executed": false,
+      "backend_userspace": true,
+      "teardown_to_launch_ms": 1830,
+      "previous_teardown_ms": 74,
+      "errors": [],
+      "native_errno_counts": "110:46,0:1",
+      "previous_active_to_teardown_begin_ms": 7726,
+      "start_out_ms": 18505,
+      "out_dad_ms": 2004,
+      "start_syn_ms": 129,
+      "start_down_ms": [
+        5336
+      ],
+      "start_up_ms": [
+        12121
+      ],
+      "up_out_ms": 6384,
+      "down_up_ms": 6785,
+      "set_results": [
+        false
+      ],
+      "configuration_trace": [
+        "experiment=REPEAT monoNs=55091981540180 request=GET_CONFIGURATION phase=before event=begin",
+        "experiment=REPEAT monoNs=55091984620545 request=GET_CONFIGURATION phase=before event=end value=6 durationUs=3049",
+        "experiment=REPEAT monoNs=55091987261795 decision target=6 before=6 action=SET",
+        "experiment=REPEAT monoNs=55091990073565 request=SET_CONFIGURATION target=6 event=begin",
+        "experiment=REPEAT monoNs=55091993147368 request=SET_CONFIGURATION target=6 event=end ok=false durationUs=3103",
+        "experiment=REPEAT monoNs=55091995706743 request=GET_CONFIGURATION phase=fallback event=begin",
+        "experiment=REPEAT monoNs=55091998625805 request=GET_CONFIGURATION phase=fallback event=end value=6 durationUs=2893",
+        "experiment=REPEAT monoNs=55092001248565 request=GET_CONFIGURATION phase=after event=begin",
+        "experiment=REPEAT monoNs=55092004099190 request=GET_CONFIGURATION phase=after event=end value=6 durationUs=2830",
+        "experiment=REPEAT monoNs=55092006585024 completed target=6 before=6 after=6 skipped=false"
+      ]
+    },
+    {
+      "sample_id": 4,
+      "stage": "formal",
+      "mode": "SKIP_IF_CURRENT",
+      "out_mode": "NATIVE_20",
+      "attempt": 1,
+      "success": true,
+      "policy_verified": true,
+      "experiment_verified": true,
+      "out_verified": true,
+      "start_ms": 1681,
+      "first_syn_ms": 1798,
+      "ready_ms": 15155,
+      "dad_ms": 17137,
+      "resend_ms": 17454,
+      "tcp_ms": 17892,
+      "active_ms": 19029,
+      "down_ms": [],
+      "up_ms": [
+        7543
+      ],
+      "mode_transition": false,
+      "probe_executed": false,
+      "backend_userspace": true,
+      "teardown_to_launch_ms": 1907,
+      "previous_teardown_ms": 90,
+      "errors": [],
+      "native_errno_counts": "110:35,0:1",
+      "previous_active_to_teardown_begin_ms": 7372,
+      "start_out_ms": 13474,
+      "out_dad_ms": 1982,
+      "start_syn_ms": 117,
+      "start_down_ms": [],
+      "start_up_ms": [
+        5862
+      ],
+      "up_out_ms": 7612,
+      "down_up_ms": null,
+      "set_results": [],
+      "configuration_trace": [
+        "experiment=SKIP_IF_CURRENT monoNs=55127962067875 request=GET_CONFIGURATION phase=before event=begin",
+        "experiment=SKIP_IF_CURRENT monoNs=55127966010375 request=GET_CONFIGURATION phase=before event=end value=6 durationUs=3298",
+        "experiment=SKIP_IF_CURRENT monoNs=55127969521416 decision target=6 before=6 action=SKIP",
+        "experiment=SKIP_IF_CURRENT monoNs=55127972094593 request=GET_CONFIGURATION phase=after event=begin",
+        "experiment=SKIP_IF_CURRENT monoNs=55127975268552 request=GET_CONFIGURATION phase=after event=end value=6 durationUs=3115",
+        "experiment=SKIP_IF_CURRENT monoNs=55127979836729 completed target=6 before=6 after=6 skipped=true"
+      ]
+    },
+    {
+      "sample_id": 5,
+      "stage": "formal",
+      "mode": "SKIP_IF_CURRENT",
+      "out_mode": "NATIVE_20",
+      "attempt": 1,
+      "success": true,
+      "policy_verified": true,
+      "experiment_verified": true,
+      "out_verified": true,
+      "start_ms": 1813,
+      "first_syn_ms": 1934,
+      "ready_ms": 20262,
+      "dad_ms": 22242,
+      "resend_ms": 22576,
+      "tcp_ms": 22688,
+      "active_ms": 23846,
+      "down_ms": [
+        4955
+      ],
+      "up_ms": [
+        12762
+      ],
+      "mode_transition": false,
+      "probe_executed": false,
+      "backend_userspace": true,
+      "teardown_to_launch_ms": 1801,
+      "previous_teardown_ms": 86,
+      "errors": [],
+      "native_errno_counts": "110:47,0:1",
+      "previous_active_to_teardown_begin_ms": 7323,
+      "start_out_ms": 18449,
+      "out_dad_ms": 1980,
+      "start_syn_ms": 121,
+      "start_down_ms": [
+        3142
+      ],
+      "start_up_ms": [
+        10949
+      ],
+      "up_out_ms": 7500,
+      "down_up_ms": 7807,
+      "set_results": [],
+      "configuration_trace": [
+        "experiment=SKIP_IF_CURRENT monoNs=55159102287342 request=GET_CONFIGURATION phase=before event=begin",
+        "experiment=SKIP_IF_CURRENT monoNs=55159105780311 request=GET_CONFIGURATION phase=before event=end value=6 durationUs=3461",
+        "experiment=SKIP_IF_CURRENT monoNs=55159108412394 decision target=6 before=6 action=SKIP",
+        "experiment=SKIP_IF_CURRENT monoNs=55159110915102 request=GET_CONFIGURATION phase=after event=begin",
+        "experiment=SKIP_IF_CURRENT monoNs=55159114566040 request=GET_CONFIGURATION phase=after event=end value=6 durationUs=3583",
+        "experiment=SKIP_IF_CURRENT monoNs=55159117400623 completed target=6 before=6 after=6 skipped=true"
+      ]
+    },
+    {
+      "sample_id": 6,
+      "stage": "formal",
+      "mode": "REPEAT",
+      "out_mode": "NATIVE_20",
+      "attempt": 1,
+      "success": true,
+      "policy_verified": true,
+      "experiment_verified": true,
+      "out_verified": true,
+      "start_ms": 1880,
+      "first_syn_ms": 1983,
+      "ready_ms": 19278,
+      "dad_ms": 21272,
+      "resend_ms": 21472,
+      "tcp_ms": 21628,
+      "active_ms": 22820,
+      "down_ms": [
+        4440
+      ],
+      "up_ms": [
+        12249
+      ],
+      "mode_transition": false,
+      "probe_executed": false,
+      "backend_userspace": true,
+      "teardown_to_launch_ms": 1782,
+      "previous_teardown_ms": 142,
+      "errors": [],
+      "native_errno_counts": "110:47,0:1",
+      "previous_active_to_teardown_begin_ms": 7820,
+      "start_out_ms": 17398,
+      "out_dad_ms": 1994,
+      "start_syn_ms": 103,
+      "start_down_ms": [
+        2560
+      ],
+      "start_up_ms": [
+        10369
+      ],
+      "up_out_ms": 7029,
+      "down_up_ms": 7809,
+      "set_results": [
+        false
+      ],
+      "configuration_trace": [
+        "experiment=REPEAT monoNs=55195701556547 request=GET_CONFIGURATION phase=before event=begin",
+        "experiment=REPEAT monoNs=55195704978213 request=GET_CONFIGURATION phase=before event=end value=6 durationUs=3369",
+        "experiment=REPEAT monoNs=55195707974411 decision target=6 before=6 action=SET",
+        "experiment=REPEAT monoNs=55195710599359 request=SET_CONFIGURATION target=6 event=begin",
+        "experiment=REPEAT monoNs=55195713154672 request=SET_CONFIGURATION target=6 event=end ok=false durationUs=2528",
+        "experiment=REPEAT monoNs=55195715834724 request=GET_CONFIGURATION phase=fallback event=begin",
+        "experiment=REPEAT monoNs=55195718852172 request=GET_CONFIGURATION phase=fallback event=end value=6 durationUs=2998",
+        "experiment=REPEAT monoNs=55195721435193 request=GET_CONFIGURATION phase=after event=begin",
+        "experiment=REPEAT monoNs=55195724495297 request=GET_CONFIGURATION phase=after event=end value=6 durationUs=3041",
+        "experiment=REPEAT monoNs=55195726827068 completed target=6 before=6 after=6 skipped=false"
+      ]
+    },
+    {
+      "sample_id": 7,
+      "stage": "formal",
+      "mode": "REPEAT",
+      "out_mode": "NATIVE_20",
+      "attempt": 1,
+      "success": true,
+      "policy_verified": true,
+      "experiment_verified": true,
+      "out_verified": true,
+      "start_ms": 1775,
+      "first_syn_ms": 1908,
+      "ready_ms": 16126,
+      "dad_ms": 18121,
+      "resend_ms": 18586,
+      "tcp_ms": 18760,
+      "active_ms": 19846,
+      "down_ms": [
+        273
+      ],
+      "up_ms": [
+        8082
+      ],
+      "mode_transition": false,
+      "probe_executed": false,
+      "backend_userspace": true,
+      "teardown_to_launch_ms": 1784,
+      "previous_teardown_ms": 97,
+      "errors": [],
+      "native_errno_counts": "110:38,0:1",
+      "previous_active_to_teardown_begin_ms": 8457,
+      "start_out_ms": 14351,
+      "out_dad_ms": 1995,
+      "start_syn_ms": 133,
+      "start_down_ms": [
+        -1502
+      ],
+      "start_up_ms": [
+        6307
+      ],
+      "up_out_ms": 8044,
+      "down_up_ms": 7809,
+      "set_results": [
+        false
+      ],
+      "configuration_trace": [
+        "experiment=REPEAT monoNs=55231882053616 request=GET_CONFIGURATION phase=before event=begin",
+        "experiment=REPEAT monoNs=55231884904814 request=GET_CONFIGURATION phase=before event=end value=6 durationUs=2823",
+        "experiment=REPEAT monoNs=55231887317418 decision target=6 before=6 action=SET",
+        "experiment=REPEAT monoNs=55231889881168 request=SET_CONFIGURATION target=6 event=begin",
+        "experiment=REPEAT monoNs=55231892455908 request=SET_CONFIGURATION target=6 event=end ok=false durationUs=2548",
+        "experiment=REPEAT monoNs=55231894757366 request=GET_CONFIGURATION phase=fallback event=begin",
+        "experiment=REPEAT monoNs=55231900141950 request=GET_CONFIGURATION phase=fallback event=end value=6 durationUs=5354",
+        "experiment=REPEAT monoNs=55231903286585 request=GET_CONFIGURATION phase=after event=begin",
+        "experiment=REPEAT monoNs=55231906797731 request=GET_CONFIGURATION phase=after event=end value=6 durationUs=3486",
+        "experiment=REPEAT monoNs=55231910120595 completed target=6 before=6 after=6 skipped=false"
+      ]
+    },
+    {
+      "sample_id": 8,
+      "stage": "formal",
+      "mode": "SKIP_IF_CURRENT",
+      "out_mode": "NATIVE_20",
+      "attempt": 1,
+      "success": true,
+      "policy_verified": true,
+      "experiment_verified": true,
+      "out_verified": true,
+      "start_ms": 1801,
+      "first_syn_ms": 1920,
+      "ready_ms": 17254,
+      "dad_ms": 19229,
+      "resend_ms": 19289,
+      "tcp_ms": 19369,
+      "active_ms": 20524,
+      "down_ms": [
+        2866
+      ],
+      "up_ms": [
+        10675
+      ],
+      "mode_transition": false,
+      "probe_executed": false,
+      "backend_userspace": true,
+      "teardown_to_launch_ms": 1729,
+      "previous_teardown_ms": 86,
+      "errors": [],
+      "native_errno_counts": "110:41,0:1",
+      "previous_active_to_teardown_begin_ms": 8225,
+      "start_out_ms": 15453,
+      "out_dad_ms": 1975,
+      "start_syn_ms": 119,
+      "start_down_ms": [
+        1065
+      ],
+      "start_up_ms": [
+        8874
+      ],
+      "up_out_ms": 6579,
+      "down_up_ms": 7809,
+      "set_results": [],
+      "configuration_trace": [
+        "experiment=SKIP_IF_CURRENT monoNs=55264738361104 request=GET_CONFIGURATION phase=before event=begin",
+        "experiment=SKIP_IF_CURRENT monoNs=55264741513500 request=GET_CONFIGURATION phase=before event=end value=6 durationUs=3108",
+        "experiment=SKIP_IF_CURRENT monoNs=55264744489177 decision target=6 before=6 action=SKIP",
+        "experiment=SKIP_IF_CURRENT monoNs=55264748805739 request=GET_CONFIGURATION phase=after event=begin",
+        "experiment=SKIP_IF_CURRENT monoNs=55264752709020 request=GET_CONFIGURATION phase=after event=end value=6 durationUs=3886",
+        "experiment=SKIP_IF_CURRENT monoNs=55264755273968 completed target=6 before=6 after=6 skipped=true"
+      ]
+    },
+    {
+      "sample_id": 9,
+      "stage": "formal",
+      "mode": "SKIP_IF_CURRENT",
+      "out_mode": "NATIVE_20",
+      "attempt": 1,
+      "success": true,
+      "policy_verified": true,
+      "experiment_verified": true,
+      "out_verified": true,
+      "start_ms": 1769,
+      "first_syn_ms": 1872,
+      "ready_ms": 20194,
+      "dad_ms": 22193,
+      "resend_ms": 22443,
+      "tcp_ms": 22533,
+      "active_ms": 23657,
+      "down_ms": [
+        6535
+      ],
+      "up_ms": [
+        13832
+      ],
+      "mode_transition": false,
+      "probe_executed": false,
+      "backend_userspace": true,
+      "teardown_to_launch_ms": 1851,
+      "previous_teardown_ms": 140,
+      "errors": [],
+      "native_errno_counts": "110:48,0:1",
+      "previous_active_to_teardown_begin_ms": 8285,
+      "start_out_ms": 18425,
+      "out_dad_ms": 1999,
+      "start_syn_ms": 103,
+      "start_down_ms": [
+        4766
+      ],
+      "start_up_ms": [
+        12063
+      ],
+      "up_out_ms": 6362,
+      "down_up_ms": 7297,
+      "set_results": [],
+      "configuration_trace": [
+        "experiment=SKIP_IF_CURRENT monoNs=55298591767757 request=GET_CONFIGURATION phase=before event=begin",
+        "experiment=SKIP_IF_CURRENT monoNs=55298595231872 request=GET_CONFIGURATION phase=before event=end value=6 durationUs=3429",
+        "experiment=SKIP_IF_CURRENT monoNs=55298599229320 decision target=6 before=6 action=SKIP",
+        "experiment=SKIP_IF_CURRENT monoNs=55298603517132 request=GET_CONFIGURATION phase=after event=begin",
+        "experiment=SKIP_IF_CURRENT monoNs=55298606388695 request=GET_CONFIGURATION phase=after event=end value=6 durationUs=2816",
+        "experiment=SKIP_IF_CURRENT monoNs=55298609554737 completed target=6 before=6 after=6 skipped=true"
+      ]
+    },
+    {
+      "sample_id": 10,
+      "stage": "formal",
+      "mode": "REPEAT",
+      "out_mode": "NATIVE_20",
+      "attempt": 1,
+      "success": true,
+      "policy_verified": true,
+      "experiment_verified": true,
+      "out_verified": true,
+      "start_ms": 1908,
+      "first_syn_ms": 11676,
+      "ready_ms": 9257,
+      "dad_ms": 11251,
+      "resend_ms": 11537,
+      "tcp_ms": 11723,
+      "active_ms": 12982,
+      "down_ms": [],
+      "up_ms": [
+        1304
+      ],
+      "mode_transition": false,
+      "probe_executed": false,
+      "backend_userspace": true,
+      "teardown_to_launch_ms": 1778,
+      "previous_teardown_ms": 85,
+      "errors": [],
+      "native_errno_counts": "110:17,0:1",
+      "previous_active_to_teardown_begin_ms": 6740,
+      "start_out_ms": 7349,
+      "out_dad_ms": 1994,
+      "start_syn_ms": 9768,
+      "start_down_ms": [],
+      "start_up_ms": [
+        -604
+      ],
+      "up_out_ms": 7953,
+      "down_up_ms": null,
+      "set_results": [
+        false
+      ],
+      "configuration_trace": [
+        "experiment=REPEAT monoNs=55333878620192 request=GET_CONFIGURATION phase=before event=begin",
+        "experiment=REPEAT monoNs=55333881863525 request=GET_CONFIGURATION phase=before event=end value=6 durationUs=3202",
+        "experiment=REPEAT monoNs=55333885072848 decision target=6 before=6 action=SET",
+        "experiment=REPEAT monoNs=55333888846598 request=SET_CONFIGURATION target=6 event=begin",
+        "experiment=REPEAT monoNs=55333892846390 request=SET_CONFIGURATION target=6 event=end ok=false durationUs=3959",
+        "experiment=REPEAT monoNs=55333896884515 request=GET_CONFIGURATION phase=fallback event=begin",
+        "experiment=REPEAT monoNs=55333901124984 request=GET_CONFIGURATION phase=fallback event=end value=6 durationUs=4238",
+        "experiment=REPEAT monoNs=55333904157275 request=GET_CONFIGURATION phase=after event=begin",
+        "experiment=REPEAT monoNs=55333907236442 request=GET_CONFIGURATION phase=after event=end value=6 durationUs=3040",
+        "experiment=REPEAT monoNs=55333910066286 completed target=6 before=6 after=6 skipped=false"
+      ]
+    },
+    {
+      "sample_id": 11,
+      "stage": "formal",
+      "mode": "REPEAT",
+      "out_mode": "NATIVE_20",
+      "attempt": 1,
+      "success": true,
+      "policy_verified": true,
+      "experiment_verified": true,
+      "out_verified": true,
+      "start_ms": 2213,
+      "first_syn_ms": 2337,
+      "ready_ms": 21570,
+      "dad_ms": 23563,
+      "resend_ms": 24070,
+      "tcp_ms": 25196,
+      "active_ms": 26364,
+      "down_ms": [
+        6589
+      ],
+      "up_ms": [
+        14399
+      ],
+      "mode_transition": false,
+      "probe_executed": false,
+      "backend_userspace": true,
+      "teardown_to_launch_ms": 1779,
+      "previous_teardown_ms": 85,
+      "errors": [],
+      "native_errno_counts": "110:55,0:1",
+      "previous_active_to_teardown_begin_ms": 8179,
+      "start_out_ms": 19357,
+      "out_dad_ms": 1993,
+      "start_syn_ms": 124,
+      "start_down_ms": [
+        4376
+      ],
+      "start_up_ms": [
+        12186
+      ],
+      "up_out_ms": 7171,
+      "down_up_ms": 7810,
+      "set_results": [
+        false
+      ],
+      "configuration_trace": [
+        "experiment=REPEAT monoNs=55360015416953 request=GET_CONFIGURATION phase=before event=begin",
+        "experiment=REPEAT monoNs=55360024085494 request=GET_CONFIGURATION phase=before event=end value=6 durationUs=8681",
+        "experiment=REPEAT monoNs=55360027353099 decision target=6 before=6 action=SET",
+        "experiment=REPEAT monoNs=55360032038099 request=SET_CONFIGURATION target=6 event=begin",
+        "experiment=REPEAT monoNs=55360035443515 request=SET_CONFIGURATION target=6 event=end ok=false durationUs=3375",
+        "experiment=REPEAT monoNs=55360038363515 request=GET_CONFIGURATION phase=fallback event=begin",
+        "experiment=REPEAT monoNs=55360041939349 request=GET_CONFIGURATION phase=fallback event=end value=6 durationUs=3547",
+        "experiment=REPEAT monoNs=55360045050599 request=GET_CONFIGURATION phase=after event=begin",
+        "experiment=REPEAT monoNs=55360048478203 request=GET_CONFIGURATION phase=after event=end value=6 durationUs=3394",
+        "experiment=REPEAT monoNs=55360052788359 completed target=6 before=6 after=6 skipped=false"
+      ]
+    },
+    {
+      "sample_id": 12,
+      "stage": "formal",
+      "mode": "SKIP_IF_CURRENT",
+      "out_mode": "NATIVE_20",
+      "attempt": 1,
+      "success": true,
+      "policy_verified": true,
+      "experiment_verified": true,
+      "out_verified": true,
+      "start_ms": 1838,
+      "first_syn_ms": 1893,
+      "ready_ms": 21235,
+      "dad_ms": 23237,
+      "resend_ms": 23648,
+      "tcp_ms": 23733,
+      "active_ms": 24844,
+      "down_ms": [
+        7583
+      ],
+      "up_ms": [
+        14879
+      ],
+      "mode_transition": false,
+      "probe_executed": false,
+      "backend_userspace": true,
+      "teardown_to_launch_ms": 1787,
+      "previous_teardown_ms": 74,
+      "errors": [],
+      "native_errno_counts": "110:49,0:1",
+      "previous_active_to_teardown_begin_ms": 6654,
+      "start_out_ms": 19397,
+      "out_dad_ms": 2002,
+      "start_syn_ms": 55,
+      "start_down_ms": [
+        5745
+      ],
+      "start_up_ms": [
+        13041
+      ],
+      "up_out_ms": 6356,
+      "down_up_ms": 7296,
+      "set_results": [],
+      "configuration_trace": [
+        "experiment=SKIP_IF_CURRENT monoNs=55397871879595 request=GET_CONFIGURATION phase=before event=begin",
+        "experiment=SKIP_IF_CURRENT monoNs=55397875126365 request=GET_CONFIGURATION phase=before event=end value=6 durationUs=3200",
+        "experiment=SKIP_IF_CURRENT monoNs=55397878064543 decision target=6 before=6 action=SKIP",
+        "experiment=SKIP_IF_CURRENT monoNs=55397883155220 request=GET_CONFIGURATION phase=after event=begin",
+        "experiment=SKIP_IF_CURRENT monoNs=55397887003865 request=GET_CONFIGURATION phase=after event=end value=6 durationUs=3818",
+        "experiment=SKIP_IF_CURRENT monoNs=55397890567824 completed target=6 before=6 after=6 skipped=true"
+      ]
+    },
+    {
+      "sample_id": 13,
+      "stage": "formal",
+      "mode": "SKIP_IF_CURRENT",
+      "out_mode": "NATIVE_20",
+      "attempt": 1,
+      "success": true,
+      "policy_verified": true,
+      "experiment_verified": true,
+      "out_verified": true,
+      "start_ms": 1829,
+      "first_syn_ms": 1893,
+      "ready_ms": 18227,
+      "dad_ms": 20206,
+      "resend_ms": 20348,
+      "tcp_ms": 20499,
+      "active_ms": 21605,
+      "down_ms": [
+        3396
+      ],
+      "up_ms": [
+        10692
+      ],
+      "mode_transition": false,
+      "probe_executed": false,
+      "backend_userspace": true,
+      "teardown_to_launch_ms": 1695,
+      "previous_teardown_ms": 75,
+      "errors": [],
+      "native_errno_counts": "110:43,0:1",
+      "previous_active_to_teardown_begin_ms": 7300,
+      "start_out_ms": 16398,
+      "out_dad_ms": 1979,
+      "start_syn_ms": 64,
+      "start_down_ms": [
+        1567
+      ],
+      "start_up_ms": [
+        8863
+      ],
+      "up_out_ms": 7535,
+      "down_up_ms": 7296,
+      "set_results": [],
+      "configuration_trace": [
+        "experiment=SKIP_IF_CURRENT monoNs=55434843246456 request=GET_CONFIGURATION phase=before event=begin",
+        "experiment=SKIP_IF_CURRENT monoNs=55434846681716 request=GET_CONFIGURATION phase=before event=end value=6 durationUs=3370",
+        "experiment=SKIP_IF_CURRENT monoNs=55434850421872 decision target=6 before=6 action=SKIP",
+        "experiment=SKIP_IF_CURRENT monoNs=55434852921872 request=GET_CONFIGURATION phase=after event=begin",
+        "experiment=SKIP_IF_CURRENT monoNs=55434856556560 request=GET_CONFIGURATION phase=after event=end value=6 durationUs=3603",
+        "experiment=SKIP_IF_CURRENT monoNs=55434859821924 completed target=6 before=6 after=6 skipped=true"
+      ]
+    },
+    {
+      "sample_id": 14,
+      "stage": "formal",
+      "mode": "REPEAT",
+      "out_mode": "NATIVE_20",
+      "attempt": 1,
+      "success": true,
+      "policy_verified": true,
+      "experiment_verified": true,
+      "out_verified": true,
+      "start_ms": 1977,
+      "first_syn_ms": 2035,
+      "ready_ms": 18379,
+      "dad_ms": 20363,
+      "resend_ms": 20828,
+      "tcp_ms": 21319,
+      "active_ms": 22456,
+      "down_ms": [
+        4519
+      ],
+      "up_ms": [
+        11300
+      ],
+      "mode_transition": false,
+      "probe_executed": false,
+      "backend_userspace": true,
+      "teardown_to_launch_ms": 1825,
+      "previous_teardown_ms": 88,
+      "errors": [],
+      "native_errno_counts": "110:42,0:1",
+      "previous_active_to_teardown_begin_ms": 7025,
+      "start_out_ms": 16402,
+      "out_dad_ms": 1984,
+      "start_syn_ms": 58,
+      "start_down_ms": [
+        2542
+      ],
+      "start_up_ms": [
+        9323
+      ],
+      "up_out_ms": 7079,
+      "down_up_ms": 6781,
+      "set_results": [
+        false
+      ],
+      "configuration_trace": [
+        "experiment=REPEAT monoNs=55469358693630 request=GET_CONFIGURATION phase=before event=begin",
+        "experiment=REPEAT monoNs=55469363624047 request=GET_CONFIGURATION phase=before event=end value=6 durationUs=4819",
+        "experiment=REPEAT monoNs=55469369130349 decision target=6 before=6 action=SET",
+        "experiment=REPEAT monoNs=55469373240036 request=SET_CONFIGURATION target=6 event=begin",
+        "experiment=REPEAT monoNs=55469376494411 request=SET_CONFIGURATION target=6 event=end ok=false durationUs=3224",
+        "experiment=REPEAT monoNs=55469379454619 request=GET_CONFIGURATION phase=fallback event=begin",
+        "experiment=REPEAT monoNs=55469383556442 request=GET_CONFIGURATION phase=fallback event=end value=6 durationUs=4075",
+        "experiment=REPEAT monoNs=55469386739255 request=GET_CONFIGURATION phase=after event=begin",
+        "experiment=REPEAT monoNs=55469390356286 request=GET_CONFIGURATION phase=after event=end value=6 durationUs=3575",
+        "experiment=REPEAT monoNs=55469393817224 completed target=6 before=6 after=6 skipped=false"
+      ]
+    },
+    {
+      "sample_id": 15,
+      "stage": "restore",
+      "mode": "DEFAULT",
+      "out_mode": "DEFAULT",
+      "attempt": 1,
+      "success": true,
+      "policy_verified": true,
+      "experiment_verified": true,
+      "out_verified": true,
+      "start_ms": 1961,
+      "first_syn_ms": 2030,
+      "ready_ms": 16334,
+      "dad_ms": 18340,
+      "resend_ms": 18530,
+      "tcp_ms": 18633,
+      "active_ms": 19781,
+      "down_ms": [
+        1366
+      ],
+      "up_ms": [
+        9174
+      ],
+      "mode_transition": false,
+      "probe_executed": false,
+      "backend_userspace": true,
+      "teardown_to_launch_ms": 1760,
+      "previous_teardown_ms": 80,
+      "errors": [],
+      "native_errno_counts": null,
+      "previous_active_to_teardown_begin_ms": 7083,
+      "start_out_ms": 14373,
+      "out_dad_ms": 2006,
+      "start_syn_ms": 69,
+      "start_down_ms": [
+        -595
+      ],
+      "start_up_ms": [
+        7213
+      ],
+      "up_out_ms": 7160,
+      "down_up_ms": 7808,
+      "set_results": [],
+      "configuration_trace": []
+    }
+  ],
+  "groups": {
+    "REPEAT": {
+      "n": 6,
+      "success": 6,
+      "down_count": 5,
+      "up_count": 6,
+      "set_results": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      "start_ms": {
+        "median": 1894.0,
+        "min": 1708,
+        "max": 2213,
+        "n": 6
+      },
+      "start_out_ms": {
+        "median": 16900.0,
+        "min": 7349,
+        "max": 19357,
+        "n": 6
+      },
+      "first_syn_ms": {
+        "median": 2009.0,
+        "min": 1837,
+        "max": 11676,
+        "n": 6
+      },
+      "start_syn_ms": {
+        "median": 126.5,
+        "min": 58,
+        "max": 9768,
+        "n": 6
+      },
+      "ready_ms": {
+        "median": 18828.5,
+        "min": 9257,
+        "max": 21570,
+        "n": 6
+      },
+      "active_ms": {
+        "median": 22638.0,
+        "min": 12982,
+        "max": 26364,
+        "n": 6
+      },
+      "up_out_ms": {
+        "median": 7125.0,
+        "min": 6384,
+        "max": 8044,
+        "n": 6
+      },
+      "down_up_ms": {
+        "median": 7809,
+        "min": 6781,
+        "max": 7810,
+        "n": 5
+      },
+      "out_dad_ms": {
+        "median": 1994.0,
+        "min": 1984,
+        "max": 2004,
+        "n": 6
+      },
+      "start_down_ms": {
+        "median": 2560,
+        "min": -1502,
+        "max": 5336,
+        "n": 5
+      },
+      "start_up_ms": {
+        "median": 9846.0,
+        "min": -604,
+        "max": 12186,
+        "n": 6
+      }
+    },
+    "SKIP_IF_CURRENT": {
+      "n": 6,
+      "success": 6,
+      "down_count": 5,
+      "up_count": 6,
+      "set_results": [],
+      "start_ms": {
+        "median": 1807.0,
+        "min": 1681,
+        "max": 1838,
+        "n": 6
+      },
+      "start_out_ms": {
+        "median": 17411.5,
+        "min": 13474,
+        "max": 19397,
+        "n": 6
+      },
+      "first_syn_ms": {
+        "median": 1893.0,
+        "min": 1798,
+        "max": 1934,
+        "n": 6
+      },
+      "start_syn_ms": {
+        "median": 110.0,
+        "min": 55,
+        "max": 121,
+        "n": 6
+      },
+      "ready_ms": {
+        "median": 19210.5,
+        "min": 15155,
+        "max": 21235,
+        "n": 6
+      },
+      "active_ms": {
+        "median": 22631.0,
+        "min": 19029,
+        "max": 24844,
+        "n": 6
+      },
+      "up_out_ms": {
+        "median": 7039.5,
+        "min": 6356,
+        "max": 7612,
+        "n": 6
+      },
+      "down_up_ms": {
+        "median": 7297,
+        "min": 7296,
+        "max": 7809,
+        "n": 5
+      },
+      "out_dad_ms": {
+        "median": 1981.0,
+        "min": 1975,
+        "max": 2002,
+        "n": 6
+      },
+      "start_down_ms": {
+        "median": 3142,
+        "min": 1065,
+        "max": 5745,
+        "n": 5
+      },
+      "start_up_ms": {
+        "median": 9911.5,
+        "min": 5862,
+        "max": 13041,
+        "n": 6
+      }
+    }
+  },
+  "pairs": [
+    {
+      "a_sample_id": 3,
+      "b_sample_id": 4,
+      "start_out_delta_ms": -5031,
+      "total_delta_ms": -4590
+    },
+    {
+      "a_sample_id": 6,
+      "b_sample_id": 5,
+      "start_out_delta_ms": 1051,
+      "total_delta_ms": 1026
+    },
+    {
+      "a_sample_id": 7,
+      "b_sample_id": 8,
+      "start_out_delta_ms": 1102,
+      "total_delta_ms": 678
+    },
+    {
+      "a_sample_id": 10,
+      "b_sample_id": 9,
+      "start_out_delta_ms": 11076,
+      "total_delta_ms": 10675
+    },
+    {
+      "a_sample_id": 11,
+      "b_sample_id": 12,
+      "start_out_delta_ms": 40,
+      "total_delta_ms": -1520
+    },
+    {
+      "a_sample_id": 14,
+      "b_sample_id": 13,
+      "start_out_delta_ms": -4,
+      "total_delta_ms": -851
+    }
+  ],
+  "apk_sha256": "a59ac5aa356545bd2066bcaf31df51937f9f5a0a0f54bb9e40d21d0ef6a9ba43",
+  "collection_notes": [
+    "Initial seed succeeded; first formal disconnect collection stopped because app file log lacked teardown end. Logcat confirmed actual teardown in153ms with all resources completed. No formal connection was started by failed collector. Collector switched teardown confirmation to filtered logcat, then a second seed preceded all12formal rounds.",
+    "All rounds use fresh process/controller after normal shutdown; sample_id identifies rounds because controller attempt resets to1.",
+    "After active detection collector sleeps3s before UI navigation; observed previous active-to-teardown-begin6.654-8.457s. After logcat confirms teardown and force-stop clears inactive Activity, collector sleeps1s; observed teardown-to-next-launch1.695-1.907s."
+  ]
+}
