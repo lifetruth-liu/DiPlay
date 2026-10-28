@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_wired_backend_title">Kablolu ağ arka ucu (experimental)</string>
+    <string name="settings_wired_backend_mode">Arka uç</string>
+    <string name="settings_wired_backend_description">Otomatik önce VPN bağlantısını, VPN kullanılamıyorsa USB üzerinden lwIP bağlantısını dener. VPN yalnızca Android VPN kullanır. Kullanıcı alanı, VPN izni veya ADB olmadan doğrudan lwIP kullanır. Değişiklikler bir sonraki bağlantıda uygulanır.</string>
+    <string name="settings_wired_backend_auto">Otomatik</string>
+    <string name="settings_wired_backend_vpn">VPN</string>
+    <string name="settings_wired_backend_userspace">Kullanıcı alanı</string>
+    <string name="wired_backend_failure_native_unavailable">Kullanıcı alanı ağ yığını başlatılamadı. VPN seçin veya DiPlay uygulamasını güncelleyin.</string>
+    <string name="wired_backend_failure_vpn_unavailable">Android VPN ağını başlatamadı. VPN iznini kontrol edin veya Kullanıcı alanını seçin.</string>
+    <string name="wired_stage_changing_usb">USB modu değiştiriliyor…</string>
+    <string name="wired_stage_authenticating">iPhone ile kimlik doğrulanıyor…</string>
+    <string name="wired_stage_waiting_network">iPhone USB ağı bekleniyor…</string>
+    <string name="wired_stage_establishing_session">CarPlay oturumu kuruluyor…</string>
+    <string name="wired_stage_trying_userspace">VPN kullanılamıyor. Kullanıcı alanı ağı deneniyor…</string>
+</resources>

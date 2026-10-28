@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_wired_backend_title">유선 네트워크 백엔드 (experimental)</string>
+    <string name="settings_wired_backend_mode">백엔드</string>
+    <string name="settings_wired_backend_description">자동은 먼저 VPN을 시도하고, VPN을 사용할 수 없으면 USB를 통해 lwIP를 시도합니다. VPN은 Android VPN만 사용합니다. 사용자 공간은 VPN 승인이나 ADB 없이 lwIP를 직접 사용합니다. 변경 사항은 다음 연결부터 적용됩니다.</string>
+    <string name="settings_wired_backend_auto">자동</string>
+    <string name="settings_wired_backend_vpn">VPN</string>
+    <string name="settings_wired_backend_userspace">사용자 공간</string>
+    <string name="wired_backend_failure_native_unavailable">사용자 공간 네트워크 스택을 시작하지 못했습니다. VPN을 선택하거나 DiPlay를 업데이트하세요.</string>
+    <string name="wired_backend_failure_vpn_unavailable">Android에서 VPN 네트워크를 시작하지 못했습니다. VPN 승인을 확인하거나 사용자 공간을 선택하세요.</string>
+    <string name="wired_stage_changing_usb">USB 모드 변경 중…</string>
+    <string name="wired_stage_authenticating">iPhone 인증 중…</string>
+    <string name="wired_stage_waiting_network">iPhone USB 네트워크 대기 중…</string>
+    <string name="wired_stage_establishing_session">CarPlay 세션 연결 중…</string>
+    <string name="wired_stage_trying_userspace">VPN을 사용할 수 없습니다. 사용자 공간 네트워크 시도 중…</string>
+</resources>

@@ -49,6 +49,15 @@ internal class EndpointOwner(injected: SessionNetwork?, label: String, address: 
         return own(listener.accept())
     }
 
+    fun acceptFrom(listener: TcpListener, expected: InetAddress, rejected: () -> Unit): TcpStream {
+        while (true) {
+            val stream = accept(listener)
+            if (stream.remoteEndpoint.address.contentEquals(expected.address)) return stream
+            release(stream)
+            rejected()
+        }
+    }
+
     override fun close() {
         val snapshot = synchronized(lock) {
             if (closed) return

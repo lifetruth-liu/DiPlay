@@ -73,7 +73,7 @@ class ProtocolNetworkInjectionTest {
 
     @Test fun closedMediaCannotCreateNewEndpointsOnABorrowedNetwork() {
         val network = VirtualNetwork()
-        val screen = ScreenStream(ByteArray(32), network = network)
+        val screen = ScreenStream(ByteArray(32), java.net.InetAddress.getLoopbackAddress(), network = network)
         screen.close()
         assertThrows(BackendFailure::class.java) { screen.listen(object : ScreenStream.Listener {}) }
         assertTrue(network.tcpPorts.isEmpty())

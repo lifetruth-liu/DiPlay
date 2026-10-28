@@ -75,6 +75,8 @@ class CarPlayRuntimeConfig(
     val wiredBackendPreference: WiredBackendPreference = WiredBackendPreference.AUTO,
     /** This startup only: a platform VPN preparation/launch failure, never user refusal. */
     val vpnPreflightFailure: WiredBackendFailure? = null,
+    /** Interface override for units whose station LAN runs on an interface Android does not report as Wi-Fi, e.g. a USB NIC on eth1. */
+    val existingWifiInterface: String? = null,
 ) {
     init {
         require(iphoneDevices.all { it.vendorId == APPLE_VENDOR_ID }) {

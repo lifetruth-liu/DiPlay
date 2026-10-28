@@ -38,7 +38,7 @@ class NtpClock(
     private var socket: UdpEndpoint? = null
     private var receiver: Thread? = null
     private var sender: Thread? = null
-    private var peer: NetworkEndpoint? = null
+    @Volatile private var peer: NetworkEndpoint? = null
 
     private var clockOffsetNs = wallClockNtpOffsetNs(System.nanoTime())
     private val delays = DoubleArray(DELAY_WINDOW) { Double.POSITIVE_INFINITY }
@@ -143,7 +143,7 @@ class NtpClock(
     private fun handleMessage(message: ByteArray, source: NetworkEndpoint) {
         when (message[1].toInt() and 0xff) {
             PT_REQUEST -> respondToRequest(message, source)
-            PT_RESPONSE -> handleResponse(message)
+            PT_RESPONSE -> if (peer?.address?.let { source.address.contentEquals(it) } == true) handleResponse(message)
         }
     }
 

@@ -36,7 +36,7 @@ class AirPlayEventCloseRaceTest {
     }
     @Test fun tunnelAcceptedAfterCloseCannotEnableResetOrPublish() {
         val accepted = Stream()
-        val tunnel = IapTunnel(ByteArray(32))
+        val tunnel = IapTunnel(ByteArray(32), java.net.InetAddress.getLoopbackAddress())
         tunnel.close()
         assertFalse(tunnel.publishSocket(accepted))
         assertTrue(accepted.events.isEmpty())
